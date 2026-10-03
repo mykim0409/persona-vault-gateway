@@ -86,6 +86,11 @@ CLOUDFLARE_EMBEDDING_INSTRUCTION = (
 )
 CLOUDFLARE_EMBEDDING_TIMEOUT_SECONDS = 60
 CLOUDFLARE_EMBEDDING_MAX_RETRIES = 3
+# Interactive search must answer inside the shared client's 60s window. Per-request socket timeouts
+# (urllib is not a wall-clock deadline): 1 query embedding + exists + count + <=3 bundle queries.
+CLOUDFLARE_QUERY_TIMEOUT_SECONDS = 10
+QDRANT_TIMEOUT_SECONDS = 30
+QDRANT_SEARCH_TIMEOUT_SECONDS = 5
 CLOUDFLARE_RETRYABLE_STATUS = {500, 502, 503, 504}
 EMBEDDING_RETRY_GRACE_SECONDS = 60
 RAG_CHUNK_CHARS = 1800
@@ -147,9 +152,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """`with` commits or rolls back like sqlite3, then also closes the connection."""
+
+    def __exit__(self, *exc_info: Any) -> bool | None:
+        try:
+            return super().__exit__(*exc_info)
+        finally:
+            self.close()
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, factory=_ClosingConnection)
     con.row_factory = sqlite3.Row
     return con
 
@@ -908,10 +923,16 @@ def search_vault(
     }
     reason = ""
     try:
-        exists = qdrant_json(settings, "GET", f"/collections/{settings.qdrant_collection}/exists")["result"]["exists"]
+        exists = qdrant_json(
+            settings, "GET", f"/collections/{settings.qdrant_collection}/exists", timeout=QDRANT_SEARCH_TIMEOUT_SECONDS
+        )["result"]["exists"]
         if exists:
             index["chunks"] = int(qdrant_json(
-                settings, "POST", f"/collections/{settings.qdrant_collection}/points/count", {"exact": True}
+                settings,
+                "POST",
+                f"/collections/{settings.qdrant_collection}/points/count",
+                {"exact": True},
+                timeout=QDRANT_SEARCH_TIMEOUT_SECONDS,
             )["result"]["count"])
         else:
             index["chunks"] = 0
@@ -989,6 +1010,7 @@ def search_vault(
                 "POST",
                 f"/collections/{settings.qdrant_collection}/points/query",
                 request_body,
+                timeout=QDRANT_SEARCH_TIMEOUT_SECONDS,
             )
             points = payload["result"]["points"]
             if not isinstance(points, list):
@@ -1883,7 +1905,14 @@ def qdrant_headers(settings: Settings) -> dict[str, str]:
     return headers
 
 
-def qdrant_json(settings: Settings, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def qdrant_json(
+    settings: Settings,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = QDRANT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(
         f"{settings.qdrant_url}{path}",
@@ -1892,7 +1921,7 @@ def qdrant_json(settings: Settings, method: str, path: str, body: dict[str, Any]
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Qdrant {method} {path} failed: HTTP {exc.code}") from exc
@@ -2224,12 +2253,15 @@ def cloudflare_embeddings(settings: Settings, texts: list[str], *, query: bool) 
         raise ValueError("EMBEDDING_BATCH_SIZE must be greater than zero")
 
     vectors: list[list[float]] = []
+    # Interactive queries get one short attempt: no retry or sleep, so a failure falls back to keyword
+    # search. Document embedding keeps the full indexing retry policy.
+    request_options = {"timeout": CLOUDFLARE_QUERY_TIMEOUT_SECONDS, "max_retries": 0} if query else {}
     for start in range(0, len(texts), settings.embedding_batch_size):
         batch = texts[start : start + settings.embedding_batch_size]
         body: dict[str, Any] = {"queries" if query else "documents": batch}
         if query:
             body["instruction"] = CLOUDFLARE_EMBEDDING_INSTRUCTION
-        vectors.extend(cloudflare_embedding_request(settings, body, len(batch)))
+        vectors.extend(cloudflare_embedding_request(settings, body, len(batch), **request_options))
     return vectors
 
 
@@ -2237,6 +2269,9 @@ def cloudflare_embedding_request(
     settings: Settings,
     body: dict[str, Any],
     expected_count: int,
+    *,
+    timeout: float = CLOUDFLARE_EMBEDDING_TIMEOUT_SECONDS,
+    max_retries: int = CLOUDFLARE_EMBEDDING_MAX_RETRIES,
 ) -> list[list[float]]:
     payload = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
@@ -2253,9 +2288,9 @@ def cloudflare_embedding_request(
     )
 
     response_body = b""
-    for attempt in range(CLOUDFLARE_EMBEDDING_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         try:
-            with urllib.request.urlopen(request, timeout=CLOUDFLARE_EMBEDDING_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 response_body = response.read()
             break
         except urllib.error.HTTPError as exc:
@@ -2277,7 +2312,7 @@ def cloudflare_embedding_request(
                 raise EmbeddingLimitError(
                     f"Cloudflare embedding limit exceeded; blocked until {blocked_until.isoformat()}{detail}"
                 ) from exc
-            if exc.code in CLOUDFLARE_RETRYABLE_STATUS and attempt < CLOUDFLARE_EMBEDDING_MAX_RETRIES:
+            if exc.code in CLOUDFLARE_RETRYABLE_STATUS and attempt < max_retries:
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 try:
                     delay = min(30.0, max(0.0, float(retry_after))) if retry_after else 2**attempt
@@ -2285,13 +2320,13 @@ def cloudflare_embedding_request(
                     delay = 2**attempt
                 time.sleep(delay)
                 continue
-            if exc.code == 429 and 3040 in error_codes and attempt < CLOUDFLARE_EMBEDDING_MAX_RETRIES:
+            if exc.code == 429 and 3040 in error_codes and attempt < max_retries:
                 time.sleep(2**attempt)
                 continue
             detail = cloudflare_error_detail(error_body)
             raise RuntimeError(f"Cloudflare embeddings failed: HTTP {exc.code}{detail}") from exc
         except (OSError, http.client.HTTPException) as exc:
-            if attempt < CLOUDFLARE_EMBEDDING_MAX_RETRIES:
+            if attempt < max_retries:
                 time.sleep(2**attempt)
                 continue
             reason = getattr(exc, "reason", str(exc))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import multiprocessing
@@ -197,6 +198,37 @@ def start_fake_qdrant(collection: str) -> tuple[ThreadingHTTPServer, dict] | Non
     return server, state
 
 
+def run_connect_lifetime_checks() -> None:
+    with TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "nested" / "lifetime.db"
+        with core.connect(db_path) as con:
+            assert con.row_factory is sqlite3.Row
+            con.execute("CREATE TABLE t (v INTEGER)")
+            con.execute("INSERT INTO t VALUES (1)")
+        try:
+            con.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            pass
+        else:
+            raise AssertionError("connection stayed open after successful with block")
+
+        try:
+            with core.connect(db_path) as con:
+                con.execute("INSERT INTO t VALUES (2)")
+                raise ValueError("rollback")
+        except ValueError:
+            pass
+        try:
+            con.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            pass
+        else:
+            raise AssertionError("connection stayed open after failed with block")
+
+        with contextlib.closing(core.connect(db_path)) as check:
+            assert [row["v"] for row in check.execute("SELECT v FROM t")] == [1]
+
+
 def run_fake_qdrant_smoke() -> None:
     collection = "persona_test"
     fake_qdrant = start_fake_qdrant(collection)
@@ -227,9 +259,9 @@ def run_fake_qdrant_smoke() -> None:
                 before_points = json.dumps(state, sort_keys=True)
                 backend = core.qdrant_json
 
-                def read_request(settings: Settings, method: str, path: str, body: dict | None = None) -> dict:
+                def read_request(settings: Settings, method: str, path: str, body: dict | None = None, **kwargs: object) -> dict:
                     assert method == "GET" or path.endswith(("/points/count", "/points/query")), (method, path)
-                    return backend(settings, method, path, body)
+                    return backend(settings, method, path, body, **kwargs)
 
                 with patch.object(core, "index_vault", side_effect=AssertionError("search indexed")), \
                      patch.object(core, "embed_documents", side_effect=AssertionError("search embedded documents")), \
@@ -293,10 +325,10 @@ def run_fake_qdrant_smoke() -> None:
 
             qdrant_json = core.qdrant_json
             for failed_path in ("/exists", "/points/count", "/points/query"):
-                def unavailable(settings: Settings, method: str, path: str, body: dict | None = None) -> dict:
+                def unavailable(settings: Settings, method: str, path: str, body: dict | None = None, **kwargs: object) -> dict:
                     if path.endswith(failed_path):
                         raise RuntimeError("Qdrant unavailable")
-                    return qdrant_json(settings, method, path, body)
+                    return qdrant_json(settings, method, path, body, **kwargs)
 
                 with patch.object(core, "qdrant_json", side_effect=unavailable):
                     assert readonly("qdrant_unavailable")["results"]
@@ -312,10 +344,10 @@ def run_fake_qdrant_smoke() -> None:
 
             good_point = {"score": 1.0, "payload": state["points"][0]["payload"]}
             for bad_point in (None, {"payload": []}, {**good_point, "score": "bad"}, {**good_point, "score": float("nan")}):
-                def malformed(settings: Settings, method: str, path: str, body: dict | None = None) -> dict:
+                def malformed(settings: Settings, method: str, path: str, body: dict | None = None, **kwargs: object) -> dict:
                     if path.endswith("/points/query"):
                         return {"result": {"points": [good_point, bad_point]}}
-                    return qdrant_json(settings, method, path, body)
+                    return qdrant_json(settings, method, path, body, **kwargs)
 
                 with patch.object(core, "qdrant_json", side_effect=malformed):
                     assert readonly("qdrant_unavailable")["results"]
@@ -348,6 +380,7 @@ def run_fake_qdrant_smoke() -> None:
             assert unchanged["results"][0]["match"] == "hybrid"
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def free_port() -> int | None:
@@ -631,6 +664,7 @@ def run_gateway_http_smoke() -> None:
         if gateway_thread:
             gateway_thread.join(timeout=5)
         qdrant_server.shutdown()
+        qdrant_server.server_close()
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -1093,6 +1127,7 @@ def run_search_regression_checks() -> None:
                         raise AssertionError("retry did not report the Qdrant failure")
                 finally:
                     broken_server.shutdown()
+                    broken_server.server_close()
                     core.set_rag_index_meta(settings, {"embedding_blocked_until": ""})
 
             # Long transcripts cannot starve other documents; fewer eligible documents are not padded.
@@ -1145,7 +1180,9 @@ def run_search_regression_checks() -> None:
             assert inside.resolve().is_relative_to((raw / "archive-2027").resolve())
     finally:
         server.shutdown()
+        server.server_close()
         symlink_qdrant[0].shutdown()
+        symlink_qdrant[0].server_close()
 
 
 def main() -> None:
@@ -1154,22 +1191,22 @@ def main() -> None:
         settings = Settings(root / "vault", root / "gateway.db", "test-host", embedding_provider="hash")
         token = generate_token()
         init_db(settings.db_path)
-        with sqlite3.connect(settings.db_path) as con:
+        with contextlib.closing(sqlite3.connect(settings.db_path)) as con:
             assert con.execute("PRAGMA user_version").fetchone()[0] == core.DB_SCHEMA_VERSION
 
         legacy_db = root / "legacy.db"
-        with sqlite3.connect(legacy_db) as con:
+        with contextlib.closing(sqlite3.connect(legacy_db)) as con, con:
             con.executescript(core.SCHEMA)
             con.execute("INSERT INTO rag_index_meta (key, value) VALUES ('legacy', 'kept')")
             assert con.execute("PRAGMA user_version").fetchone()[0] == 0
         init_db(legacy_db)
         init_db(legacy_db)
-        with sqlite3.connect(legacy_db) as con:
+        with contextlib.closing(sqlite3.connect(legacy_db)) as con:
             assert con.execute("PRAGMA user_version").fetchone()[0] == core.DB_SCHEMA_VERSION
             assert con.execute("SELECT value FROM rag_index_meta WHERE key = 'legacy'").fetchone()[0] == "kept"
 
         future_db = root / "future.db"
-        with sqlite3.connect(future_db) as con:
+        with contextlib.closing(sqlite3.connect(future_db)) as con, con:
             con.execute(f"PRAGMA user_version = {core.DB_SCHEMA_VERSION + 1}")
         try:
             init_db(future_db)
@@ -1700,7 +1737,7 @@ conflict-policy-marker
         semantic_query_disabled = False
         original_qdrant_json = core.qdrant_json
 
-        def fake_qdrant_json(settings: Settings, method: str, path: str, body: dict | None = None) -> dict:
+        def fake_qdrant_json(settings: Settings, method: str, path: str, body: dict | None = None, **_kwargs: object) -> dict:
             nonlocal collection_exists, points, semantic_query_disabled
             if path.endswith("/exists"):
                 return {"result": {"exists": collection_exists}}
@@ -2119,8 +2156,47 @@ conflict-policy-marker
                 return successful_embedding_response(request, **kwargs)
 
             core.urllib.request.urlopen = transient_then_success
-            core.embed_query(embedding_settings, "retry")
+            core.embed_documents(embedding_settings, ["retry"])
             assert transient_attempts == 2
+
+            # Interactive query embedding: one short attempt, no retry, no sleep; indexing keeps its policy.
+            sleeps: list[float] = []
+            core.time.sleep = sleeps.append
+            timeouts: list[float] = []
+
+            def unavailable_embedding(request: urllib.request.Request, **kwargs: object) -> object:
+                timeouts.append(kwargs["timeout"])
+                raise core.urllib.error.URLError(TimeoutError("timed out"))
+
+            core.urllib.request.urlopen = unavailable_embedding
+            try:
+                core.embed_query(embedding_settings, "slow")
+            except RuntimeError as exc:
+                assert "Cloudflare embeddings failed" in str(exc)
+            else:
+                raise AssertionError("query embedding timeout was ignored")
+            assert timeouts == [core.CLOUDFLARE_QUERY_TIMEOUT_SECONDS] and sleeps == []
+            timeouts.clear()
+            try:
+                core.embed_documents(embedding_settings, ["slow"])
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("document embedding timeout was ignored")
+            assert timeouts == [core.CLOUDFLARE_EMBEDDING_TIMEOUT_SECONDS] * (core.CLOUDFLARE_EMBEDDING_MAX_RETRIES + 1)
+            assert sleeps == [1, 2, 4]
+
+            sleeps.clear()
+            transient_attempts = 0
+            core.urllib.request.urlopen = transient_then_success
+            try:
+                core.embed_query(embedding_settings, "retry")
+            except RuntimeError as exc:
+                assert "HTTP 503" in str(exc)
+            else:
+                raise AssertionError("query embedding retried a transient failure")
+            assert transient_attempts == 1 and sleeps == []
+            core.time.sleep = lambda _seconds: None
 
             core.urllib.request.urlopen = lambda *_args, **_kwargs: FakeEmbeddingResponse(
                 {"success": True, "result": {"data": [[1.0, 2.0]]}}
@@ -2161,6 +2237,126 @@ conflict-policy-marker
                 raise AssertionError("Cloudflare embedding cooldown was ignored")
             assert core.rag_index_meta(settings).get("embedding_blocked_until")
             core.set_rag_index_meta(settings, {"embedding_blocked_until": "2000-01-01T00:00:00+00:00"})
+
+            # Real search_vault with a cloudflare provider and a fake Qdrant: every interactive call is bounded,
+            # embedding failures fall back to keyword with the same reason, and a rate limit persists its cooldown.
+            with TemporaryDirectory() as latency_tmp:
+                latency_root = Path(latency_tmp)
+                latency_settings = Settings(
+                    latency_root / "vault",
+                    latency_root / "gateway.db",
+                    "latency",
+                    cloudflare_account_id="account-id",
+                    cloudflare_api_token="api-token",
+                )
+                init_db(latency_settings.db_path)
+                (latency_settings.vault_dir / "50_Knowledge").mkdir(parents=True)
+                (latency_settings.vault_dir / "50_Knowledge/latency.md").write_text(
+                    "# Latency\n\nbounded latency marker", encoding="utf-8"
+                )
+                core.set_rag_index_meta(
+                    latency_settings,
+                    {
+                        "schema": core.RAG_INDEX_SCHEMA,
+                        "provider": "cloudflare",
+                        "model": core.CLOUDFLARE_EMBEDDING_MODEL,
+                        "dimension": str(core.CLOUDFLARE_EMBEDDING_DIMENSIONS),
+                        "rebuild_state": "ready",
+                        "chunks": "3",
+                    },
+                )
+                qdrant_calls: list[tuple[str, float]] = []
+                failing_qdrant_path = ""
+
+                def bounded_qdrant(
+                    _settings: Settings, _method: str, path: str, body: dict | None = None, **kwargs: object
+                ) -> dict:
+                    qdrant_calls.append((path.rsplit("/", 1)[-1], kwargs.get("timeout")))
+                    if failing_qdrant_path and path.endswith(failing_qdrant_path):
+                        raise RuntimeError("Qdrant timed out")
+                    if path.endswith("/exists"):
+                        return {"result": {"exists": True}}
+                    if path.endswith("/points/count"):
+                        return {"result": {"count": 3}}
+                    return {"result": {"points": []}}
+
+                def search_latency(bundle: str = "auto") -> dict:
+                    return search_vault(
+                        latency_settings, {"scopes": ["vault-rag"]}, "bounded latency marker", bundle=bundle
+                    )
+
+                original_qdrant = core.qdrant_json
+                core.qdrant_json = bounded_qdrant
+                try:
+                    sleeps.clear()
+                    timeouts.clear()
+                    core.urllib.request.urlopen = unavailable_embedding
+                    core.time.sleep = sleeps.append
+                    unavailable = search_latency()
+                    assert unavailable["index"]["fallback_reason"] == "embedding_unavailable"
+                    assert unavailable["index"]["search_mode"] == "keyword"
+                    assert unavailable["results"][0]["path"] == "50_Knowledge/latency.md"
+                    assert unavailable["results"][0]["match"] == "keyword"
+                    assert timeouts == [core.CLOUDFLARE_QUERY_TIMEOUT_SECONDS] and sleeps == []
+                    assert [name for name, _timeout in qdrant_calls] == ["exists", "count"]
+
+                    timeouts.clear()
+                    qdrant_calls.clear()
+
+                    def rate_limited(request: urllib.request.Request, **kwargs: object) -> object:
+                        timeouts.append(kwargs["timeout"])
+                        raise core.urllib.error.HTTPError(
+                            request.full_url, 429, "limited", {"Retry-After": "120"}, io.BytesIO(b"{}")
+                        )
+
+                    core.urllib.request.urlopen = rate_limited
+                    limited = search_latency()
+                    assert limited["index"]["fallback_reason"] == "embedding_limit"
+                    assert limited["results"][0]["match"] == "keyword"
+                    assert len(timeouts) == 1 and sleeps == []
+                    assert core.rag_index_meta(latency_settings)["embedding_blocked_until"]
+                    core.urllib.request.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("blocked search called Cloudflare")
+                    )
+                    assert search_latency()["index"]["fallback_reason"] == "embedding_limit"
+                    core.set_rag_index_meta(latency_settings, {"embedding_blocked_until": ""})
+
+                    # Healthy embedding: exists, count and every bundle filter query use the short Qdrant timeout.
+                    qdrant_calls.clear()
+                    core.urllib.request.urlopen = successful_embedding_response
+                    core.time.sleep = lambda _seconds: None
+                    search_latency("current")
+                    assert [name for name, _timeout in qdrant_calls] == ["exists", "count", "query", "query", "query"]
+                    assert {timeout for _name, timeout in qdrant_calls} == {core.QDRANT_SEARCH_TIMEOUT_SECONDS}
+                    longest_filters = max(len(core.qdrant_bundle_filters(bundle)) for bundle in core.RAG_BUNDLES)
+                    assert longest_filters == 3
+                    assert (
+                        core.CLOUDFLARE_QUERY_TIMEOUT_SECONDS
+                        + (2 + longest_filters) * core.QDRANT_SEARCH_TIMEOUT_SECONDS
+                    ) < 60
+
+                    # A failing filter query stops the loop instead of stacking more timeouts.
+                    qdrant_calls.clear()
+                    failing_qdrant_path = "/points/query"
+                    fallback = search_latency("current")
+                    assert fallback["index"]["fallback_reason"] == "qdrant_unavailable"
+                    assert [name for name, _timeout in qdrant_calls] == ["exists", "count", "query"]
+                    assert fallback["results"][0]["match"] == "keyword"
+                finally:
+                    core.qdrant_json = original_qdrant
+                    core.time.sleep = lambda _seconds: None
+
+            # qdrant_json keeps the 30s default and honors an explicit short timeout.
+            qdrant_timeouts: list[float] = []
+
+            def capture_qdrant_timeout(_request: urllib.request.Request, **kwargs: object) -> FakeEmbeddingResponse:
+                qdrant_timeouts.append(kwargs["timeout"])
+                return FakeEmbeddingResponse({"result": {}})
+
+            core.urllib.request.urlopen = capture_qdrant_timeout
+            core.qdrant_json(embedding_settings, "GET", "/collections/x/exists")
+            core.qdrant_json(embedding_settings, "GET", "/collections/x/exists", timeout=5)
+            assert qdrant_timeouts == [30, 5]
 
             retry_calls = []
             original_index_vault = core.index_vault
@@ -2261,6 +2457,7 @@ conflict-policy-marker
             else:
                 os.environ["DB_PATH"] = old_db_path
 
+    run_connect_lifetime_checks()
     run_fake_qdrant_smoke()
     run_search_regression_checks()
     run_conversation_merge_checks()

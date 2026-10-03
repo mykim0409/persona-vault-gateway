@@ -130,7 +130,9 @@ class FakeQdrant:
         self.exists = False
         self.points: list[dict[str, Any]] = []
 
-    def __call__(self, settings: Settings, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def __call__(
+        self, settings: Settings, method: str, path: str, body: dict[str, Any] | None = None, **_kwargs: Any
+    ) -> dict[str, Any]:
         if path.endswith("/exists"):
             return {"result": {"exists": self.exists}}
         if method == "DELETE":
