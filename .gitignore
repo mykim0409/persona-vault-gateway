@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+data/
+vault/
+.env
+secrets/
+personal-setup.md
+.DS_Store
+PersonaVault_*Review*.md
+TODO-llm-wiki.md

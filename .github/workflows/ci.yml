@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: persona-vault-gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install uv
+        run: python -m pip install uv==0.12.17
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Check
+        run: |
+          uv run --frozen python tests/test_core.py
+          uv run --frozen python tests/test_admin.py
+          uv run --frozen python tests/test_sync.py
+          uv run --frozen python tests/test_rag_benchmark.py
+          uv run --frozen python tests/test_wiki.py
+          uv run --frozen python tests/test_compaction.py
+          node tests/test_hook.js
+          uv run --frozen python tests/test_capture_integration.py
+          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compose_smoke.py
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Real compose.yml + pinned images, unique pvg-smoke-* project, hash embeddings, synthetic Vault.
+      # No secrets: dummy values only. Exit 2 (no Docker) fails this job; a skip is not a pass.
+      - name: Fresh Compose smoke
+        run: python tests/test_compose_smoke.py
+
+  windows-client:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Windows client and PowerShell launchers
+        run: node tests/test_client_windows.js

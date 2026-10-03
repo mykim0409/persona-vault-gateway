@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="pv-hero-title pv-hero-desc">
+  <title id="pv-hero-title">PersonaVault: agents come and go, your knowledge settles</title>
+  <desc id="pv-hero-desc">Illustrative concept, not a product screen. Agents, devices and tools drop loose grains of raw evidence above a review line. Below it, a cairn of four sediment slabs (decisions, context, preferences and lessons) holds the knowledge you chose to keep, in plain Markdown and Git, and any connected agent can retrieve it.</desc>
+  <defs>
+    <linearGradient id="pv-hero-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1E1E27"/>
+      <stop offset="1" stop-color="#15151B"/>
+    </linearGradient>
+    <radialGradient id="pv-hero-glow" cx="860" cy="400" r="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2B451" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#F2B451" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pv-hero-icon-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A2934"/>
+      <stop offset="1" stop-color="#191920"/>
+    </linearGradient>
+    <clipPath id="pv-hero-i1"><path d="M28 88 C44 81 86 80 98 84 Q106 86 106 95 L105.5 101 Q105 110 96 110 L30 110.5 Q20 110.5 20 101 L20 96 Q20 89.5 28 88 Z"/></clipPath>
+    <clipPath id="pv-hero-i2"><path d="M36 64 C50 59 80 59 87 62 Q95 64 95 71 L94.5 75 Q94 82 86 82 L37 82.5 Q28.5 82.5 28.5 75 L28.5 71 Q28.5 65 36 64 Z"/></clipPath>
+    <clipPath id="pv-hero-i3"><path d="M49 42 C58 38 76 38 80 40 Q87 41.5 87 48 L86.5 52 Q86 58.5 79 58.5 L50 59 Q42.5 59 42.5 52.5 L42.5 48 Q42.5 43 49 42 Z"/></clipPath>
+    <clipPath id="pv-hero-s1"><path d="M723 458 C776 444 934 442 990 452 Q1006 455 1006 472 L1005 486 Q1004 503 986 503 L728 504 Q710 504 710 486 L710 474 Q710 461 723 458 Z"/></clipPath>
+    <clipPath id="pv-hero-s2"><path d="M755 401 C810 391 920 392 970 398 Q984 400 984 414 L983 427 Q982 443 966 443 L758 444 Q742 444 742 429 L742 415 Q742 403 755 401 Z"/></clipPath>
+    <clipPath id="pv-hero-s3"><path d="M786 349 C830 341 910 344 956 348 Q969 349 969 362 L968 375 Q967 390 952 390 L786 391 Q772 391 772 377 L772 362 Q772 351 786 349 Z"/></clipPath>
+    <clipPath id="pv-hero-s4"><path d="M819 302 C845 295 890 296 912 300 Q925 302 925 314 L924 325 Q923 340 909 340 L820 341 Q806 341 806 328 L806 315 Q806 304 819 302 Z"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="600" fill="url(#pv-hero-bg)"/>
+  <rect width="1200" height="600" fill="url(#pv-hero-glow)"/>
+  <!-- ground -->
+  <path d="M0 566 C280 556 500 516 700 506 C860 499 1040 502 1200 494 L1200 600 L0 600 Z" fill="#101016"/>
+  <path d="M600 510 C760 501 1000 503 1200 494" fill="none" stroke="#F6EBD6" stroke-opacity="0.12" stroke-width="1.5"/>
+
+  <!-- ===== Left: identity and copy ===== -->
+  <g transform="translate(80 92) scale(0.5)" aria-hidden="true">
+    <rect x="2" y="2" width="124" height="124" rx="28" fill="url(#pv-hero-icon-bg)"/>
+    <rect x="2.75" y="2.75" width="122.5" height="122.5" rx="27.25" fill="none" stroke="#F6EBD6" stroke-opacity="0.16" stroke-width="1.5"/>
+    <rect x="45" y="17" width="11" height="11" rx="2.6" fill="#F4E7CC" transform="rotate(-14 50.5 22.5)"/>
+    <rect x="67" y="23" width="9" height="9" rx="2.2" fill="#F4E7CC" fill-opacity="0.72" transform="rotate(18 71.5 27.5)"/>
+    <g clip-path="url(#pv-hero-i1)">
+      <rect x="16" y="76" width="96" height="40" fill="#A23E4F"/>
+      <path d="M16 99 C40 95 74 103 110 97 L110 116 L16 116 Z" fill="#842F42"/>
+    </g>
+    <g transform="rotate(-2 62 72)" clip-path="url(#pv-hero-i2)">
+      <rect x="24" y="54" width="76" height="34" fill="#DE7445"/>
+      <path d="M24 74 C44 70 70 78 99 72 L99 88 L24 88 Z" fill="#BC5C36"/>
+    </g>
+    <g transform="rotate(3 64 49)" clip-path="url(#pv-hero-i3)">
+      <rect x="38" y="34" width="54" height="30" fill="#F2B451"/>
+      <path d="M38 51 C52 48 68 55 91 49 L91 64 L38 64 Z" fill="#D6963C"/>
+    </g>
+  </g>
+
+  <g font-family="Avenir Next, Avenir, Helvetica Neue, Helvetica, Arial, sans-serif">
+    <text x="78" y="246" font-size="72" font-weight="700" fill="#F6EBD6" letter-spacing="-1">PersonaVault</text>
+    <text x="80" y="314" font-size="38" font-weight="600" fill="#F2B451">Agents come and go.</text>
+    <text x="80" y="360" font-size="38" font-weight="600" fill="#F6EBD6">Your knowledge settles.</text>
+    <text font-size="19" fill="#ABA6B4">
+      <tspan x="80" y="420">One knowledge base you own, across agents,</tspan>
+      <tspan x="80" y="448">devices and projects. Agents bring evidence;</tspan>
+      <tspan x="80" y="476">you decide what settles, in Markdown and Git.</tspan>
+    </text>
+    <text x="80" y="544" font-size="12.5" font-style="italic" fill="#6F6B7A">Illustrative concept, not a product screen.</text>
+  </g>
+
+  <!-- ===== Right: evidence settling into a cairn of strata ===== -->
+  <g font-family="Avenir Next, Avenir, Helvetica Neue, Helvetica, Arial, sans-serif">
+    <!-- connected surfaces: replaceable -->
+    <text x="880" y="56" font-size="13" font-weight="600" fill="#8E8A99" letter-spacing="2" text-anchor="middle">AGENTS · DEVICES · TOOLS</text>
+    <g fill="none" stroke="#D9CFBF" stroke-width="2">
+      <circle cx="770" cy="92" r="12"/>
+      <rect x="839" y="81" width="22" height="22" rx="4"/>
+      <path d="M920 80 L933 103 L907 103 Z" stroke-linejoin="round"/>
+      <circle cx="990" cy="92" r="12" stroke-dasharray="4 4" stroke-opacity="0.5"/>
+    </g>
+    <text x="1012" y="97" font-size="13" fill="#6F6B7A">next</text>
+
+    <!-- raw evidence drifting down -->
+    <g fill="none" stroke="#8E8A99" stroke-width="1.5" stroke-dasharray="2 5" stroke-linecap="round" stroke-opacity="0.7">
+      <path d="M770 108 L760 168"/>
+      <path d="M850 108 L842 160"/>
+      <path d="M920 108 L932 166"/>
+      <path d="M990 108 L998 186" stroke-opacity="0.4"/>
+    </g>
+    <g fill="#F4E7CC">
+      <rect x="754" y="172" width="13" height="13" rx="3" transform="rotate(-12 760.5 178.5)"/>
+      <rect x="794" y="202" width="10" height="10" rx="2.5" fill-opacity="0.7" transform="rotate(20 799 207)"/>
+      <rect x="836" y="164" width="12" height="12" rx="3" transform="rotate(8 842 170)"/>
+      <rect x="880" y="198" width="11" height="11" rx="2.5" fill-opacity="0.8" transform="rotate(-18 885.5 203.5)"/>
+      <rect x="926" y="170" width="13" height="13" rx="3" transform="rotate(14 932.5 176.5)"/>
+      <rect x="993" y="190" width="10" height="10" rx="2.5" fill-opacity="0.45" transform="rotate(-8 998 195)"/>
+    </g>
+    <text x="1036" y="196" font-size="15" fill="#8E8A99">raw evidence</text>
+
+    <!-- review line -->
+    <path d="M700 246 L1022 246" stroke="#F6EBD6" stroke-opacity="0.6" stroke-width="2" stroke-dasharray="9 7"/>
+    <circle cx="1046" cy="246" r="9" fill="none" stroke="#F6EBD6" stroke-width="1.8"/>
+    <path d="M1041.5 246.5 L1045 250 L1051 242.5" fill="none" stroke="#F6EBD6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1062" y="251.5" font-size="15" font-weight="600" fill="#F6EBD6">you review</text>
+
+    <!-- one grain you approved, about to settle -->
+    <rect x="858" y="264" width="13" height="13" rx="3" fill="#F2B451" transform="rotate(10 864.5 270.5)"/>
+
+    <!-- agents retrieve from the cairn -->
+    <path d="M722 448 C664 412 640 250 700 140 C712 120 728 106 748 98" fill="none" stroke="#B9B3C7" stroke-opacity="0.7" stroke-width="1.8"/>
+    <path d="M736 94 L749 97.5 L741 108" fill="none" stroke="#B9B3C7" stroke-opacity="0.7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="0" y="0" font-size="14" fill="#8E8A99" text-anchor="middle" transform="translate(644 330) rotate(-90)">agents retrieve</text>
+
+    <!-- cairn of sediment stones, newest on top -->
+    <g clip-path="url(#pv-hero-s1)">
+      <rect x="700" y="440" width="320" height="70" fill="#A23E4F"/>
+      <path d="M706 482 C780 474 900 490 1010 478 L1010 510 L706 510 Z" fill="#842F42"/>
+    </g>
+    <g transform="rotate(-1.5 862 418)" clip-path="url(#pv-hero-s2)">
+      <rect x="736" y="386" width="256" height="64" fill="#CF5A41"/>
+      <path d="M738 425 C800 418 900 433 988 421 L988 450 L738 450 Z" fill="#AE4636"/>
+    </g>
+    <g transform="rotate(2 870 368)" clip-path="url(#pv-hero-s3)">
+      <rect x="766" y="336" width="210" height="60" fill="#E5874A"/>
+      <path d="M768 374 C820 367 900 381 972 369 L972 396 L768 396 Z" fill="#C66C38"/>
+    </g>
+    <g transform="rotate(-3 865 320)" clip-path="url(#pv-hero-s4)">
+      <rect x="800" y="290" width="132" height="56" fill="#F2B451"/>
+      <path d="M802 325 C840 319 880 331 928 322 L928 346 L802 346 Z" fill="#D6963C"/>
+    </g>
+
+    <!-- stone labels -->
+    <g stroke="#F6EBD6" stroke-opacity="0.22" stroke-width="1.5">
+      <path d="M938 318 L1044 318"/>
+      <path d="M982 369 L1044 369"/>
+      <path d="M996 419 L1044 419"/>
+      <path d="M1018 478 L1044 478"/>
+    </g>
+    <g font-size="16" font-weight="500">
+      <text x="1054" y="323.5" fill="#F2B451">lessons</text>
+      <text x="1054" y="374.5" fill="#EC9A62">preferences</text>
+      <text x="1054" y="424.5" fill="#E2775E">context</text>
+      <text x="1054" y="483.5" fill="#D07486">decisions</text>
+    </g>
+
+    <text x="861" y="542" font-family="SF Mono, Menlo, Monaco, Consolas, monospace" font-size="14" fill="#B8AE9C" letter-spacing="0.5" text-anchor="middle">plain Markdown + Git</text>
+  </g>
+</svg>

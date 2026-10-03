@@ -1,0 +1,12 @@
+# Allowlist: only what the Dockerfile COPYs (and the build files) enter the context.
+*
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!gateway/
+!gateway/**
+**/__pycache__
+**/*.py[cod]
