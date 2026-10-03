@@ -3,11 +3,12 @@ from __future__ import annotations
 import hmac
 import html
 import logging
+import math
 import os
 import re
 import time
 from hashlib import sha256
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
@@ -60,6 +61,13 @@ embedding_retry_stop = Event()
 embedding_retry_thread: Thread | None = None
 CSRF_FIELD = "csrf_token"
 ADMIN_FORM_MAX_BYTES = 16 * 1024
+ADMIN_LOGIN_MAX_ATTEMPTS = 5
+ADMIN_LOGIN_WINDOW_SECONDS = 5 * 60
+ADMIN_LOGIN_MAX_TRACKED = 1024
+# ponytail: process-local state is enough for the single Gateway process. Counters reset on restart and are
+# not shared between workers or replicas; a database-backed limiter is only needed if that ever changes.
+admin_login_attempts: dict[str, list[float]] = {}
+admin_login_lock = Lock()
 ADMIN_NOTICES = {
     "disabled": "Agent token disabled. Requests using it are now rejected.",
     "logged-out": "You have been logged out.",
@@ -248,6 +256,38 @@ def same_origin_request(request: Request) -> bool:
 def admin_cookie_attributes(request: Request) -> dict[str, Any]:
     # request.url.scheme already honours forwarded headers only when the server trusts the proxy.
     return {"httponly": True, "samesite": "lax", "secure": request.url.scheme == "https"}
+
+
+def admin_login_client(request: Request) -> str:
+    # Only the address the ASGI server resolved: uvicorn rewrites it from X-Forwarded-For solely for trusted
+    # proxies, so a raw header sent by a client never selects (or escapes) its own bucket here.
+    return request.client.host if request.client else "unknown"
+
+
+def admin_login_attempt(client: str, now: float | None = None) -> int:
+    """Count a password attempt; returns 0 if allowed, else the seconds until the client may try again.
+
+    The attempt is counted before the password is compared, so concurrent guesses cannot exceed the limit.
+    A blocked attempt is not counted, which keeps each client's state at ADMIN_LOGIN_MAX_ATTEMPTS timestamps.
+    """
+    now = time.monotonic() if now is None else now
+    with admin_login_lock:
+        recent = [stamp for stamp in admin_login_attempts.get(client, ()) if now - stamp < ADMIN_LOGIN_WINDOW_SECONDS]
+        if len(recent) >= ADMIN_LOGIN_MAX_ATTEMPTS:
+            admin_login_attempts[client] = recent
+            return max(1, math.ceil(recent[0] + ADMIN_LOGIN_WINDOW_SECONDS - now))
+        if client not in admin_login_attempts and len(admin_login_attempts) >= ADMIN_LOGIN_MAX_TRACKED:
+            for key in [key for key, stamps in admin_login_attempts.items() if now - stamps[-1] >= ADMIN_LOGIN_WINDOW_SECONDS]:
+                del admin_login_attempts[key]
+            if len(admin_login_attempts) >= ADMIN_LOGIN_MAX_TRACKED:
+                del admin_login_attempts[min(admin_login_attempts, key=lambda key: admin_login_attempts[key][-1])]
+        admin_login_attempts[client] = [*recent, now]
+        return 0
+
+
+def admin_login_succeeded(client: str) -> None:
+    with admin_login_lock:
+        admin_login_attempts.pop(client, None)
 
 
 SECRET_PATTERNS = (
@@ -470,7 +510,25 @@ def agent_table_html(agents: list[dict[str, Any]], csrf: str = "") -> str:
 <p class="hint">Last token use is when the token last authenticated any Gateway request, including searches and health checks. It does not mean a capture completed or that anything was saved.</p>"""
 
 
-def token_form_html(agents: list[dict[str, Any]], csrf: str = "", notice: str | None = None) -> str:
+def rag_section_html(csrf: str, semantic_enabled: bool) -> str:
+    if not semantic_enabled:
+        return """<section aria-labelledby="rag-heading">
+  <h2 id="rag-heading">RAG index</h2>
+  <p><strong>Semantic search is disabled</strong> (<code>EMBEDDING_PROVIDER=none</code>). Search uses keyword matching over the vault only, and no embedding provider or vector index is contacted. There is nothing to update here, and any existing vector data is left untouched.</p>
+</section>"""
+    return f"""<section aria-labelledby="rag-heading">
+  <h2 id="rag-heading">RAG index</h2>
+  <p>Updates the search index from the vault now and waits for it to finish, so it can take a while. Keep this page open; the result shows the counts from the finished run.</p>
+  <form method="post" action="/admin/rag/rebuild">
+    {hidden_inputs_html(csrf)}
+    <button type="submit">Update RAG index</button>
+  </form>
+</section>"""
+
+
+def token_form_html(
+    agents: list[dict[str, Any]], csrf: str = "", notice: str | None = None, semantic_enabled: bool = True
+) -> str:
     return f"""<h1>Agent tokens</h1>
 <p>Bearer tokens let plugins and agents call this Gateway. Only a token's hash is stored; the raw token is shown once when it is issued.</p>
 {notice_html(notice)}
@@ -494,14 +552,7 @@ def token_form_html(agents: list[dict[str, Any]], csrf: str = "", notice: str | 
 <section aria-labelledby="agents-heading">
 {agent_table_html(agents, csrf)}
 </section>
-<section aria-labelledby="rag-heading">
-  <h2 id="rag-heading">RAG index</h2>
-  <p>Updates the search index from the vault now and waits for it to finish, so it can take a while. Keep this page open; the result shows the counts from the finished run.</p>
-  <form method="post" action="/admin/rag/rebuild">
-    {hidden_inputs_html(csrf)}
-    <button type="submit">Update RAG index</button>
-  </form>
-</section>"""
+{rag_section_html(csrf, semantic_enabled)}"""
 
 
 def token_created_html(token: str, agent_id: str | None = None, rotated: bool = False) -> str:
@@ -578,6 +629,12 @@ def rag_rebuilt_html(result: dict[str, Any]) -> str:
 <dl class="facts">
   {facts}
 </dl>
+<p><a href="/admin/tokens">Back to tokens</a></p>"""
+
+
+def rag_disabled_html() -> str:
+    return """<h1>Semantic search is disabled</h1>
+<p>Nothing was updated. <code>EMBEDDING_PROVIDER=none</code> keeps search keyword-only, so no embedding provider or vector index was contacted. Existing vector data is left untouched.</p>
 <p><a href="/admin/tokens">Back to tokens</a></p>"""
 
 
@@ -659,6 +716,8 @@ def startup() -> None:
     settings.vault_dir.mkdir(parents=True, exist_ok=True)
     init_db(settings.db_path)
     embedding_retry_stop.clear()
+    if settings.embedding_provider == "none":
+        return  # Keyword-only mode has nothing to retry and must not schedule indexing.
     if not embedding_retry_thread or not embedding_retry_thread.is_alive():
         # ponytail: process-local scheduling is enough for the single Gateway replica.
         embedding_retry_thread = Thread(
@@ -728,6 +787,27 @@ async def admin_login(request: Request):
         return html_page("Admin disabled", admin_disabled_html(), 503)
 
     settings = admin_settings()
+    # A cross-site form must neither log in nor burn the real administrator's attempts.
+    if not same_origin_request(request):
+        audit(
+            settings.db_path,
+            action="admin-login",
+            route=request.url.path,
+            status="denied",
+            error_message="cross-origin login rejected",
+            **request_meta(request),
+        )
+        return html_page("Admin login", login_form_html(error="This login request came from another site and was blocked."), 403)
+    client = admin_login_client(request)
+    retry_after = admin_login_attempt(client)
+    if retry_after:
+        response = html_page(
+            "Admin login",
+            login_form_html(error=f"Too many login attempts. Try again in {math.ceil(retry_after / 60)} minute(s)."),
+            429,
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response
     form = await form_values(request)
     if not hmac.compare_digest(secret_bytes(form.get("password", "")), secret_bytes(password)):
         audit(
@@ -741,6 +821,7 @@ async def admin_login(request: Request):
         return html_page("Admin login", login_form_html(error="Incorrect password. Try again."), 401)
 
     audit(settings.db_path, action="admin-login", route=request.url.path, status="ok", **request_meta(request))
+    admin_login_succeeded(client)
     response = RedirectResponse("/admin/tokens", status_code=303)
     response.set_cookie(
         ADMIN_COOKIE,
@@ -768,7 +849,14 @@ def admin_tokens_page(request: Request, notice: str | None = None):
         return RedirectResponse("/admin/login", status_code=303)
     settings = admin_settings()
     return admin_page(
-        request, "Agent tokens", token_form_html(list_agents(settings.db_path), admin_csrf_token(request), notice)
+        request,
+        "Agent tokens",
+        token_form_html(
+            list_agents(settings.db_path),
+            admin_csrf_token(request),
+            notice,
+            semantic_enabled=settings.embedding_provider != "none",
+        ),
     )
 
 
@@ -941,6 +1029,9 @@ async def admin_rag_rebuild(request: Request):
         )
         return admin_page(request, "RAG index update failed", rag_failed_html(message), 503)
 
+    if result.get("semantic") == "disabled":
+        audit(settings.db_path, action="admin-rag-rebuild", route=request.url.path, status="disabled", **request_meta(request))
+        return admin_page(request, "Semantic search is disabled", rag_disabled_html())
     audit(settings.db_path, action="admin-rag-rebuild", route=request.url.path, status="ok", **request_meta(request))
     return admin_page(request, "RAG index updated", rag_rebuilt_html(result))
 

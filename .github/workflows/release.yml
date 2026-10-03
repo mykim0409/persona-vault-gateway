@@ -1,0 +1,203 @@
+name: Release
+
+# Manual only. Builds the multi-arch Gateway image into GHCR from an existing gateway-vX.Y.Z tag and attaches an
+# install bundle + SHA256 checksum to a DRAFT GitHub Release. The operator reviews and publishes the draft.
+# Uses only the built-in GITHUB_TOKEN. The release contract is the image digest, not a mutable tag.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to release, gateway-vX.Y.Z (must match the version in pyproject.toml)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # No side effects: only validation and resolving the tag to a commit.
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+
+    steps:
+      - name: Validate tag format and dispatch ref
+        env:
+          TAG: ${{ inputs.tag }}
+          DISPATCH_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ! [[ "$TAG" =~ ^gateway-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag must look like gateway-vX.Y.Z"
+            exit 1
+          fi
+          if [ "$DISPATCH_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::run this workflow from the default branch ($DEFAULT_BRANCH), not $DISPATCH_REF"
+            exit 1
+          fi
+
+      # Fails if the tag does not exist. Everything after this uses the resolved commit, not the tag name.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Validate tag against package version and existing release
+        id: resolve
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(python3 scripts/build_release_bundle.py --tag "$TAG" --check-only)"
+          # `gh release view <tag>` does not see drafts; list does (given write access, see the bundle job).
+          tags="$(gh release list --limit 1000 --json tagName --jq '.[].tagName')"
+          if printf '%s\n' "$tags" | grep -qxF "$TAG"; then
+            echo "::error::a GitHub Release for $TAG already exists"
+            exit 1
+          fi
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  # The full CI (unit tests, Compose smoke, Windows client) on the release commit. Publication needs it green.
+  ci:
+    needs: validate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.validate.outputs.sha }}
+
+  image:
+    needs: [validate, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Image name
+        id: name
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if docker buildx imagetools inspect "$image:$TAG" >/dev/null 2>&1; then
+            echo "::error::$image:$TAG already exists; release tags are not overwritten"
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.name.outputs.image }}:${{ inputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.validate.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+
+      - name: Verify digest and both platforms
+        id: ref
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest"; exit 1; }
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw \
+            | jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | index("amd64") and index("arm64")' >/dev/null
+          echo "ref=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    needs: [validate, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      IMAGE_REF: ${{ needs.image.outputs.ref }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build install bundle
+        run: python scripts/build_release_bundle.py --tag "$TAG" --image "$IMAGE_REF" --output-dir dist/release
+
+      - name: Verify bundle
+        run: |
+          cd dist/release
+          sha256sum -c "persona-vault-gateway-$VERSION-install.tar.gz.sha256"
+          tar -xzf "persona-vault-gateway-$VERSION-install.tar.gz" -C "$RUNNER_TEMP"
+          compose="$RUNNER_TEMP/persona-vault-gateway-$VERSION/compose.yml"
+          test "$(grep -cF -- "\${PVG_IMAGE:-$IMAGE_REF}" "$compose")" = 2
+          if grep -qF 'persona-vault-gateway:local' "$compose"; then
+            echo "::error::bundle compose.yml still references the local image"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/persona-vault-gateway-$VERSION/.env"
+
+      - name: Create draft release
+        run: |
+          # Last check before the only release mutation; with contents: write this also sees existing drafts.
+          tags="$(gh release list --limit 1000 --json tagName --jq '.[].tagName')"
+          if printf '%s\n' "$tags" | grep -qxF "$TAG"; then
+            echo "::error::a GitHub Release (possibly a draft) for $TAG already exists"
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Draft created by the Release workflow. Review, then publish manually.
+
+          BEFORE PUBLISHING: the GHCR package must be public and an anonymous pull of the digest below must succeed.
+          Test it with an empty temporary Docker config, which leaves your own Docker login untouched:
+          \`cfg="\$(mktemp -d)" && docker --config "\$cfg" pull $IMAGE_REF; rm -rf "\$cfg"\`
+          A public repository does not make the package public automatically; change the package visibility on
+          GitHub (Packages > persona-vault-gateway > Package settings) and retest.
+
+          Gateway image (multi-arch, linux/amd64 + linux/arm64): \`$IMAGE_REF\`
+
+          The bundle's compose.yml defaults PVG_IMAGE to this digest for the gateway and init services.
+          Verify the download with \`sha256sum -c persona-vault-gateway-$VERSION-install.tar.gz.sha256\`.
+          EOF
+          gh release create "$TAG" --draft --verify-tag --title "PersonaVault Gateway $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/release/persona-vault-gateway-$VERSION-install.tar.gz" \
+            "dist/release/persona-vault-gateway-$VERSION-install.tar.gz.sha256"
+          echo "Draft release for \`$TAG\` created. Image: \`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"

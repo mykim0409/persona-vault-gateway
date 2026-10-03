@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 import http.client
 import json
@@ -17,6 +19,7 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
+import urllib.request
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -35,6 +38,7 @@ from gateway.app import (
     sanitize_error,
     valid_admin_cookie,
 )
+import gateway.core as core
 from gateway.core import Settings, generate_token, init_db, list_agents, lookup_agent, upsert_agent
 
 PASSWORD = "pässwörd-비밀번호-\U0001f511"
@@ -273,6 +277,11 @@ class AdminHttpTests(unittest.TestCase):
         AdminHttpTests.index_calls.append(1)
         return AdminHttpTests.index_behavior()
 
+    def setUp(self) -> None:
+        # Every test shares one client address; the limiter is process-local state they must not inherit.
+        with app_module.admin_login_lock:
+            app_module.admin_login_attempts.clear()
+
     def agent(self, agent_id: str) -> dict | None:
         # last_used_at changes on every authenticated probe, so it is not part of the identity.
         found = next((item for item in list_agents(self.db) if item["agent_id"] == agent_id), None)
@@ -320,6 +329,116 @@ class AdminHttpTests(unittest.TestCase):
     def test_oversized_login_form_is_rejected_without_server_error(self) -> None:
         reply = self.client.send("POST", "/admin/login", raw=b"password=" + b"a" * 70_000, headers={"Content-Type": "application/x-www-form-urlencoded"})
         self.assertEqual(reply.status, 413)
+
+    # -- login rate limiting and origin ------------------------------------------------------
+
+    def asgi_login(self, password: str, client: tuple[str, int] | None = ("203.0.113.9", 4000), forwarded: str | None = None):
+        """POST /admin/login straight to the ASGI handler, so request.client is exactly what the server set."""
+        body = urlencode({"password": password}).encode()
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        headers = [(b"host", b"testserver"), (b"content-type", b"application/x-www-form-urlencoded"), (b"content-length", str(len(body)).encode())]
+        if forwarded is not None:
+            headers.append((b"x-forwarded-for", forwarded.encode()))
+        scope = {"type": "http", "method": "POST", "scheme": "http", "path": "/admin/login", "query_string": b"",
+                 "server": ("testserver", 80), "client": client, "headers": headers}
+        return asyncio.run(app_module.admin_login(Request(scope, receive)))
+
+    def test_login_cross_origin_is_rejected_without_counting_or_cookie(self) -> None:
+        for kwargs in ({"origin": "http://evil.example"}, {"origin": "null"}, {"origin": None, "headers": {"Sec-Fetch-Site": "cross-site"}}):
+            with self.subTest(kwargs=kwargs):
+                reply = self.client.send("POST", "/admin/login", form={"password": PASSWORD}, **kwargs)
+                self.assertEqual(reply.status, 403)
+                self.assertEqual(reply.set_cookies(), [])
+                self.assertIn("another site", reply.text)
+                self.assertNotIn(PASSWORD, reply.text)
+        # Rejected requests do not burn the real administrator's attempts.
+        self.assertEqual(app_module.admin_login_attempts, {})
+        for _ in range(app_module.ADMIN_LOGIN_MAX_ATTEMPTS - 1):
+            self.assertEqual(self.client.send("POST", "/admin/login", form={"password": "wrong"}).status, 401)
+        self.assertEqual(self.client.send("POST", "/admin/login", form={"password": PASSWORD}, origin=None).status, 303)
+
+    def test_repeated_failures_return_429_with_retry_after_until_window_expires(self) -> None:
+        for _ in range(app_module.ADMIN_LOGIN_MAX_ATTEMPTS):
+            self.assertEqual(self.client.send("POST", "/admin/login", form={"password": PASSWORD + "x"}).status, 401)
+        for password in (PASSWORD + "x", PASSWORD):
+            blocked = self.client.send("POST", "/admin/login", form={"password": password})
+            self.assertEqual(blocked.status, 429)
+            self.assertEqual(blocked.set_cookies(), [])
+            self.assertTrue(1 <= int(blocked.header("Retry-After")) <= app_module.ADMIN_LOGIN_WINDOW_SECONDS)
+            self.assertIn("Too many login attempts", blocked.text)
+            self.assertNotIn(password, blocked.text)
+        with contextlib.closing(sqlite3.connect(self.db)) as con:
+            messages = [row[0] for row in con.execute("SELECT error_message FROM audit_logs WHERE action = 'admin-login'")]
+        self.assertTrue(all(PASSWORD not in (message or "") for message in messages))
+        # The same window rule through the handler: age the stored attempts instead of waiting.
+        with app_module.admin_login_lock:
+            for stamps in app_module.admin_login_attempts.values():
+                stamps[:] = [stamp - app_module.ADMIN_LOGIN_WINDOW_SECONDS - 1 for stamp in stamps]
+        self.assertEqual(self.client.send("POST", "/admin/login", form={"password": PASSWORD}).status, 303)
+        self.assertEqual(app_module.admin_login_attempts, {})
+
+    def test_successful_login_resets_the_failure_count(self) -> None:
+        limit = app_module.ADMIN_LOGIN_MAX_ATTEMPTS
+        for _ in range(2):
+            for _ in range(limit - 1):
+                self.assertEqual(self.client.send("POST", "/admin/login", form={"password": "wrong"}).status, 401)
+            self.assertEqual(self.client.send("POST", "/admin/login", form={"password": PASSWORD}).status, 303)
+
+    def test_spoofed_forwarded_for_does_not_bypass_or_poison_the_limit(self) -> None:
+        for index in range(app_module.ADMIN_LOGIN_MAX_ATTEMPTS):
+            self.assertEqual(self.asgi_login("wrong", forwarded=f"198.51.100.{index}").status_code, 401)
+        # A fresh spoofed address, even one that looks like another client, stays in the real client's bucket.
+        for forwarded in ("198.51.100.200", "203.0.113.77, 198.51.100.1", "", "not-an-address"):
+            blocked = self.asgi_login(PASSWORD, forwarded=forwarded)
+            self.assertEqual(blocked.status_code, 429, forwarded)
+            self.assertIn("retry-after", blocked.headers)
+        # Spoofing cannot lock out somebody else: a different real client address is unaffected.
+        self.assertEqual(self.asgi_login(PASSWORD, client=("203.0.113.10", 4000), forwarded="203.0.113.9").status_code, 303)
+        self.assertEqual(set(app_module.admin_login_attempts), {"203.0.113.9"})
+        # Over a real socket (this server does not trust proxy headers) the header is equally ignored.
+        app_module.admin_login_attempts.clear()
+        statuses = [
+            self.client.send("POST", "/admin/login", form={"password": "wrong"}, headers={"X-Forwarded-For": f"198.51.100.{i}"}).status
+            for i in range(7)
+        ]
+        self.assertEqual(statuses, [401] * app_module.ADMIN_LOGIN_MAX_ATTEMPTS + [429] * 2)
+        self.assertEqual(self.asgi_login("wrong", client=None).status_code, 401)
+        self.assertIn("unknown", app_module.admin_login_attempts)
+
+    def test_login_window_expiry_and_sliding_boundaries(self) -> None:
+        attempt, window, limit = app_module.admin_login_attempt, app_module.ADMIN_LOGIN_WINDOW_SECONDS, app_module.ADMIN_LOGIN_MAX_ATTEMPTS
+        for index in range(limit):
+            self.assertEqual(attempt("client", float(index)), 0)
+        self.assertEqual(attempt("client", 10.0), window - 10)
+        self.assertEqual(attempt("client", window - 0.5), 1)
+        self.assertEqual(attempt("other", 10.0), 0)
+        self.assertEqual(attempt("client", float(window)), 0)  # the oldest attempt has just expired
+        self.assertEqual(attempt("client", window + 0.5), 1)  # but the next-oldest has not
+        self.assertEqual(attempt("client", 10.0 * window), 0)
+        self.assertEqual(len(app_module.admin_login_attempts["client"]), 1)
+        app_module.admin_login_succeeded("client")
+        self.assertNotIn("client", app_module.admin_login_attempts)
+
+    def test_login_attempt_storage_is_bounded(self) -> None:
+        attempt, tracked = app_module.admin_login_attempt, app_module.ADMIN_LOGIN_MAX_TRACKED
+        window, limit = app_module.ADMIN_LOGIN_WINDOW_SECONDS, app_module.ADMIN_LOGIN_MAX_ATTEMPTS
+        for index in range(3 * tracked):  # a flood of distinct live addresses evicts the least recent
+            attempt(f"client-{index}", 1000.0 + index / 1000)
+        self.assertEqual(len(app_module.admin_login_attempts), tracked)
+        for _ in range(10_000):  # one hammering client never grows past the limit
+            attempt("hammer", 1200.0)
+        self.assertEqual(len(app_module.admin_login_attempts["hammer"]), limit)
+        self.assertEqual(len(app_module.admin_login_attempts), tracked)
+        attempt("fresh", 1000.0 + window + 100)  # when full, expired entries are purged first
+        self.assertEqual(set(app_module.admin_login_attempts), {"hammer", "fresh"})
+
+    def test_concurrent_guesses_cannot_exceed_the_limit(self) -> None:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(lambda _: app_module.admin_login_attempt("racing", 5.0), range(64)))
+        self.assertEqual(results.count(0), app_module.ADMIN_LOGIN_MAX_ATTEMPTS)
 
     def test_malformed_cookies_are_rejected_not_500(self) -> None:
         valid = make_admin_cookie(PASSWORD)
@@ -656,6 +775,58 @@ class AdminHttpTests(unittest.TestCase):
             self.assertIn(f"<dt>{label}</dt><dd>{value}</dd>", reply.text)
         self.assertNotIn("progress", reply.text.lower())
         self.assertIn('<a href="/admin/tokens">Back to tokens</a>', reply.text)
+
+    def test_keyword_only_mode_explains_index_state_and_never_contacts_semantic_services(self) -> None:
+        session = self.client.login()
+        calls: list[str] = []
+
+        def blocked(name: str):
+            def fail(*args: object, **kwargs: object) -> None:
+                calls.append(name)
+                raise AssertionError(f"{name} must not run when EMBEDDING_PROVIDER=none")
+
+            return fail
+
+        poisoned = [
+            patch.object(owner, name, blocked(name))
+            for owner, name in (
+                (core, "qdrant_json"), (core, "cloudflare_embedding_request"), (core, "cloudflare_embeddings"),
+                (core, "embed_documents"), (core, "embed_query"), (urllib.request, "urlopen"),
+            )
+        ]
+        indexed_before = len(self.index_calls)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"EMBEDDING_PROVIDER": "none"}))
+            stack.enter_context(patch.object(app_module, "index_vault", core.index_vault))
+            for item in poisoned:
+                stack.enter_context(item)
+            page = self.client.send("GET", "/admin/tokens", cookie=session.cookie)
+            self.assertEqual(page.status, 200)
+            self.assertIn('<h2 id="rag-heading">RAG index</h2>', page.text)
+            self.assertIn("Semantic search is disabled", page.text)
+            self.assertIn("EMBEDDING_PROVIDER=none", page.text)
+            self.assertNotIn("/admin/rag/rebuild", page.text)
+            self.assertNotIn("Update RAG index", page.text)
+            reply = self.client.post(session, "/admin/rag/rebuild", {})
+            self.assertEqual(reply.status, 200)
+            self.assertIn("<h1>Semantic search is disabled</h1>", reply.text)
+            self.assertIn("Nothing was updated", reply.text)
+            self.assertNotIn("RAG index updated", reply.text)
+            self.assertNotIn("<dt>", reply.text)
+            ready = self.client.send("GET", "/readyz")
+            self.assertEqual(ready.status, 200)
+            self.assertEqual(
+                ready.json(),
+                {"status": "ok", "db": "ok", "qdrant": "disabled", "semantic": "disabled", "rag_indexed": False, "chunks": 0, "provider": "none"},
+            )
+        self.assertEqual(calls, [])
+        self.assertEqual(len(self.index_calls), indexed_before)
+        with contextlib.closing(sqlite3.connect(self.db)) as con:
+            statuses = [row[0] for row in con.execute("SELECT status FROM audit_logs WHERE action = 'admin-rag-rebuild' ORDER BY id DESC LIMIT 1")]
+        self.assertEqual(statuses, ["disabled"])
+        enabled = self.client.send("GET", "/admin/tokens", cookie=session.cookie)
+        self.assertIn('action="/admin/rag/rebuild"', enabled.text)
+        self.assertNotIn("Semantic search is disabled", enabled.text)
 
     def test_rag_rebuild_failure_is_sanitized_with_next_action(self) -> None:
         session = self.client.login()

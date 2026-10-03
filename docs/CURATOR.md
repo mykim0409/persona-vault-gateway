@@ -281,6 +281,7 @@ of the deleted paths are 0 and the paths and answer_state of all search probes. 
 An index that is already current is not reindexed, and a rerun completed with the same input also reuses the stored search results.
 `finish_checkpoint` is stored only inside the plan. On failure, quota, stale/fallback, or change detection, no completion record is written.
 After the quota is restored, retry with the same command; initializing a new DB, changing the model, or recreating the collection is outside the scope of this command.
+With an explicit `EMBEDDING_PROVIDER=none`, the same required search probes instead run against the current Markdown, bound to the plan and the source document hashes; no Qdrant or embedding is used and no index metadata is written. With semantic search enabled, all the index requirements above still apply.
 It must use an index compatible with the existing Gateway DB, and indexing by the CLI and the server rejects duplicate runs with a common lock.
 Do not arbitrarily connect to another Gateway configuration that uses the DB/index or to another Vault checkout.
 
@@ -311,7 +312,7 @@ Every raw/legacy source to retire must satisfy all of the following.
 - A file with even one hold is kept, and its durable meaning is verified in the approved target together with source support.
 - The active Codex and Claude clients support per-date payload checkpoints, and the transmission of the corresponding fragment succeeded. If this cannot be confirmed, keep the file because of the risk of retransmission.
 - The exact deletion path and hash match, there is no live inbound reference, and the active Markdown character count decreases.
-- There is no new integrity error, the critical probes pass, the final Qdrant fingerprint matches the Vault, and the deleted sources are not retrieved.
+- There is no new integrity error, the critical probes pass, the final Qdrant fingerprint matches the Vault (with `EMBEDDING_PROVIDER=none`, the current Markdown and its hashes instead), and the deleted sources are not retrieved.
 
 If the final search cannot be verified because of a Cloudflare quota or Qdrant error, do not complete or commit the destructive work.
 

@@ -46,16 +46,25 @@ Illustrative requests to a connected agent:
 
 ### 1. Run the Gateway once (server)
 
-There is no one-command install. You need Docker Compose, a private Git repository for the Vault
-with an SSH deploy key and a verified `known_hosts`, an admin password, and a Cloudflare account ID
-and Workers AI API token, which the provided compose file (the bundled semantic-enabled deployment)
-requires for embeddings. Follow
-[docs/setup.md](docs/setup.md) to prepare the Vault repository, `.env`, and secrets, then run
-`docker compose up -d --build`, check `/healthz`, log in at `/admin/login`, issue one agent token
-per PC, and run `Update RAG index` once.
+You need Docker Compose and a private GitHub repository for the Vault (with at least one commit).
+The default deployment uses keyword search.
 
-The Gateway binds to `127.0.0.1` by default. For remote access, put your own TLS and access control
-in front of it; this repository does not provide a proxy.
+```bash
+docker compose run --rm persona-vault-init            # prompts for the GitHub SSH Vault URL and an admin password
+# register the printed PUBLIC deploy key on the Vault repository with write access, then:
+docker compose run --rm persona-vault-init --check    # read-only reachability check
+docker compose up -d
+```
+
+The initializer writes `.env`, a deploy key, and a pinned GitHub `known_hosts` into the install
+directory; keep using that directory. Get the files from an install bundle on
+[GitHub Releases](https://github.com/mykim0409/persona-vault-gateway/releases) or from source
+(`docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway` once). Steps,
+admin login, and token issuing: [docs/setup.md](docs/setup.md). Upgrades, backup, semantic search:
+[docs/operations.md](docs/operations.md).
+
+The Gateway binds to `127.0.0.1` by default. Reach it from other PCs only over an encrypted private
+path or a TLS endpoint that you operate; plain public HTTP exposes agent tokens and the admin password.
 
 ### 2. Install the plugin (each PC)
 
@@ -114,15 +123,18 @@ implements each today.
 | Semantic search (optional) | Qdrant, with embeddings from the Cloudflare Workers AI REST API |
 | Curator (optional) | `pvg-wiki`, an experimental local CLI |
 
-The provided Compose file is the bundled semantic-enabled deployment: it requires Cloudflare
-credentials, starts Qdrant, and checks it for readiness. The Gateway itself already falls back to
-keyword-only search when Cloudflare credentials are absent or the semantic index is unavailable,
-but the provided Compose still rejects empty credentials and depends on Qdrant, so a dedicated
-installation without embeddings or Qdrant is not provided yet.
+The provided Compose file defaults to keyword-only search (`EMBEDDING_PROVIDER=none`): no embedding
+provider or Qdrant is contacted. Semantic search is an explicit option that needs all of
+`EMBEDDING_PROVIDER=cloudflare`, `COMPOSE_PROFILES=semantic` (starts Qdrant), and the Cloudflare
+credentials. The direct Python runtime still defaults to `cloudflare` when `EMBEDDING_PROVIDER` is
+unset, for older integrations; set it explicitly (for example `none` for CLI `compact-finish` against
+a keyword-only Gateway).
 
 Cloudflare Workers AI is the only production embedding path today. It is called directly over REST,
 so there is no separate Cloudflare Worker to develop or deploy. Other providers are not implemented
-yet, and the hash embedding in the code exists for tests only.
+yet, and the hash embedding in the code exists for tests only. Existing installs that relied on the
+old `cloudflare` default must enable the semantic profile before upgrading; see
+[docs/operations.md](docs/operations.md).
 
 ## Data and control
 
@@ -146,10 +158,14 @@ yet, and the hash embedding in the code exists for tests only.
 - **A read token reads the whole Vault.** That means every Markdown file except `.git/`,
   `.obsidian/`, and `.tmp/`, including `90_Private/`. Writes are limited to
   `30_Conversations/raw/`.
-- **With semantic search on, text leaves your server.** In the bundled deployment, indexed chunks
+- **With semantic search on, text leaves your server.** Only if you enable it, indexed chunks
   (including `90_Private/`) and search queries are sent to Cloudflare Workers AI for embedding. See
   the [Cloudflare data policy](https://developers.cloudflare.com/workers-ai/platform/data-usage/).
-- **The admin UI has no login rate limit.** Keep it private behind TLS and access control.
+- **The admin login limiter is not network security.** It allows 5 attempts per 5 minutes per client
+  address and then returns `429` with `Retry-After`. It is process-local and bounded, resets on
+  restart, and is not shared across processes. Forwarded headers are honored only from exactly
+  trusted proxies (never a wildcard); CSRF protection is unchanged. Keep the admin UI private behind
+  an encrypted path or TLS and access control.
 - **Curation needs a person.** Every plan is approved by a human, and raw deletion is not guaranteed
   to be atomic. See the [Curator protocol](docs/CURATOR.md).
 
@@ -159,7 +175,8 @@ This beta has not completed a security audit. See [SECURITY.md](SECURITY.md).
 
 | Guide | Covers |
 | --- | --- |
-| [docs/setup.md](docs/setup.md) | Install, operate, plugins, token helper (written in Korean) |
+| [docs/setup.md](docs/setup.md) | First install, plugins, token helper (written in Korean) |
+| [docs/operations.md](docs/operations.md) | Vault layout, semantic search, remote access, upgrade, backup (Korean) |
 | [Windows guide](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows command syntax |
 | [docs/gpt-actions.md](docs/gpt-actions.md) | Custom GPT Actions as an alternative to the plugin |
 | [docs/metadata.md](docs/metadata.md) | Markdown metadata contract |
