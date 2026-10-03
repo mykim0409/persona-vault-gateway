@@ -1,79 +1,58 @@
 # PersonaVault Gateway 설치
 
-서버에 Gateway를 설치하고, 각 PC에 plugin을 연결합니다. 기본은 keyword 검색입니다.
-Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업, 문제 해결은 [operations.md](operations.md)에 있습니다.
+Gateway를 서버에 올리고 브라우저(`/setup`)에서 설정한 뒤, 각 PC에 plugin을 연결합니다. 기본은 keyword 검색입니다.
+Docker, Railway, Render 모두 같은 image와 같은 설정 화면을 씁니다. 플랫폼은 [hosting.md](hosting.md), Vault 구조·semantic 검색·
+원격 접근·업그레이드·백업·문제 해결은 [operations.md](operations.md)를 보세요.
 
 필요한 것: 서버의 Docker Compose v2, 각 PC의 Node.js, GitHub 계정.
 Linux에서 권한이 필요하면 `docker` 앞에 `sudo`를 붙입니다.
 
 ## 0. Vault 저장소
 
-기존 Vault 저장소(commit이 있는 private GitHub 저장소)가 있으면 그대로 씁니다. 새로 만든다면 **private**
-저장소를 만들고 commit을 하나 만듭니다(예: README 추가).
+**private** GitHub 저장소를 준비하고 commit을 하나 이상 만들어 둡니다(예: README 추가). 빈 저장소는 연결할 수 없습니다.
 
-## 1. 설치 파일 준비
+## 1. Gateway 시작
 
-설치 디렉토리는 한 번 정하면 바꾸지 않습니다. Compose project 이름이 디렉토리 이름에서 정해지고,
-데이터 volume이 그 이름에 묶입니다. 아래 `~/persona-vault-gateway`를 그대로 쓰는 것을 권장합니다.
-
-**설치 bundle** — [GitHub Releases](https://github.com/mykim0409/persona-vault-gateway/releases)에서
-`persona-vault-gateway-X.Y.Z-install.tar.gz`와 `.sha256`을 받습니다.
+새 설치는 전용 영구 디렉토리에서 하세요(Compose project와 volume 식별이 디렉토리에 달려 있어 업그레이드 때도 유지합니다).
+기존 설치는 아래 명령을 실행하기 전에 [operations.md](operations.md#업그레이드)를 먼저 읽으세요.
 
 ```bash
-sha256sum -c persona-vault-gateway-X.Y.Z-install.tar.gz.sha256    # macOS: shasum -a 256 -c
-tar -xzf persona-vault-gateway-X.Y.Z-install.tar.gz
-mv persona-vault-gateway-X.Y.Z ~/persona-vault-gateway
-cd ~/persona-vault-gateway
-```
-
-**소스** (release 없이 사용):
-
-```bash
-git clone https://github.com/mykim0409/persona-vault-gateway.git ~/persona-vault-gateway
-cd ~/persona-vault-gateway
-docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway
-```
-
-## 2. 초기화와 시작
-
-```bash
-docker compose run --rm persona-vault-init
-```
-
-GitHub SSH URL(`git@github.com:OWNER/REPO.git`)과 admin 비밀번호(16~128자, `'` 불가)를 입력합니다.
-설치 디렉토리에 `.env`, `secrets/persona_vault_sync`(private key), `secrets/github_known_hosts`가 생기고
-**public** key가 출력됩니다. 기존 파일은 덮어쓰지 않습니다.
-
-Vault 저장소의 Settings → Deploy keys → Add deploy key에 public key를 등록하고
-**Allow write access**를 켭니다.
-
-```bash
-docker compose run --rm persona-vault-init --check    # 읽기 전용 접속 확인
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml.sha256
+sha256sum -c compose.yml.sha256        # macOS: shasum -a 256 -c
 docker compose up -d
+docker compose logs                    # 일회용 setup code
 ```
 
-`--check`는 쓰기 권한을 확인하지 못합니다. 쓰기 권한이 없으면 sync push가 실패합니다.
-`.env`와 `secrets/`는 Git에 올리지 않습니다.
+`.env`나 key 파일은 필요 없습니다. 데이터(Vault clone, SQLite, 설정)는 volume `persona-vault-data`(컨테이너 `/data`) 하나에
+저장됩니다. `PVG_SETUP_TOKEN`(20~200자)을 직접 지정하면 그 값이 setup code이고, 아니면 로그에 한 번 출력됩니다.
+소스에서 쓰려면 저장소를 clone하고 `docker compose -f compose.yml -f compose.build.yml up -d --build`를 실행합니다.
 
-## 3. 접속과 token
+**이전 버전에서 올 때:** 이 설치는 이전 설치를 대체하거나 이어받지 않습니다.
+먼저 [operations.md](operations.md#업그레이드)의 주의 사항을 읽으세요.
 
-```bash
-curl -fsS http://127.0.0.1:18080/healthz
-curl -fsS http://127.0.0.1:18080/readyz     # 200, "semantic":"disabled"
-```
+## 2. 브라우저에서 설정
 
-`http://127.0.0.1:18080/admin/login`에서 admin 비밀번호로 로그인하고 `/admin/tokens`에서 PC마다 token을
-발급합니다. token은 한 번만 표시됩니다. 일반 plugin은 `Read + Write`, 검색 전용은 `Read`입니다.
+`http://127.0.0.1:18080/setup`을 엽니다. 설정을 마치기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과 capture는 꺼져 있습니다.
 
-Gateway는 기본적으로 서버의 `127.0.0.1`에만 열립니다. 다른 PC에서 쓰려면 운영자가 정한 암호화된
-경로(사설 네트워크 또는 TLS endpoint)로 닿는 주소를 plugin의 Gateway URL로 씁니다. 평문 HTTP로
-공개하면 token과 admin 비밀번호가 그대로 노출됩니다. 자세한 내용은 [operations.md](operations.md#원격-접근)를
-보세요.
+1. setup code와 admin 비밀번호(16~128자)를 입력해 **Claim this Gateway**.
+2. **Repository SSH URL**에 `git@github.com:OWNER/REPO.git`을 입력하고 **Generate deploy key**.
+3. 표시된 **public** key를 저장소의 Settings → Deploy keys에 등록하고 **Allow write access**를 켭니다.
+4. **Connect and clone**(실패하면 **Retry**). 완료되면 Vault가 연결되고 `/readyz`가 200이 됩니다.
+5. Agent tokens(`/admin/tokens`)에서 PC마다 token을 발급합니다. token은 한 번만 표시됩니다. 일반 plugin은 `Read + Write`, 검색 전용은 `Read`입니다.
+
+연결 단계는 쓰기 권한을 증명하지 않습니다. 권한이 없으면 이후 sync의 push가 거부되고 Vault sync 화면에 표시됩니다.
+setup code는 채팅에 붙여 넣지 마세요.
+
+Compose는 포트를 서버의 `127.0.0.1`에만 게시합니다(네이티브 서버는 `0.0.0.0`, 호스팅 서비스는 공개 HTTPS라 loopback이 아닙니다).
+다른 PC에서는 암호화된 경로(사설 네트워크 또는 TLS endpoint)로 닿는 주소를 plugin의 Gateway URL로 씁니다. 평문 HTTP 공개는
+token과 admin 비밀번호를 노출합니다.
+[operations.md](operations.md#원격-접근)를 보세요.
 
 주의: read token은 `90_Private/`를 포함한 Vault 전체를 읽고, 자동 수집은 대화 내용을 평문으로 Gateway와
 Git에 저장합니다. [SECURITY.md](../SECURITY.md)를 읽으세요.
 
-## 4. Agent Plugin 설정
+## 3. Agent Plugin 설정
 
 각 PC마다 별도 agent id와 token을 씁니다. Node.js가 필요합니다.
 
