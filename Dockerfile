@@ -15,8 +15,12 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY gateway ./gateway
 RUN uv sync --frozen --no-dev --no-editable
 
-ENV VAULT_DIR=/vault
-ENV DB_PATH=/data/gateway.db
+# One persistent data root: SQLite, the Vault clone and the private setup state all live under /data.
+# Mount a volume there; without one the data is lost with the container.
+ENV PVG_DATA_DIR=/data \
+    VAULT_DIR=/data/vault \
+    DB_PATH=/data/gateway.db
 EXPOSE 8000
 
-CMD ["uvicorn", "gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Managed launcher: listens on 0.0.0.0:$PORT (default 8000) and serves the browser setup at /setup.
+CMD ["python", "-m", "gateway.server"]

@@ -43,19 +43,33 @@ jobs:
       - name: Install
         run: uv sync --frozen
 
+      # The real Compose parser on the shipped files (an empty env file keeps any local .env out of it), then the
+      # Railway SDK typecheck with the scoped, lockfile-pinned tooling. Both are static: nothing is deployed.
+      - name: Compose config and Railway typecheck
+        run: |
+          : > "$RUNNER_TEMP/empty.env"
+          docker compose --env-file "$RUNNER_TEMP/empty.env" -f compose.yml config --quiet
+          docker compose --env-file "$RUNNER_TEMP/empty.env" -f compose.yml -f compose.build.yml config --quiet
+          docker compose --env-file "$RUNNER_TEMP/empty.env" --profile semantic -f compose.yml config --quiet
+          cd .railway
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck
+
       - name: Check
         run: |
           uv run --frozen python tests/test_core.py
           uv run --frozen python tests/test_admin.py
           uv run --frozen python tests/test_sync.py
           uv run --frozen python tests/test_bootstrap.py
+          uv run --frozen python tests/test_onboarding.py
+          uv run --frozen python tests/test_deployment_surfaces.py
           uv run --frozen python tests/test_release_bundle.py
           uv run --frozen python tests/test_rag_benchmark.py
           uv run --frozen python tests/test_wiki.py
           uv run --frozen python tests/test_compaction.py
           node tests/test_hook.js
           uv run --frozen python tests/test_capture_integration.py
-          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py gateway/bootstrap.py gateway/compaction.py scripts/build_release_bundle.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_bootstrap.py tests/test_release_bundle.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compaction.py tests/test_compose_smoke.py
+          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py gateway/bootstrap.py gateway/compaction.py gateway/server.py gateway/onboarding.py scripts/build_release_bundle.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_bootstrap.py tests/test_onboarding.py tests/test_deployment_surfaces.py tests/test_release_bundle.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compaction.py tests/test_compose_smoke.py
 
   compose-smoke:
     runs-on: ubuntu-latest
