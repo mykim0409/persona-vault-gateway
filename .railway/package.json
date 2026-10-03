@@ -1,0 +1,13 @@
+{
+  "name": "persona-vault-railway-config",
+  "private": true,
+  "description": "Optional offline typecheck for railway.ts only. Not part of the Gateway runtime.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "railway": "3.12.0",
+    "typescript": "5.9.3"
+  }
+}

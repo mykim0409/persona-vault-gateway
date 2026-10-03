@@ -10,6 +10,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -19,27 +20,32 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_release_bundle as rb  # noqa: E402
 
 DIGEST = "sha256:" + "ab" * 32
-IMAGE = f"ghcr.io/synthetic-owner/persona-vault-gateway@{DIGEST}"
+REPO = "ghcr.io/synthetic-owner/persona-vault-gateway"
+IMAGE = f"{REPO}@{DIGEST}"
 TAG = "gateway-v1.2.3"
+TAGGED = f"{REPO}:{TAG}"
 SECRET = "SYNTHETIC-NOT-A-REAL-SECRET"
 COMPOSE = f"""services:
   persona-vault-gateway:
     image: "${{PVG_IMAGE:-persona-vault-gateway:local}}"
   qdrant:
     image: qdrant/qdrant@sha256:{"11" * 32}
-  persona-vault-init:
-    image: "${{PVG_IMAGE:-persona-vault-gateway:local}}"
 """
+RENDER = f"services:\n  - type: web\n    image:\n      url: {TAGGED}\n"
+RAILWAY = f'const GATEWAY_IMAGE = "{TAGGED}";\n'
 
 
-def make_source(root, version="1.2.3", compose=COMPOSE):
+def make_source(root, version="1.2.3", compose=COMPOSE, render=RENDER, railway=RAILWAY):
     """Synthetic tree: allowlisted files plus things that must never ship."""
     root = Path(root)
     (root / "docs").mkdir(parents=True)
     (root / "pyproject.toml").write_text(f'[project]\nname = "x"\nversion = "{version}"\n')
     for rel in rb.ALLOWLIST:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(f"synthetic {rel}\n")
     (root / "compose.yml").write_text(compose)
+    (root / "render.yaml").write_text(render)
+    (root / ".railway/railway.ts").write_text(railway)
     (root / "secrets").mkdir()
     (root / "secrets" / "persona_vault_sync").write_text(SECRET)
     for rel in (".env", "personal-setup.md", "docs/personal.md", "docs/WORKING_AGREEMENT.md", "data.db"):
@@ -79,10 +85,10 @@ class ContentTests(BundleCase):
         for bad in ("secrets", "personal", "WORKING_AGREEMENT", "data.db", "pyproject"):
             self.assertFalse([n for n in got if bad in n], bad)
 
-    def test_compose_pins_gateway_and_init_to_digest(self):
+    def test_compose_pins_the_gateway_to_digest(self):
         archive, _ = self.build()
         compose = members(archive)["persona-vault-gateway-1.2.3/compose.yml"].decode()
-        self.assertEqual(compose.count("${PVG_IMAGE:-" + IMAGE + "}"), 2)
+        self.assertEqual(compose.count("${PVG_IMAGE:-" + IMAGE + "}"), 1)
         self.assertNotIn("persona-vault-gateway:local", compose)
         self.assertNotIn(":latest", compose)
         for line in compose.splitlines():
@@ -90,11 +96,58 @@ class ContentTests(BundleCase):
                 self.assertIn("@sha256:", line)
 
     def test_compose_with_wrong_default_count_is_rejected(self):
-        for text in (COMPOSE.replace("${PVG_IMAGE:-persona-vault-gateway:local}", "x", 1), COMPOSE + COMPOSE):
-            with self.assertRaises(rb.ReleaseError):
-                rb.pin_compose(text, IMAGE)
-        with self.assertRaises(rb.ReleaseError):
-            rb.pin_compose(COMPOSE + "  extra:\n    image: example/app:1\n", IMAGE)
+        # The single Gateway service takes exactly one PVG_IMAGE default: none, two, or an unpinned extra image fail.
+        self.assertEqual(rb.COMPOSE_IMAGE_COUNTS, {"compose.yml": 1})
+        unpinned = "${PVG_IMAGE:-persona-vault-gateway:local}"
+        for name, text in (("none", COMPOSE.replace(unpinned, "x")), ("two", COMPOSE + COMPOSE),
+                           ("old init service", COMPOSE + f'  persona-vault-init:\n    image: "{unpinned}"\n'),
+                           ("extra image", COMPOSE + "  extra:\n    image: example/app:1\n")):
+            with self.subTest(case=name):
+                (self.src / "compose.yml").write_text(text)
+                with self.assertRaises(rb.ReleaseError):
+                    self.build()
+                with self.assertRaises(rb.ReleaseError):
+                    rb.pin_compose(text, IMAGE)
+                self.assertFalse(self.out.exists())
+
+    def test_provider_recipes_are_pinned_to_the_digest_exactly_once(self):
+        archive, _ = self.build()
+        got = members(archive)
+        for rel in ("render.yaml", ".railway/railway.ts"):
+            text = got[f"persona-vault-gateway-1.2.3/{rel}"].decode()
+            self.assertEqual(text.count(IMAGE), 1, rel)
+            self.assertNotIn(TAGGED, text, rel)
+            self.assertNotIn(f":{TAG}", text, rel)
+
+    def test_provider_recipe_with_wrong_reference_count_or_foreign_tag_is_rejected(self):
+        cases = {"render.yaml": (RENDER.replace(TAGGED, f"{REPO}:gateway-v9.9.9"), RENDER + RENDER, "services: []\n"),
+                 ".railway/railway.ts": (RAILWAY.replace(TAGGED, "ghcr.io/other/x:" + TAG), RAILWAY + RAILWAY, "")}
+        for rel, texts in cases.items():
+            for text in texts:
+                with self.subTest(rel=rel, text=text[:40]):
+                    (self.src / rel).write_text(text)
+                    with self.assertRaises(rb.ReleaseError):
+                        self.build()
+                    self.assertFalse(self.out.exists())
+            (self.src / rel).write_text(RENDER if rel == "render.yaml" else RAILWAY)
+
+    def test_standalone_compose_asset_matches_archive_copy_and_checksum(self):
+        archive, _ = self.build()
+        standalone, checksum = rb.standalone_paths(self.out)
+        self.assertEqual((standalone.name, checksum.name), ("compose.yml", "compose.yml.sha256"))
+        self.assertEqual(standalone.read_bytes(), members(archive)["persona-vault-gateway-1.2.3/compose.yml"])
+        self.assertEqual(checksum.read_text(), f"{hashlib.sha256(standalone.read_bytes()).hexdigest()}  {standalone.name}\n")
+        self.assertIn("${PVG_IMAGE:-" + IMAGE + "}", standalone.read_text())
+
+    def test_provider_files_railway_tooling_and_hosting_doc_ship(self):
+        for rel in ("docs/hosting.md", "render.yaml", ".railway/railway.ts", "compose.yml", ".env.example"):
+            self.assertIn(rel, rb.ALLOWLIST)
+        # railway.ts alone is not usable: the pinned tooling that typechecks it ships with it (never node_modules).
+        for rel in (".railway/package.json", ".railway/package-lock.json", ".railway/tsconfig.json"):
+            self.assertIn(rel, rb.ALLOWLIST)
+        self.assertFalse([rel for rel in rb.ALLOWLIST if "node_modules" in rel])
+        self.assertNotIn("compose.onboarding.yml", rb.ALLOWLIST)
+        self.assertEqual(len(rb.ALLOWLIST), len(set(rb.ALLOWLIST)))
 
     def test_checksum_matches_and_names(self):
         archive, checksum = self.build()
@@ -127,10 +180,17 @@ class ContentTests(BundleCase):
 
     def test_real_allowlist_exists_and_real_compose_pins(self):
         text = (ROOT / "compose.yml").read_text()
-        self.assertEqual(text.count(rb.UNPINNED), 2)
+        self.assertEqual(text.count(rb.UNPINNED), 1)
         self.assertIn("${PVG_IMAGE:-" + IMAGE + "}", rb.pin_compose(text, IMAGE))
         for rel in rb.ALLOWLIST:
             self.assertTrue((ROOT / rel).is_file(), rel)
+
+    def test_real_provider_recipes_reference_the_current_release_tag(self):
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+        real = f"ghcr.io/mykim0409/persona-vault-gateway@sha256:{'cd' * 32}"
+        for rel in rb.PROVIDER_IMAGE_FILES:
+            pinned = rb.pin_provider_image((ROOT / rel).read_text(), real, f"gateway-v{version}", rel)
+            self.assertEqual(pinned.count(real), 1, rel)
 
 
 class ValidationTests(BundleCase):
@@ -173,6 +233,7 @@ class ValidationTests(BundleCase):
         code, stdout, _ = run("--tag", TAG, "--image", IMAGE, "--output-dir", str(self.out))
         self.assertEqual(code, 0)
         self.assertEqual(sorted(p.name for p in self.out.iterdir()), [Path(l).name for l in sorted(stdout.split())])
+        self.assertEqual(len(stdout.split()), 4)  # archive, its checksum, standalone compose, its checksum
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -210,6 +271,37 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("! grep", self.release)  # `! cmd` never trips `set -e`
         self.assertIn('docker --config "\\$cfg" pull', self.release)
         self.assertNotIn("docker logout", self.release)
+
+    def test_release_attaches_and_verifies_the_standalone_compose(self):
+        create = self.release.split("gh release create", 1)[1]
+        for asset in ('"dist/release/persona-vault-gateway-$VERSION-install.tar.gz"',
+                      '"dist/release/persona-vault-gateway-$VERSION-install.tar.gz.sha256"',
+                      '"dist/release/compose.yml"', '"dist/release/compose.yml.sha256"'):
+            self.assertIn(asset, create)
+        self.assertNotIn("compose.onboarding.yml", self.release)
+        for check in ("sha256sum -c compose.yml.sha256", 'cmp compose.yml "$compose"',
+                      'test "$(grep -cF -- "\\${PVG_IMAGE:-$IMAGE_REF}" compose.yml)" = 1'):
+            self.assertIn(check, self.release)
+        # The archive's compose.yml and both provider recipes must carry the digest exactly once.
+        self.assertIn('"$compose")" = 1', self.release)
+        self.assertIn('test "$(grep -cF -- "$IMAGE_REF" "$base/$recipe")" = 1', self.release)
+
+    def test_release_gates_and_draft_flow_are_unchanged(self):
+        for text in ("needs: [validate, ci]", "needs: [validate, image]", "--draft", "--verify-tag",
+                     "platforms: linux/amd64,linux/arm64", "gateway-v(0|[1-9][0-9]*)", "persona-vault-gateway-$VERSION-install.tar.gz"):
+            self.assertIn(text, self.release)
+        self.assertNotIn("gh release edit", self.release)
+        self.assertNotIn("--draft=false", self.release)
+
+    def test_ci_runs_and_compiles_the_deployment_and_onboarding_tests(self):
+        for name in ("test_onboarding.py", "test_deployment_surfaces.py"):
+            self.assertIn(f"python tests/{name}\n", self.ci)
+            self.assertRegex(self.ci, rf"py_compile [^\n]*tests/{name}")
+
+    def test_ci_checks_real_compose_config_and_the_railway_typecheck(self):
+        for text in ("config --quiet", "-f compose.yml -f compose.build.yml config --quiet", "--profile semantic",
+                     "npm ci --ignore-scripts", "npm run typecheck", "python tests/test_compose_smoke.py"):
+            self.assertIn(text, self.ci)
 
 
 class BundleDocLinkTests(unittest.TestCase):
