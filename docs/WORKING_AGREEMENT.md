@@ -14,6 +14,8 @@ retrieval_tier: primary
 privacy: normal
 ---
 
+**English** | [한국어](https://github.com/mykim0409/persona-vault-gateway/blob/main/docs/WORKING_AGREEMENT.ko.md)
+
 # Working Agreement
 
 This document contains only the current collaboration rules approved by the user. The current

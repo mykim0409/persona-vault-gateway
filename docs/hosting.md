@@ -1,72 +1,72 @@
-# 호스팅
+# Hosting
 
-Gateway는 어디에 올려도 같은 방식으로 설치됩니다. 같은 image, 같은 시작 명령(`python -m gateway.server`), 같은 브라우저 설정 화면(`/setup`)이며
-플랫폼별 런타임 fork는 없습니다. 설정 절차는 [setup.md](setup.md)입니다.
+**English** | [한국어](hosting.ko.md)
 
-> Railway와 Render 설정 파일은 **배포하지도 검증하지도 않았습니다.** 정적 검사만 거쳤고 어느 계정도 쓰지 않았습니다. 두 곳 모두
-> 유료 자원이며, 원클릭 배포 버튼이나 template ID는 없습니다. 계정, 비용, SSL, proxy 라우팅, Vault 저장소로의 SSH 도달 가능 여부는
-> 운영자가 직접 확인합니다.
+The Gateway installs the same way wherever you host it: the same image, the same start command (`python -m gateway.server`), and the same browser setup screen (`/setup`),
+with no per-platform runtime fork. The setup procedure is in [setup.md](setup.md).
 
-## 공통 계약
+> The Railway and Render config files have **not been deployed or verified.** They have only had static checks and no account was used. Both
+> are paid resources, and there is no one-click deploy button or template ID. You verify the account, cost, SSL, proxy routing, and whether the
+> platform can reach the Vault repository over SSH yourself.
 
-- port는 `PORT`(기본 `8000`), 검색은 keyword(`EMBEDDING_PROVIDER=none`)입니다.
-- 영속 volume 하나를 `/data`에 붙입니다: Vault `/data/vault`, SQLite `/data/gateway.db`, 설정 `/data/setup`(private 설정·hash·key).
-  volume이 없으면 재배포마다 설정과 Vault clone이 사라집니다.
-- **인스턴스는 정확히 하나**입니다(Git worker와 설정 상태가 프로세스 안에 있음). replica나 autoscale을 켜지 마세요.
-- 설정 전에는 `/healthz`가 200이고 `/readyz`는 503이며 검색과 capture는 꺼져 있습니다.
-- setup code는 컨테이너 로그에 한 번 출력되거나, `PVG_SETUP_TOKEN`(20~200자 printable ASCII)을 플랫폼 secret으로 지정합니다.
-  채팅·이슈에 붙여 넣지 마세요.
-- 플랫폼이 HTTPS를 종단하고 앞단 주소를 모르므로 Railway·Render 설정은 `PVG_SECURE_COOKIES=true`를 둡니다(forwarded 헤더를 신뢰하지
-  않고 Secure cookie만 강제하므로 HTTPS로만 접속해야 로그인됩니다). Compose는 기본 `false`입니다.
-  [operations.md](operations.md#원격-접근)를 보세요.
-- TLS와 접근 제어는 플랫폼 또는 운영자 책임입니다. 이 저장소는 proxy, 인증서, DDNS를 제공하지 않습니다.
+## Common contract
 
-## 비교
+- The port is `PORT` (default `8000`), and search is keyword (`EMBEDDING_PROVIDER=none`).
+- Attach one persistent volume at `/data`: the Vault at `/data/vault`, SQLite at `/data/gateway.db`, and settings at `/data/setup` (private settings, hash, key).
+  Without a volume, settings and the Vault clone are lost on every redeploy.
+- There must be **exactly one instance** (the Git worker and setup state live inside the process). Do not enable replicas or autoscaling.
+- Before setup, `/healthz` returns 200 and `/readyz` returns 503, and search and capture are off.
+- The setup code is printed once in the container log, or you set `PVG_SETUP_TOKEN` (20 to 200 printable ASCII characters) as a platform secret.
+  Do not paste it into chats or issues.
+- The platform terminates HTTPS and does not know its front-end address, so the Railway and Render configs set `PVG_SECURE_COOKIES=true` (it does not trust
+  forwarded headers and only forces Secure cookies, so you can log in only over HTTPS). Compose defaults to `false`.
+  See [operations.md](operations.md#remote-access).
+- TLS and access control are the platform's or the operator's responsibility. This repository does not provide a proxy, certificates, or DDNS.
 
-| 선택지 | 이 저장소의 표면 | 상태 | 비고 |
+## Comparison
+
+| Option | Surface in this repository | Status | Notes |
 | --- | --- | --- | --- |
-| Docker Compose | `compose.yml` | CI의 Compose smoke로 검증 | loopback `127.0.0.1:18080`. 사설 경로·TLS는 운영자 |
-| Railway | `.railway/railway.ts` | 미배포·미검증 | 고정 release image. volume은 한 서비스에만 연결. domain은 수동 생성 |
-| Render | `render.yaml` | 미배포·미검증 | 고정 release image. 영속 disk가 있는 유료 instance 필요 |
-| Fly.io | 없음 | 조사만 | 공식 문서상 volume 가능, 제공 표면 없음 |
-| DigitalOcean App Platform | 없음 | 조사만 | 영속 volume이 없어 적합하지 않음 |
+| Docker Compose | `compose.yml` | Verified by the Compose smoke in CI | Loopback `127.0.0.1:18080`. Private path and TLS are the operator's |
+| Railway | `.railway/railway.ts` | Not deployed, not verified | Pinned release image. The volume is attached to one service only. The domain is created manually |
+| Render | `render.yaml` | Not deployed, not verified | Pinned release image. Needs a paid instance with a persistent disk |
+| Fly.io | None | Researched only | Volumes are possible per the official docs, no surface provided |
+| DigitalOcean App Platform | None | Researched only | No persistent volume, so not suitable |
 
 ## Docker Compose
 
-[setup.md](setup.md#1-gateway-시작)의 명령 그대로입니다. 다른 PC에서 쓰려면 SSH tunnel 같은 암호화된 사설 경로나 운영 중인
-TLS endpoint를 쓰고 평문 공개 HTTP는 쓰지 마세요.
+Exactly the commands in [setup.md](setup.md#1-start-the-gateway). To use it from other PCs, use an encrypted private path such as an SSH tunnel, or a TLS endpoint you already
+operate, and do not use plain public HTTP.
 
 ## Railway
 
-[공식 문서](https://docs.railway.com/infrastructure-as-code)상 새 서비스는 `railway.toml`/`railway.json`을 쓸 수 없어 TypeScript SDK 기반의
-범위가 제한된 도구(`.railway/`의 lockfile 고정 SDK)를 씁니다. `.railway/railway.ts`는 서비스 하나, `/data` volume 하나, replica 1개를
-선언하고 `autoUpdates`를 끈 고정 release image를 씁니다(release에서 tag가 exact digest로 바뀝니다). 소스 저장소를 감시하지 않으므로
-push로 재배포되지 않고, 버전은 직접 바꿉니다.
+Per the [official docs](https://docs.railway.com/infrastructure-as-code), new services cannot use `railway.toml`/`railway.json`, so this uses a
+narrowly scoped tool based on the TypeScript SDK (the lockfile-pinned SDK in `.railway/`). `.railway/railway.ts` declares one service, one `/data` volume, and one
+replica, and uses a pinned release image with `autoUpdates` off (the release replaces the tag with the exact digest). It does not watch the source repository,
+so it does not redeploy on push, and you change the version yourself.
 
-- volume은 [한 서비스에만 연결](https://docs.railway.com/reference/volumes)됩니다. 삭제하거나 분리하지 마세요.
-- 생성된 domain은 파일에서 관리하지 않으므로 UI에서 직접 만듭니다. `PVG_SETUP_TOKEN`은 대시보드에서 직접 설정하거나(선택),
-  없으면 deploy log에서 읽습니다.
+- The volume is [attached to one service only](https://docs.railway.com/reference/volumes). Do not delete or detach it.
+- The generated domain is not managed in the file, so create it yourself in the UI. Set `PVG_SETUP_TOKEN` yourself in the dashboard (optional),
+  or read the code from the deploy log otherwise.
 
 ## Render
 
-[Blueprint spec](https://render.com/docs/blueprint-spec)과 [disks](https://render.com/docs/disks) 기준입니다. 영속 disk는 유료 plan
-(0.5 CPU / 512 MB)에서만 붙고 disk가 붙은 서비스는 단일 instance입니다. `render.yaml`은 `runtime: image`로 고정 release image(시작 명령은
-image의 기본값 `python -m gateway.server`), `/data` disk, 자동 배포 끔(`autoDeployTrigger: "off"`), 생성 시 `PVG_SETUP_TOKEN` 자동
-생성을 담습니다. 온라인 URL이 바로 열리므로
-`/setup`을 열기 전에 대시보드 Environment에서 그 값을 읽으세요. 커스텀 도메인·proxy·DNS는 만들지 않습니다.
-Blueprint를 만들면 비용이 발생하므로 확인한 뒤 직접 진행하세요.
+Based on the [Blueprint spec](https://render.com/docs/blueprint-spec) and [disks](https://render.com/docs/disks). A persistent disk attaches only on a paid plan
+(0.5 CPU / 512 MB), and a service with a disk is a single instance. `render.yaml` uses `runtime: image` with a pinned release image (the start command is the image's
+default `python -m gateway.server`), a `/data` disk, automatic deploys off (`autoDeployTrigger: "off"`), and an automatically generated `PVG_SETUP_TOKEN` at creation.
+Because the online URL opens immediately, read that value from the dashboard Environment before you open `/setup`. It does not create a custom domain, proxy, or DNS.
+Creating the Blueprint incurs cost, so check first and proceed yourself.
 
-## 조사만 한 선택지
+## Researched only
 
-- **Fly.io**: [configuration](https://docs.fly.io/reference/configuration)과 [volume](https://docs.fly.io/launch/volume-storage)로 이론상
-  가능하지만 이 저장소는 설정을 제공하지 않습니다. 쓴다면 volume이 한 machine에 묶인다는 점을 직접 확인하세요.
-- **DigitalOcean App Platform**: [공식 문서](https://docs.digitalocean.com/products/app-platform/how-to/store-data/)상 컨테이너
-  파일시스템이 영속적이지 않아 `/data` 계약과 맞지 않습니다. 권장하지 않습니다.
+- **Fly.io**: possible in theory with [configuration](https://docs.fly.io/reference/configuration) and [volumes](https://docs.fly.io/launch/volume-storage),
+  but this repository provides no config. If you use it, confirm yourself that the volume is bound to one machine.
+- **DigitalOcean App Platform**: per the [official docs](https://docs.digitalocean.com/products/app-platform/how-to/store-data/), the container
+  filesystem is not persistent, which does not fit the `/data` contract. Not recommended.
 
-## 운영자가 확인할 것
+## What the operator must verify
 
-계정과 결제, 도메인과 SSL, proxy 라우팅, 플랫폼에서 GitHub SSH(port 22)로 나가 Vault 저장소에 닿는지, volume 백업.
-이 항목들은 저장소 파일로 보장되지 않습니다. 공개 HTTPS 서비스는 `/setup`과 `/admin`도 함께 공개합니다. claim 전에는 운영자만 아는
-setup code가, 후에는 admin 비밀번호·세션·CSRF·login 제한이 보호하므로 claim을 서둘러 끝내고 code를 공유하지 마세요.
-제공된 Railway·Render 설정은 admin을 격리하지 않으며, 격리하려면 플랫폼의 접근 제어를 직접 추가해야 합니다. 평문 HTTP는 쓰지 마세요.
-예전 버전에서 올 때는 [operations.md](operations.md#업그레이드)의 안전 메모를 먼저 읽으세요.
+Account and billing, domain and SSL, proxy routing, whether the platform can reach the Vault repository over outbound GitHub SSH (port 22), and volume backup.
+The repository files do not guarantee these. A public HTTPS service also exposes `/setup` and `/admin`. Before the claim they are protected by the setup code that only the
+operator knows, and after it by the admin password, session, CSRF, and login limit, so finish the claim promptly and do not share the code.
+The supplied Railway and Render configs do not isolate admin; to isolate it you must add the platform's access control yourself. Do not use plain HTTP.
