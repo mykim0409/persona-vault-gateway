@@ -1,9 +1,11 @@
 # Images are pinned to multi-arch index digests (verified linux/amd64 + linux/arm64).
 # Upgrading a digest is a deliberate change; apt and the Python build backend are not locked.
+# No service builds here: release users pull PVG_IMAGE, source users add compose.build.yml.
+# Nothing is required at parse time (no `:?` substitutions) so the init service works before .env exists;
+# the services validate their own configuration at startup instead.
 services:
   persona-vault-gateway:
-    build: .
-    image: persona-vault-gateway:local
+    image: "${PVG_IMAGE:-persona-vault-gateway:local}"
     container_name: persona-vault-gateway
     restart: unless-stopped
     ports:
@@ -15,17 +17,17 @@ services:
       VAULT_DIR: /vault
       DB_PATH: /data/gateway.db
       HOST_ID: "${HOST_ID:-persona-vault-gateway}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
-      CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID}"
-      CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN}"
-      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-cloudflare}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID:-}"
+      CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:-}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-none}"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-@cf/qwen/qwen3-embedding-0.6b}"
       EMBEDDING_BATCH_SIZE: "${EMBEDDING_BATCH_SIZE:-32}"
       QDRANT_URL: "http://qdrant:6333"
       QDRANT_COLLECTION: "${QDRANT_COLLECTION:-persona_vault}"
+      # Uvicorn trusts X-Forwarded-* only from these exact IPs; set your reverse proxy's address, never "*".
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
     depends_on:
-      qdrant:
-        condition: service_started
       # Healthy only after the sync service finished its INITIAL clone/checkout (marker below).
       persona-vault-sync:
         condition: service_healthy
@@ -39,7 +41,9 @@ services:
       timeout: 5s
       retries: 3
 
+  # Only for semantic search: COMPOSE_PROFILES=semantic. The Gateway does not depend on it.
   qdrant:
+    profiles: [semantic]
     image: qdrant/qdrant@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
     container_name: persona-vault-qdrant
     restart: unless-stopped
@@ -108,7 +112,7 @@ services:
         done
     environment:
       GIT_SSH_COMMAND: "ssh -i /run/secrets/persona_vault_sync_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/run/secrets/github_known_hosts"
-      VAULT_REPO_SSH_URL: "${VAULT_REPO_SSH_URL:?set VAULT_REPO_SSH_URL}"
+      VAULT_REPO_SSH_URL: "${VAULT_REPO_SSH_URL:-}"
       VAULT_SYNC_INTERVAL_SECONDS: "${VAULT_SYNC_INTERVAL_SECONDS:-300}"
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/pv-sync-clone-ready"]
@@ -121,10 +125,19 @@ services:
     secrets:
       - source: persona_vault_sync_key
         target: persona_vault_sync_key
-        mode: 0400
       - source: github_known_hosts
         target: github_known_hosts
-        mode: 0444
+
+  # First-run setup: docker compose run --rm persona-vault-init [--check]. Same image, project dir at /setup.
+  persona-vault-init:
+    profiles: [tools]
+    image: "${PVG_IMAGE:-persona-vault-gateway:local}"
+    entrypoint: [python, -m, gateway.bootstrap]
+    restart: "no"
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/setup
 
 secrets:
   persona_vault_sync_key:

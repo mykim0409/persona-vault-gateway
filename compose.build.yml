@@ -1,0 +1,7 @@
+# Source users and tests: build the Gateway image locally instead of pulling PVG_IMAGE.
+#   docker compose -f compose.yml -f compose.build.yml build
+services:
+  persona-vault-gateway:
+    build: .
+  persona-vault-init:
+    build: .

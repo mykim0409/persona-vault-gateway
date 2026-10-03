@@ -5,12 +5,19 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+  # Called by release.yml; ref is the validated release commit so the tests run on the release source.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: persona-vault-gateway-${{ github.ref }}
+  group: persona-vault-gateway-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,6 +26,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -39,12 +48,14 @@ jobs:
           uv run --frozen python tests/test_core.py
           uv run --frozen python tests/test_admin.py
           uv run --frozen python tests/test_sync.py
+          uv run --frozen python tests/test_bootstrap.py
+          uv run --frozen python tests/test_release_bundle.py
           uv run --frozen python tests/test_rag_benchmark.py
           uv run --frozen python tests/test_wiki.py
           uv run --frozen python tests/test_compaction.py
           node tests/test_hook.js
           uv run --frozen python tests/test_capture_integration.py
-          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compose_smoke.py
+          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py gateway/bootstrap.py gateway/compaction.py scripts/build_release_bundle.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_bootstrap.py tests/test_release_bundle.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compaction.py tests/test_compose_smoke.py
 
   compose-smoke:
     runs-on: ubuntu-latest
@@ -52,6 +63,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -67,6 +80,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:

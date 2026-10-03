@@ -45,15 +45,25 @@ Obsidian, VS Code 등 Markdown 편집기는 자유롭게 선택할 수 있습니
 
 ### 1. Gateway를 서버에 한 번 실행
 
-한 줄 설치는 없습니다. Docker Compose, SSH deploy key와 검증된 `known_hosts`를 갖춘 Vault용 private
-Git 저장소, admin 비밀번호, 그리고 제공 compose(semantic 포함 번들 배포)가 embedding을 위해 요구하는
-Cloudflare Account ID와 Workers AI API token이 필요합니다. [docs/setup.md](docs/setup.md)에 따라 Vault 저장소, `.env`,
-secret을 준비한 뒤 `docker compose up -d --build`를 실행하고, `/healthz`를 확인하고,
-`/admin/login`에서 로그인해 PC마다 agent token을 하나씩 발급하고, `Update RAG index`를 한 번
-실행합니다.
+Docker Compose와 commit이 하나 이상 있는 GitHub private Vault 저장소가 필요합니다. 기본 배포는 keyword
+검색입니다.
 
-Gateway는 기본적으로 `127.0.0.1`에 바인딩됩니다. 원격 접근이 필요하면 TLS와 접근 제어를 직접
-앞단에 구성하세요. 이 저장소는 proxy를 제공하지 않습니다.
+```bash
+docker compose run --rm persona-vault-init            # GitHub SSH Vault URL과 admin 비밀번호를 묻습니다
+# 출력된 PUBLIC deploy key를 Vault 저장소에 쓰기 권한으로 등록한 뒤:
+docker compose run --rm persona-vault-init --check    # 읽기 전용 접속 확인
+docker compose up -d
+```
+
+initializer는 설치 디렉토리에 `.env`, deploy key, 고정된 GitHub `known_hosts`를 만듭니다. 이후에도 같은
+디렉토리를 쓰세요. 파일은
+[GitHub Releases](https://github.com/mykim0409/persona-vault-gateway/releases)의 설치 bundle 또는 소스
+(`docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway` 한 번)로 준비합니다.
+전체 단계, admin 로그인, token 발급은 [docs/setup.md](docs/setup.md), 업그레이드·백업·semantic 검색은
+[docs/operations.md](docs/operations.md)입니다.
+
+Gateway는 기본적으로 `127.0.0.1`에 바인딩됩니다. 다른 PC에서는 운영자가 관리하는 암호화된 사설 경로나 TLS
+endpoint로만 접근하세요. 평문 공개 HTTP는 agent token과 admin 비밀번호를 노출합니다.
 
 ### 2. Plugin 설치 (각 PC)
 
@@ -109,14 +119,16 @@ pvg-rag-search --view evidence "token rotate 후 인증 실패"
 | semantic 검색 (선택) | Qdrant, embedding은 Cloudflare Workers AI REST API |
 | Curator (선택) | `pvg-wiki`, 실험적 로컬 CLI |
 
-제공되는 Compose는 semantic을 포함한 번들 배포입니다. Cloudflare 자격 증명을 요구하고 Qdrant를 함께
-띄우며 준비 상태 확인에도 Qdrant를 씁니다. Gateway 자체는 Cloudflare 자격 증명이 없거나 semantic
-색인을 쓸 수 없으면 이미 keyword 전용 검색으로 fallback합니다. 다만 제공되는 Compose는 빈 자격 증명을
-거부하고 Qdrant에 의존하므로, embedding이나 Qdrant 없는 전용 설치는 아직 제공되지 않습니다.
+제공되는 Compose는 기본이 keyword 전용 검색(`EMBEDDING_PROVIDER=none`)이며 embedding provider나 Qdrant를
+호출하지 않습니다. semantic 검색은 `EMBEDDING_PROVIDER=cloudflare`, `COMPOSE_PROFILES=semantic`(Qdrant 시작),
+Cloudflare 자격 증명을 **모두** 명시해야 켜집니다. 직접 실행하는 Python 런타임은 기존 연동 호환을 위해
+`EMBEDDING_PROVIDER`가 없으면 여전히 `cloudflare`가 기본이므로, keyword 전용 Gateway에 대한 CLI
+`compact-finish` 등에서는 `none`처럼 명시적으로 설정하세요.
 
 Cloudflare Workers AI는 현재 유일한 production embedding 경로입니다. REST로 직접 호출하므로 별도
 Cloudflare Worker를 개발·배포할 필요가 없습니다. 다른 provider는 아직 구현되지 않았고, 코드의 hash
-embedding은 테스트 전용입니다.
+embedding은 테스트 전용입니다. 예전 `cloudflare` 기본값에 기대던 기존 설치는 업그레이드 전에 semantic
+profile을 명시해야 합니다. [docs/operations.md](docs/operations.md)를 보세요.
 
 ## 데이터와 통제
 
@@ -136,11 +148,14 @@ embedding은 테스트 전용입니다.
   그 내용이 전송됩니다. Vault는 Git으로 동기화되므로 나중에 파일을 지워도 이력은 지워지지 않습니다.
 - **read token은 Vault 전체를 읽습니다.** `.git/`, `.obsidian/`, `.tmp/`를 뺀 모든 Markdown이며
   `90_Private/`도 포함됩니다. 쓰기는 `30_Conversations/raw/`로 제한됩니다.
-- **semantic 검색을 쓰면 텍스트가 서버 밖으로 나갑니다.** 번들 배포에서는 색인 chunk(`90_Private/`
+- **semantic 검색을 쓰면 텍스트가 서버 밖으로 나갑니다.** 직접 켠 경우에만 색인 chunk(`90_Private/`
   포함)와 검색 query가 embedding을 위해 Cloudflare Workers AI로 전송됩니다.
   [Cloudflare 데이터 정책](https://developers.cloudflare.com/workers-ai/platform/data-usage/)을
   보세요.
-- **Admin에는 login rate limit이 없습니다.** TLS와 접근 제어 뒤에서 비공개로 운영하세요.
+- **Admin login 제한은 네트워크 보안이 아닙니다.** client 주소당 5분에 5회까지 허용하고 초과하면 `429`와
+  `Retry-After`를 반환합니다. 프로세스 메모리에서만 동작하며 추적 수가 제한되고, 재시작하면 초기화되며
+  프로세스 간에 공유되지 않습니다. forwarded 헤더는 정확히 신뢰하도록 설정한 proxy에서만 반영되고(wildcard
+  금지) CSRF 보호는 그대로입니다. 암호화된 경로나 TLS와 접근 제어 뒤에서 비공개로 운영하세요.
 - **정리에는 사람이 필요합니다.** 모든 plan은 사람이 승인하며 raw 삭제의 원자성은 보장되지
   않습니다. [Curator protocol](docs/CURATOR.md)을 보세요.
 
@@ -150,7 +165,8 @@ embedding은 테스트 전용입니다.
 
 | 문서 | 내용 |
 | --- | --- |
-| [docs/setup.md](docs/setup.md) | 설치, 운영, plugin, token helper |
+| [docs/setup.md](docs/setup.md) | 최초 설치, plugin, token helper |
+| [docs/operations.md](docs/operations.md) | Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업 |
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
 | [docs/gpt-actions.md](docs/gpt-actions.md) | plugin 대신 쓰는 Custom GPT Actions |
 | [docs/metadata.md](docs/metadata.md) | Markdown metadata 계약 |
