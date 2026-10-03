@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="pv-hero-title pv-hero-desc">
   <title id="pv-hero-title">PersonaVault: agents come and go, your knowledge settles</title>
-  <desc id="pv-hero-desc">Illustrative concept, not a product screen. Agents, devices and tools drop loose grains of raw evidence above a review line. Below it, a cairn of four sediment slabs (decisions, context, preferences and lessons) holds the knowledge you chose to keep, in plain Markdown and Git, and any connected agent can retrieve it.</desc>
+  <desc id="pv-hero-desc">Agents, devices and tools drop loose grains of raw evidence above a review line. Below it, a cairn of four sediment slabs (decisions, context, preferences and lessons) holds the knowledge you chose to keep, in plain Markdown and Git, and any connected agent can retrieve it.</desc>
   <defs>
     <linearGradient id="pv-hero-bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#1E1E27"/>
@@ -58,7 +58,6 @@
       <tspan x="80" y="448">devices and projects. Agents bring evidence;</tspan>
       <tspan x="80" y="476">you decide what settles, in Markdown and Git.</tspan>
     </text>
-    <text x="80" y="544" font-size="12.5" font-style="italic" fill="#6F6B7A">Illustrative concept, not a product screen.</text>
   </g>
 
   <!-- ===== Right: evidence settling into a cairn of strata ===== -->
