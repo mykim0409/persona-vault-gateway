@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
+from . import onboarding
 from .core import (
     AGENT_ID_RE,
     ConversationConflictError,
@@ -61,6 +62,7 @@ embedding_retry_stop = Event()
 embedding_retry_thread: Thread | None = None
 CSRF_FIELD = "csrf_token"
 ADMIN_FORM_MAX_BYTES = 16 * 1024
+SETUP_FORM_MAX_BYTES = 4 * 1024
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
 ADMIN_LOGIN_WINDOW_SECONDS = 5 * 60
 ADMIN_LOGIN_MAX_TRACKED = 1024
@@ -71,6 +73,9 @@ admin_login_lock = Lock()
 ADMIN_NOTICES = {
     "disabled": "Agent token disabled. Requests using it are now rejected.",
     "logged-out": "You have been logged out.",
+    "vault-saved": "Repository saved and deploy key ready. Register the key, then connect.",
+    "vault-connecting": "Connecting. The repository is being cloned in the background.",
+    "vault-syncing": "Sync requested. The status below updates when it finishes.",
 }
 ERROR_TEXT_LIMIT = 200
 VALIDATION_ERROR_LIMIT = 20
@@ -186,6 +191,17 @@ def admin_password() -> str | None:
     return os.getenv("ADMIN_PASSWORD")
 
 
+def admin_signing_secret() -> str | None:
+    """The key behind admin cookies and CSRF tokens: ADMIN_PASSWORD (legacy) or the managed claim's own secret."""
+    return onboarding.signing_secret() if onboarding.managed() else admin_password()
+
+
+def admin_password_matches(candidate: str) -> bool:
+    if onboarding.managed():
+        return onboarding.verify_password(candidate)
+    return hmac.compare_digest(secret_bytes(candidate), secret_bytes(admin_password() or ""))
+
+
 def secret_bytes(value: str) -> bytes:
     # Environment values may carry surrogate-escaped bytes; compare raw bytes, never str.
     return value.encode("utf-8", "surrogateescape")
@@ -221,7 +237,7 @@ def csrf_token_for(password: str, cookie: str) -> str:
 
 
 def admin_session(request: Request) -> str | None:
-    password = admin_password()
+    password = admin_signing_secret()
     cookie = request.cookies.get(ADMIN_COOKIE)
     return cookie if password and valid_admin_cookie(cookie, password) else None
 
@@ -231,7 +247,7 @@ def admin_ok(request: Request) -> bool:
 
 
 def admin_csrf_token(request: Request) -> str:
-    password = admin_password()
+    password = admin_signing_secret()
     cookie = admin_session(request)
     return csrf_token_for(password, cookie) if password and cookie else ""
 
@@ -255,7 +271,9 @@ def same_origin_request(request: Request) -> bool:
 
 def admin_cookie_attributes(request: Request) -> dict[str, Any]:
     # request.url.scheme already honours forwarded headers only when the server trusts the proxy.
-    return {"httponly": True, "samesite": "lax", "secure": request.url.scheme == "https"}
+    # PVG_SECURE_COOKIES=true forces Secure behind an HTTPS proxy that is not trusted for forwarded headers.
+    forced = os.getenv("PVG_SECURE_COOKIES", "").strip().lower() in ("1", "true", "yes")
+    return {"httponly": True, "samesite": "lax", "secure": forced or request.url.scheme == "https"}
 
 
 def admin_login_client(request: Request) -> str:
@@ -324,7 +342,7 @@ def bounded_text(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = None) -> HTMLResponse:
+def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = None, nav: str = "") -> HTMLResponse:
     logout = (
         f"""<form method="post" action="/admin/logout">
         <input type="hidden" name="{CSRF_FIELD}" value="{html.escape(csrf)}">
@@ -333,6 +351,7 @@ def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = 
         if csrf
         else ""
     )
+    nav_html = f"{nav}\n    " if nav and csrf else ""
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -358,6 +377,7 @@ def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = 
     .bar form {{ margin: 0; }}
     .brand {{ margin: 0; font: 700 1.15rem var(--serif); }}
     .brand span {{ font: 400 .85rem var(--sans); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin-left: 8px; }}
+    .bar nav {{ display: flex; gap: 16px; }}
     main.wrap {{ padding-top: 32px; padding-bottom: 64px; }}
     h1, h2 {{ font-family: var(--serif); line-height: 1.2; margin: 0 0 12px; }}
     h1 {{ font-size: 2rem; }}
@@ -406,7 +426,7 @@ def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = 
 <header class="site">
   <div class="wrap bar">
     <p class="brand">PersonaVault<span>Admin</span></p>
-    {logout}
+    {nav_html}{logout}
   </div>
 </header>
 <main id="main" class="wrap">
@@ -427,7 +447,13 @@ def html_page(title: str, body: str, status_code: int = 200, csrf: str | None = 
 
 
 def admin_page(request: Request, title: str, body: str, status_code: int = 200) -> HTMLResponse:
-    return html_page(title, body, status_code, csrf=admin_csrf_token(request) or None)
+    return html_page(title, body, status_code, csrf=admin_csrf_token(request) or None, nav=admin_nav_html())
+
+
+def admin_nav_html() -> str:
+    if not onboarding.managed():
+        return ""
+    return '<nav aria-label="Admin"><a href="/admin/tokens">Agent tokens</a><a href="/admin/vault">Vault sync</a></nav>'
 
 
 def notice_html(key: str | None) -> str:
@@ -649,6 +675,129 @@ def error_page_html(heading: str, message: str) -> str:
     return f'<h1>{html.escape(heading)}</h1>\n<p class="error" role="alert">{html.escape(message)}</p>\n<p><a href="/admin/tokens">Back to tokens</a></p>'
 
 
+def setup_form_html(error: str | None = None) -> str:
+    error_html = f'<p class="error" id="setup-error" role="alert">{html.escape(error)}</p>' if error else ""
+    return f"""<h1>Set up PersonaVault</h1>
+<p>Claim this Gateway by choosing the administrator password. The setup code is printed once in the server's startup output (or is the value of <code>PVG_SETUP_TOKEN</code>). It is never shown in the browser.</p>
+<form method="post" action="/setup">
+  {error_html}
+  <label for="setup_code">Setup code</label>
+  <input id="setup_code" name="setup_code" type="password" autocomplete="off" spellcheck="false" maxlength="200" autofocus required>
+  <label for="password">Admin password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" minlength="16" maxlength="128" aria-describedby="password-hint" required>
+  <p class="hint" id="password-hint">16-128 characters. Only a salted hash is stored.</p>
+  <label for="confirm">Confirm password</label>
+  <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="16" maxlength="128" required>
+  <button type="submit">Claim this Gateway</button>
+</form>"""
+
+
+def vault_error_html(code: str | None) -> str:
+    message = onboarding.ERROR_TEXT.get(code or "", onboarding.ERROR_TEXT["failed"])
+    return f'<p class="error" role="alert">{html.escape(message)}</p>'
+
+
+def vault_url_form_html(csrf: str, current: str | None, button: str) -> str:
+    return f"""<form method="post" action="/admin/vault">
+  {hidden_inputs_html(csrf)}
+  <label for="repo_url">Repository SSH URL</label>
+  <input id="repo_url" name="repo_url" class="mono" value="{html.escape(current or "")}" placeholder="git@github.com:OWNER/REPO.git" maxlength="200" autocomplete="off" spellcheck="false" aria-describedby="repo-url-hint" required>
+  <p class="hint" id="repo-url-hint">GitHub SSH URLs only. The repository needs at least one commit.</p>
+  <button type="submit">{html.escape(button)}</button>
+</form>"""
+
+
+def vault_page_html(status: dict[str, Any], csrf: str, notice: str | None = None) -> str:
+    state, sync, url = status["state"], status["sync"], status["repo_url"]
+    reload_script = "<script>setTimeout(function () { location.reload(); }, 3000);</script>"
+    if state == "ready":
+        labels = {"idle": "starting", "running": "running now", "ok": "ok", "error": "failing", "blocked": "BLOCKED"}
+        problem = vault_error_html(sync["error"]) if sync["error"] else ""
+        retry = f"{sync['next_delay']} s after the last attempt" if sync["next_delay"] else "-"
+        return f"""<h1>Vault connected</h1>
+{notice_html(notice)}
+<dl class="facts">
+  <dt>Repository</dt><dd><code>{html.escape(url or "")}</code></dd>
+  <dt>Sync</dt><dd>{html.escape(labels.get(sync["state"], sync["state"]))}</dd>
+  <dt>Last attempt</dt><dd>{html.escape(sync["last_attempt"] or "-")}</dd>
+  <dt>Last success</dt><dd>{html.escape(sync["last_ok"] or "never")}</dd>
+  <dt>Next attempt</dt><dd>{html.escape(retry)}</dd>
+  <dt>Consecutive failures</dt><dd>{int(sync["failures"])}</dd>
+</dl>
+{problem}
+<p class="hint">Changes are committed, pulled with rebase and pushed from this server. Push access is only proven by a successful sync; a rejected push shows up here.</p>
+<form method="post" action="/admin/vault/sync">
+  {hidden_inputs_html(csrf)}
+  <button type="submit">Sync now</button>
+</form>
+<p><a href="/admin/tokens">Manage agent tokens</a></p>
+{reload_script if sync["state"] == "running" or not sync["last_attempt"] else ""}"""
+    if state in ("unconfigured", None):
+        return f"""<h1>Connect your Vault</h1>
+{notice_html(notice)}
+<p>Enter the Git repository that stores your Vault. The Gateway generates a private deploy key on this server and shows only its public half. Until the Vault is connected, agent tokens and Vault access stay unavailable.</p>
+{vault_url_form_html(csrf, None, "Generate deploy key")}"""
+    cloning = state == "cloning" or status["cloning"]
+    link = status["registration_link"]
+    link_html = (
+        f'<p><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">Open the deploy key page for this repository</a>. '
+        "Use the title <code>persona-vault-sync</code>, paste the key and tick <strong>Allow write access</strong>.</p>"
+        if link
+        else ""
+    )
+    key_html = f'<pre id="public-key" tabindex="0">{html.escape(status["public_key"])}</pre>' if status["public_key"] else ""
+    connect = (
+        '<p role="status">Cloning in the background. This page refreshes on its own.</p>'
+        if cloning
+        else f"""<form method="post" action="/admin/vault/connect">
+  {hidden_inputs_html(csrf)}
+  <button type="submit">{"Retry" if state == "failed" else "Connect and clone"}</button>
+</form>"""
+    )
+    problem = vault_error_html(status["error"]) if state == "failed" and not cloning else ""
+    return f"""<h1>Connect your Vault</h1>
+{notice_html(notice)}
+<dl class="facts">
+  <dt>Repository</dt><dd><code>{html.escape(url or "")}</code></dd>
+  <dt>Status</dt><dd>{"cloning" if cloning else "failed" if state == "failed" else "waiting for the deploy key"}</dd>
+</dl>
+{problem}
+<section aria-labelledby="key-heading">
+  <h2 id="key-heading">1. Register the deploy key</h2>
+  <p>This is the public key only; the private key stays on this server and is never displayed.</p>
+  {key_html}
+  {link_html}
+</section>
+<section aria-labelledby="connect-heading">
+  <h2 id="connect-heading">2. Connect</h2>
+  <p>The repository is cloned into a staging area and published only when the clone is complete. This step cannot confirm write access; if pushes are rejected later, the sync status says so.</p>
+  {connect}
+</section>
+<section aria-labelledby="change-heading">
+  <details>
+    <summary id="change-heading">Use a different repository</summary>
+    {vault_url_form_html(csrf, url, "Save repository")}
+  </details>
+</section>
+{reload_script if cloning else ""}"""
+
+
+async def bounded_form(request: Request, limit: int) -> dict[str, str]:
+    """Parse a small urlencoded form, aborting while streaming once it exceeds the limit (unauthenticated callers)."""
+    if request.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/x-www-form-urlencoded":
+        raise HTTPException(status_code=415, detail="unsupported content type")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="form too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise HTTPException(status_code=413, detail="form too large")
+    values = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+    return {key: items[-1] for key, items in values.items()}
+
+
 async def form_values(request: Request) -> dict[str, str]:
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > ADMIN_FORM_MAX_BYTES:
@@ -712,8 +861,11 @@ def allowed_roots_for_agent(agent_id: str, scopes: list[str] | None = None) -> l
 @app.on_event("startup")
 def startup() -> None:
     global embedding_retry_thread
+    if onboarding.managed():
+        onboarding.start()  # layout defaults, operator banner, resume a configured Vault
     settings = Settings.from_env()
-    settings.vault_dir.mkdir(parents=True, exist_ok=True)
+    if not onboarding.managed():
+        settings.vault_dir.mkdir(parents=True, exist_ok=True)  # managed mode publishes the Vault only after a clone
     init_db(settings.db_path)
     embedding_retry_stop.clear()
     if settings.embedding_provider == "none":
@@ -731,6 +883,8 @@ def startup() -> None:
 
 def embedding_retry_loop(settings: Settings) -> None:
     while not embedding_retry_stop.wait(EMBEDDING_RETRY_POLL_SECONDS):
+        if not onboarding.vault_ready():
+            continue  # no Vault access, including indexing, before the Vault is connected
         try:
             retry_due_embeddings(settings)
         except Exception as exc:  # BaseException (shutdown, interrupts) still ends the thread
@@ -742,6 +896,7 @@ def embedding_retry_loop(settings: Settings) -> None:
 @app.on_event("shutdown")
 def shutdown() -> None:
     embedding_retry_stop.set()
+    onboarding.stop()
     if embedding_retry_thread:
         embedding_retry_thread.join(timeout=1)
 
@@ -771,20 +926,33 @@ async def request_validation_error(request: Request, exc: RequestValidationError
     return JSONResponse({"detail": errors}, status_code=422)
 
 
+def admin_unavailable_response() -> Response:
+    # Managed mode before the claim: the browser setup page replaces the "set ADMIN_PASSWORD" message.
+    if onboarding.managed() and not onboarding.claimed():
+        return RedirectResponse("/setup", status_code=303)
+    if onboarding.managed():  # claimed, but the credential record is unreadable: fail closed
+        return html_page(
+            "Admin unavailable",
+            "<h1>Admin unavailable</h1><p>The administrator credential record is unreadable, so login is disabled. Restore the data volume's <code>setup</code> directory.</p>",
+            503,
+        )
+    return html_page("Admin disabled", admin_disabled_html(), 503)
+
+
 @app.get("/admin/login")
 def admin_login_page(request: Request, notice: str | None = None):
     if admin_ok(request):
         return RedirectResponse("/admin/tokens", status_code=303)
-    if not admin_password():
-        return html_page("Admin disabled", admin_disabled_html(), 503)
+    if not admin_signing_secret():
+        return admin_unavailable_response()
     return html_page("Admin login", login_form_html(notice=notice))
 
 
 @app.post("/admin/login")
 async def admin_login(request: Request):
-    password = admin_password()
-    if not password:
-        return html_page("Admin disabled", admin_disabled_html(), 503)
+    secret = admin_signing_secret()
+    if not secret:
+        return admin_unavailable_response()
 
     settings = admin_settings()
     # A cross-site form must neither log in nor burn the real administrator's attempts.
@@ -809,7 +977,7 @@ async def admin_login(request: Request):
         response.headers["Retry-After"] = str(retry_after)
         return response
     form = await form_values(request)
-    if not hmac.compare_digest(secret_bytes(form.get("password", "")), secret_bytes(password)):
+    if not await run_in_threadpool(admin_password_matches, form.get("password", "")):
         audit(
             settings.db_path,
             action="admin-login",
@@ -825,7 +993,7 @@ async def admin_login(request: Request):
     response = RedirectResponse("/admin/tokens", status_code=303)
     response.set_cookie(
         ADMIN_COOKIE,
-        make_admin_cookie(password),
+        make_admin_cookie(secret),
         max_age=ADMIN_SESSION_TTL_SECONDS,
         **admin_cookie_attributes(request),
     )
@@ -847,6 +1015,8 @@ async def admin_logout(request: Request):
 def admin_tokens_page(request: Request, notice: str | None = None):
     if not admin_ok(request):
         return RedirectResponse("/admin/login", status_code=303)
+    if not onboarding.vault_ready():  # managed mode: finish connecting the Vault first
+        return RedirectResponse("/admin/vault", status_code=303)
     settings = admin_settings()
     return admin_page(
         request,
@@ -1013,6 +1183,10 @@ async def admin_rag_rebuild(request: Request):
     if rejected:
         return rejected
 
+    if not onboarding.vault_ready():
+        return admin_page(
+            request, "Vault not ready", error_page_html("Vault not ready", "Connect the Vault before updating the index."), 503
+        )
     settings = admin_settings()
     try:
         result = await run_in_threadpool(index_vault, settings)
@@ -1034,6 +1208,120 @@ async def admin_rag_rebuild(request: Request):
         return admin_page(request, "Semantic search is disabled", rag_disabled_html())
     audit(settings.db_path, action="admin-rag-rebuild", route=request.url.path, status="ok", **request_meta(request))
     return admin_page(request, "RAG index updated", rag_rebuilt_html(result))
+
+
+def require_managed() -> None:
+    # Outside managed mode these routes do not exist: same 404 body as any unknown path.
+    if not onboarding.managed():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def require_vault_ready() -> None:
+    if not onboarding.vault_ready():
+        raise HTTPException(status_code=503, detail="Vault setup is not complete")
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect(request: Request):
+    require_managed()
+    if not onboarding.claimed():
+        return RedirectResponse("/setup", status_code=303)
+    if not admin_ok(request):
+        return RedirectResponse("/admin/login", status_code=303)
+    return RedirectResponse("/admin/tokens" if onboarding.vault_ready() else "/admin/vault", status_code=303)
+
+
+@app.get("/setup", include_in_schema=False)
+def setup_page():
+    require_managed()  # nothing from the query string is read or reflected: the setup code is POST-only
+    if onboarding.claimed():
+        return RedirectResponse("/", status_code=303)
+    return html_page("Set up PersonaVault", setup_form_html())
+
+
+@app.post("/setup", include_in_schema=False)
+async def setup_claim(request: Request):
+    require_managed()
+    if onboarding.claimed():
+        return RedirectResponse("/", status_code=303)
+    settings = admin_settings()
+    if not same_origin_request(request):
+        audit(settings.db_path, action="setup-claim", route=request.url.path, status="denied",
+              error_message="cross-origin claim rejected", **request_meta(request))
+        return html_page("Set up PersonaVault", setup_form_html("This request came from another site and was blocked."), 403)
+    client = f"setup:{admin_login_client(request)}"
+    retry_after = admin_login_attempt(client)  # counted before the code is compared
+    if retry_after:
+        response = html_page(
+            "Set up PersonaVault",
+            setup_form_html(f"Too many attempts. Try again in {math.ceil(retry_after / 60)} minute(s)."),
+            429,
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+    form = await bounded_form(request, SETUP_FORM_MAX_BYTES)
+    try:
+        secret = await run_in_threadpool(
+            onboarding.claim, form.get("setup_code", ""), form.get("password", ""), form.get("confirm", "")
+        )
+    except onboarding.SetupError as exc:
+        audit(settings.db_path, action="setup-claim", route=request.url.path, status="denied",
+              error_message=type(exc).__name__, **request_meta(request))
+        return html_page("Set up PersonaVault", setup_form_html(str(exc)), exc.status)
+    except OSError:
+        logger.error("Setup claim could not be stored")
+        return html_page("Set up PersonaVault", setup_form_html("Setup state could not be stored."), 500)
+    admin_login_succeeded(client)
+    audit(settings.db_path, action="setup-claim", route=request.url.path, status="ok", **request_meta(request))
+    response = RedirectResponse("/admin/vault", status_code=303)
+    response.set_cookie(
+        ADMIN_COOKIE, make_admin_cookie(secret), max_age=ADMIN_SESSION_TTL_SECONDS, **admin_cookie_attributes(request)
+    )
+    return response
+
+
+@app.get("/admin/vault", include_in_schema=False)
+def admin_vault_page(request: Request, notice: str | None = None):
+    require_managed()
+    if not admin_ok(request):
+        return RedirectResponse("/admin/login", status_code=303)
+    return admin_page(
+        request, "Vault sync", vault_page_html(onboarding.manager().status(), admin_csrf_token(request), notice)
+    )
+
+
+async def admin_vault_action(request: Request, action: str, notice: str):
+    """Shared shape of the vault form POSTs: authenticate, run one manager call, redirect to the status page."""
+    require_managed()
+    form, rejected = await admin_mutation(request)
+    if rejected:
+        return rejected
+    settings = admin_settings()
+    try:
+        await run_in_threadpool(action, form)
+    except onboarding.SetupError as exc:
+        audit(settings.db_path, action="admin-vault", route=request.url.path, status="error",
+              error_message=type(exc).__name__, **request_meta(request))
+        return admin_page(request, "Vault sync", error_page_html("Vault not changed", str(exc)), exc.status)
+    audit(settings.db_path, action="admin-vault", route=request.url.path, status="ok", **request_meta(request))
+    return RedirectResponse(f"/admin/vault?notice={notice}", status_code=303)
+
+
+@app.post("/admin/vault", include_in_schema=False)
+async def admin_vault_save(request: Request):
+    return await admin_vault_action(
+        request, lambda form: onboarding.manager().configure(form.get("repo_url", "")), "vault-saved"
+    )
+
+
+@app.post("/admin/vault/connect", include_in_schema=False)
+async def admin_vault_connect(request: Request):
+    return await admin_vault_action(request, lambda form: onboarding.manager().connect(), "vault-connecting")
+
+
+@app.post("/admin/vault/sync", include_in_schema=False)
+async def admin_vault_sync(request: Request):
+    return await admin_vault_action(request, lambda form: onboarding.manager().sync_now(), "vault-syncing")
 
 
 def current_agent(
@@ -1132,6 +1420,8 @@ def healthz() -> dict[str, str]:
 
 @app.get("/readyz")
 def readyz() -> JSONResponse:
+    if not onboarding.vault_ready():
+        return JSONResponse({"status": "pending", "setup": onboarding.setup_phase()}, status_code=503)
     result = rag_readiness(Settings.from_env())
     return JSONResponse(result, status_code=200 if result.get("status") == "ok" else 503)
 
@@ -1161,6 +1451,7 @@ def gateway_capabilities(agent: dict[str, Any] = Depends(current_agent)) -> dict
 def working_agreement(
     request: Request,
     agent: dict[str, Any] = Depends(current_agent),
+    _ready: None = Depends(require_vault_ready),
 ) -> dict[str, Any]:
     settings = Settings.from_env()
     try:
@@ -1204,6 +1495,7 @@ def capture(
     payload: CapturePayload,
     request: Request,
     agent: dict[str, Any] = Depends(current_agent),
+    _ready: None = Depends(require_vault_ready),
 ) -> dict[str, Any]:
     settings = Settings.from_env()
     capture_kind = payload.kind
@@ -1256,6 +1548,7 @@ def vault_search(
     payload: VaultSearch,
     request: Request,
     agent: dict[str, Any] = Depends(current_agent),
+    _ready: None = Depends(require_vault_ready),
 ) -> dict[str, Any]:
     settings = Settings.from_env()
     bundle = {
@@ -1312,6 +1605,7 @@ def vault_search(
 def gateway_health(
     request: Request,
     agent: dict[str, Any] = Depends(current_agent),
+    _ready: None = Depends(require_vault_ready),
 ) -> dict[str, Any]:
     settings = Settings.from_env()
     try:

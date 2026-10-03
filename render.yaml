@@ -1,0 +1,36 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec). Not applied or validated against a Render account.
+# Creates ONE paid web service: the published Gateway image (its default command is `python -m gateway.server`)
+# and a persistent disk at /data (SQLite, Vault clone, private setup state). Render persistent disks need a paid
+# plan, and a service with a disk cannot be scaled past one instance; creating this Blueprint starts billing.
+# There is no free-tier option here.
+# The image is pinned to the release; the release bundle replaces the tag below with the image digest. A prebuilt
+# image is never redeployed by a push to this repository, and autoDeployTrigger is off as well. The service is
+# reachable on its onrender.com URL as soon as it is live, so PVG_SETUP_TOKEN is generated at creation: read it
+# in the Dashboard (service > Environment) before you open /setup. No custom domain, proxy or DNS is provisioned.
+services:
+  - type: web
+    name: persona-vault-gateway
+    runtime: image
+    image:
+      url: ghcr.io/mykim0409/persona-vault-gateway:gateway-v0.1.0
+    plan: 0.5c-512mb
+    healthCheckPath: /healthz
+    autoDeployTrigger: "off" # quoted: a bare off is a YAML boolean
+    numInstances: 1
+    disk:
+      name: persona-vault-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PVG_DATA_DIR
+        value: /data
+      - key: VAULT_DIR
+        value: /data/vault
+      - key: DB_PATH
+        value: /data/gateway.db
+      - key: EMBEDDING_PROVIDER
+        value: none
+      - key: PVG_SECURE_COOKIES
+        value: "true"
+      - key: PVG_SETUP_TOKEN
+        generateValue: true

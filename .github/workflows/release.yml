@@ -1,7 +1,8 @@
 name: Release
 
 # Manual only. Builds the multi-arch Gateway image into GHCR from an existing gateway-vX.Y.Z tag and attaches an
-# install bundle + SHA256 checksum to a DRAFT GitHub Release. The operator reviews and publishes the draft.
+# install bundle + SHA256 checksum, plus the standalone pinned compose.yml + SHA256 checksum, to a DRAFT
+# GitHub Release. The operator reviews and publishes the draft.
 # Uses only the built-in GITHUB_TOKEN. The release contract is the image digest, not a mutable tag.
 on:
   workflow_dispatch:
@@ -166,13 +167,30 @@ jobs:
           cd dist/release
           sha256sum -c "persona-vault-gateway-$VERSION-install.tar.gz.sha256"
           tar -xzf "persona-vault-gateway-$VERSION-install.tar.gz" -C "$RUNNER_TEMP"
-          compose="$RUNNER_TEMP/persona-vault-gateway-$VERSION/compose.yml"
-          test "$(grep -cF -- "\${PVG_IMAGE:-$IMAGE_REF}" "$compose")" = 2
+          base="$RUNNER_TEMP/persona-vault-gateway-$VERSION"
+          compose="$base/compose.yml"
+          test "$(grep -cF -- "\${PVG_IMAGE:-$IMAGE_REF}" "$compose")" = 1
           if grep -qF 'persona-vault-gateway:local' "$compose"; then
             echo "::error::bundle compose.yml still references the local image"
             exit 1
           fi
-          test ! -e "$RUNNER_TEMP/persona-vault-gateway-$VERSION/.env"
+          test ! -e "$base/.env"
+          # The Render and Railway recipes carry the digest exactly once and no longer the release tag.
+          for recipe in render.yaml .railway/railway.ts; do
+            test "$(grep -cF -- "$IMAGE_REF" "$base/$recipe")" = 1
+            if grep -qF -- ":$TAG" "$base/$recipe"; then
+              echo "::error::bundle $recipe still references the release tag"
+              exit 1
+            fi
+          done
+          # The one-file Compose download: its own checksum, the digest pin exactly once, byte-identical to the archive copy.
+          sha256sum -c compose.yml.sha256
+          test "$(grep -cF -- "\${PVG_IMAGE:-$IMAGE_REF}" compose.yml)" = 1
+          if grep -qF 'persona-vault-gateway:local' compose.yml; then
+            echo "::error::standalone compose.yml still references the local image"
+            exit 1
+          fi
+          cmp compose.yml "$compose"
 
       - name: Create draft release
         run: |
@@ -193,11 +211,16 @@ jobs:
 
           Gateway image (multi-arch, linux/amd64 + linux/arm64): \`$IMAGE_REF\`
 
-          The bundle's compose.yml defaults PVG_IMAGE to this digest for the gateway and init services.
+          The bundle's compose.yml defaults PVG_IMAGE to this digest for the Gateway service.
           Verify the download with \`sha256sum -c persona-vault-gateway-$VERSION-install.tar.gz.sha256\`.
+
+          Single-file install: \`compose.yml\` is also attached on its own (same digest, same file as in the bundle).
+          Verify it with \`sha256sum -c compose.yml.sha256\` from the folder holding both files.
           EOF
           gh release create "$TAG" --draft --verify-tag --title "PersonaVault Gateway $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             "dist/release/persona-vault-gateway-$VERSION-install.tar.gz" \
-            "dist/release/persona-vault-gateway-$VERSION-install.tar.gz.sha256"
+            "dist/release/persona-vault-gateway-$VERSION-install.tar.gz.sha256" \
+            "dist/release/compose.yml" \
+            "dist/release/compose.yml.sha256"
           echo "Draft release for \`$TAG\` created. Image: \`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"

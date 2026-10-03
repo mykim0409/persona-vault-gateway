@@ -3,5 +3,3 @@
 services:
   persona-vault-gateway:
     build: .
-  persona-vault-init:
-    build: .

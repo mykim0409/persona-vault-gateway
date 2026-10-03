@@ -1,7 +1,8 @@
 # Contributing
 
 개인용 self-hosted 베타 프로젝트입니다. 이 문서가 개발·테스트의 단일 안내입니다.
-최초 설치는 [docs/setup.md](docs/setup.md), 운영은 [docs/operations.md](docs/operations.md), 취약점은
+최초 설치는 [docs/setup.md](docs/setup.md), 호스팅은 [docs/hosting.md](docs/hosting.md), 운영은
+[docs/operations.md](docs/operations.md), 취약점은
 [SECURITY.md](SECURITY.md)를 보세요.
 
 ## 환경
@@ -9,7 +10,7 @@
 - Python 3.13, Node 22, uv `0.12.17` (CI와 Docker가 같은 버전을 고정)
 - 의존성은 `uv.lock` 그대로 설치합니다: `uv sync --frozen`
 - 빌드 backend는 setuptools(>=77)이고 license는 [MIT](LICENSE)입니다.
-- Compose 이미지(Qdrant, `alpine/git`, Gateway base `python:3.13-slim`)는 multi-arch index digest로
+- Compose 이미지(Qdrant, Gateway base `python:3.13-slim`)는 multi-arch index digest로
   고정합니다. digest 갱신은 의도적인 변경이며, apt 패키지와 build backend는 고정되지 않아 build가
   bit 단위로 같다고 보장하지 않습니다.
 
@@ -26,6 +27,8 @@ uv run --frozen python tests/test_rag_benchmark.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
 uv run --frozen python tests/test_bootstrap.py
+uv run --frozen python tests/test_onboarding.py
+uv run --frozen python tests/test_deployment_surfaces.py
 uv run --frozen python tests/test_release_bundle.py
 node tests/test_hook.js
 uv run --frozen python tests/test_capture_integration.py
@@ -35,17 +38,17 @@ uv run --frozen python tests/test_capture_integration.py
 | --- | --- |
 | 핵심·auth·path 정책 | `test_core.py` |
 | admin 화면·login limiter | `test_admin.py` |
-| vault sync | `test_sync.py` |
-| Compose 계약·초기 clone readiness | `test_sync.py` (compose.yml 텍스트와 sync script를 임시 경로에서 검사) |
+| Compose smoke 보조 로직(skip 규칙, backup·restore, 테스트 전용 transport)과 네이티브 `gateway.server` 첫 사용 흐름 | `test_sync.py` |
 | RAG 검색 | `test_rag_benchmark.py` |
 | wiki·compaction | `test_wiki.py`, `test_compaction.py` |
-| first-run initializer(`gateway.bootstrap`) | `test_bootstrap.py` |
+| SSH deploy key·known_hosts 보조 함수(`gateway.bootstrap`) | `test_bootstrap.py` |
 | 릴리스 설치 bundle | `test_release_bundle.py` |
 | hook·capture | `test_hook.js`, `test_capture_integration.py` |
+| 브라우저 설정(`/setup` claim, deploy key, 합성 clone, Gateway 내장 Git sync, readiness) | `test_onboarding.py` |
+| 배포 표면 정적 검사(`compose.yml`, `render.yaml`, `.railway/railway.ts`) | `test_deployment_surfaces.py` |
 
-`test_bootstrap.py`와 `test_release_bundle.py`는 임시 디렉토리와 합성 데이터만 쓰고 Docker daemon·네트워크·
-실제 Git host·registry가 필요 없습니다(`git ls-remote`는 모의). 릴리스 bundle 생성기는 구현되어 로컬에서
-테스트했지만 Release workflow는 실행하지 않았고 bundle·이미지는 게시되지 않았습니다.
+위 Python 테스트는 임시 디렉토리와 합성 데이터만 쓰고 Docker daemon·네트워크·실제 Git host·registry·클라우드 계정이
+필요 없습니다(SSH transport는 로컬 bare repository로 대체). 모두 CI에서 실행됩니다.
 
 - `node tests/test_client_windows.js`는 네이티브 Windows(CI `windows-latest`)용입니다. 그 외 환경에서
   실행하지 못했다면 **skip이지 pass가 아닙니다.**
@@ -55,45 +58,41 @@ uv run --frozen python tests/test_capture_integration.py
 ## Compose smoke (Docker 필요)
 
 위 목록과 별개이며 Docker CLI, Compose v2 plugin(`docker compose`), 실행 중인 Docker daemon, 이미지
-pull·build용 네트워크가 필요합니다. CI에서는 `compose-smoke` job(ubuntu)이 같은 명령을 실행합니다.
+pull·build용 네트워크가 필요합니다. 실제 Docker 검증은 CI의 `compose-smoke` job(ubuntu)이 같은 명령으로 합니다.
 
 ```bash
 python tests/test_compose_smoke.py
 ```
 
 실제 `compose.yml`과 `compose.build.yml`(소스 build)에 최소 override를 얹어 고유한 `pvg-smoke-*` project로
-실행합니다. 컨테이너 이름, Gateway image tag(`persona-vault-gateway:local`은 쓰지 않음), volume은 모두
-project 전용이고 port는 loopback ephemeral입니다. 임시 bare Git repo(합성 Markdown 한 건)를 sync에만
-`file://`로 mount하며 dummy secret·`--env-file`만 쓰고 개인 `.env`는 읽지 않습니다. 두 project를 차례로
-실행하며 서로 분리되어 있습니다.
+실행합니다. 컨테이너 이름, Gateway image tag, volume은 모두 project 전용이고 port는 loopback ephemeral입니다.
+Gateway는 첫 설치처럼 claim 전 상태로 시작하며 개인 `.env`나 실제 secret은 읽지 않습니다. 테스트 전용으로 mount한
+`sitecustomize.py`가 SSH transport를 합성 bare repository로 대체하고, 운영 코드에는 그런 스위치가 없습니다.
+종료 시 자기 project의 container·volume·image tag·임시 파일만 지웁니다. 두 project를 차례로 실행합니다.
 
-- `keyword`: 기본 배포(`EMBEDDING_PROVIDER=none`, Cloudflare 값 없음, Qdrant 없음). 최초 clone 전에는
-  Gateway가 시작하지 않음, `/healthz`, `/readyz` 200과 `semantic: disabled`, Qdrant 컨테이너 없음,
-  인증된 keyword search·capture.
-- `semantic`: `semantic` profile과 실제 고정 Qdrant, `hash` provider. 색인 전 `rag_indexed`가 true가 아님,
-  색인 후 `/readyz` 200, 인증된 search·capture.
-
-`keyword` project는 `persona-vault-init` 실행(빈 임시 디렉토리, 재실행 포함), Gateway `--force-recreate` 후
-capture·auth 유지, 중지 후 Vault·SQLite volume 복사 확인도 포함합니다. 이 시나리오들은 구현되어 있지만
-현재는 `docker compose config`와 정적 검사로만 확인했습니다. daemon이 있는 환경에서 전체 실행하기 전에는
-통과했다고 쓰지 마세요. 종료 시 자기 project의 container·volume·image tag·임시 파일만 지웁니다.
+- `keyword`: 기본 배포(`EMBEDDING_PROVIDER=none`, Cloudflare 값 없음, Qdrant 없음). pending(`/healthz` 200, `/readyz` 503) →
+  claim(잘못된 code 거부) → 합성 clone → search·capture → push·pull → 컨테이너 재생성 후 로그인·token·Vault 유지(`/setup`은
+  닫힘) → 중지한 `/data` volume을 새 volume으로 복사해 backup 복원 확인.
+- `semantic`: `semantic` profile과 실제 고정 Qdrant, `hash` provider. 색인 전 `rag_indexed`가 true가 아님, 색인 후
+  `/readyz` 200, 인증된 search·capture.
 
 - 아래 중 하나라도 해당하면 exit 2(`SKIPPED`)이며 **skip이지 pass가 아닙니다.** Docker CLI가 없음,
   `docker compose version`이 실패함(Compose v2 plugin 없음), 전체 실행에서 `docker info`가 실패함(daemon
   없음). `--prepare-only`도 Docker CLI와 Compose v2가 필요하며(`docker compose config`를 실행), daemon
   없이 임시 파일 생성과 그 검사까지만 합니다.
+- Railway·Render 설정은 정적 검사만 합니다(`test_deployment_surfaces.py`와 CI의 Railway typecheck: `.railway`에서
+  `npm ci --ignore-scripts && npm run typecheck`). 실제 계정에서 배포하거나 유료 플랫폼에서 테스트하지 마세요. 도구가 없어
+  typecheck를 못 돌렸다면 skip이지 pass가 아닙니다.
 - 이 skip 조건은 `test_sync.py`가 mock으로 검증하며 실제 Docker는 호출하지 않습니다.
-- 한계: SSH deploy key·known_hosts 경로, Cloudflare embedding, 의미 검색 품질, clone 실패 시 Compose
-  동작은 검증하지 않습니다(clone 실패의 marker 처리는 `test_sync.py`의 script 수준 테스트만 다룹니다).
-  CI는 amd64 한 환경이라 arm64 실행은 확인하지 않습니다. 최초 clone 준비 상태를 보는 것이며 이후 Git
-  sync의 원자성은 검증하지 않습니다.
+- 한계: 실제 SSH·GitHub deploy key 경로, Cloudflare embedding, 의미 검색 품질, 호스팅 플랫폼 동작은 검증하지 않습니다.
+  CI는 amd64 한 환경이라 arm64 실행은 확인하지 않으며 Git sync의 원자성도 검증하지 않습니다.
 
 ## 로컬 실행 (격리·합성 데이터)
 
 개인 설정이나 API 없이 임시 합성 경로로만 띄웁니다. `hash` provider는 테스트용이라 실제 의미 검색
 품질을 약속하지 않으며, 이 데모 API로 검색 품질을 판단하지 마세요. 프로젝트에 기본 `.env`를 만들지 않습니다.
-직접 실행하는 Python 런타임은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본이고(기존 연동 호환), Compose
-기본값 `none`과 다릅니다. 그래서 아래처럼 항상 명시합니다.
+직접 실행하는 Python 런타임(`uvicorn gateway.app:app`)은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본이고(기존 연동 호환),
+`gateway.server`와 Compose 기본값 `none`과 다릅니다. 그래서 아래처럼 항상 명시합니다.
 
 ```bash
 tmp="$(mktemp -d)" && mkdir "$tmp/vault"
@@ -135,7 +134,7 @@ Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway pa
 
 ## 문서와 알려진 한계
 
-- 설치는 `docs/setup.md`, 운영은 `docs/operations.md`, Wiki 정리 protocol은 `docs/CURATOR.md`입니다.
+- 설치는 `docs/setup.md`, 호스팅은 `docs/hosting.md`, 운영은 `docs/operations.md`, Wiki 정리 protocol은 `docs/CURATOR.md`입니다.
   `docs/operations.md`는 릴리스 bundle에 포함되어야 합니다(`scripts/build_release_bundle.py` ALLOWLIST).
 - 기본 배포는 keyword 검색입니다. semantic 검색은 명시적으로 켠 경우(`EMBEDDING_PROVIDER=cloudflare` +
   `COMPOSE_PROFILES=semantic`)에만 쓰이며 API `v3`는 의미 검색 정확도를 보장하는 계약이 아닙니다.
@@ -147,8 +146,9 @@ Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway pa
 
 - 수동 `Release` workflow(`workflow_dispatch`)를 기본 branch에서 기존 tag `gateway-vX.Y.Z`로 실행합니다.
   tag 버전은 `pyproject.toml`의 Gateway package 버전과 같아야 합니다.
-- 전체 CI(테스트, Compose smoke, Windows client)가 통과해야 이미지를 GHCR에 build하고
-  `persona-vault-gateway-X.Y.Z-install.tar.gz`와 `.sha256`을 **draft** release로 만듭니다.
+- 전체 CI(테스트, Compose smoke, Windows client)가 통과해야 이미지를 GHCR에 build하고 설치 bundle
+  `persona-vault-gateway-X.Y.Z-install.tar.gz`, 단독 `compose.yml`, 각 `.sha256`을 **draft** release로 만듭니다.
+  bundle과 `compose.yml`, `render.yaml`, `.railway/railway.ts`의 image 참조는 exact digest로 바뀝니다.
 - draft를 publish하기 전에 GHCR 패키지를 public으로 바꾸고 익명 pull을 확인합니다. 전역 Docker 로그인은
   그대로 두고 임시 설정 디렉토리를 씁니다.
 
@@ -157,3 +157,5 @@ Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway pa
   ```
 
 - 이미지 digest는 draft의 release notes에 있습니다.
+- 공개 Release와 public GHCR 게시는 위 QA(CI, 익명 pull 확인)가 끝난 뒤에만 합니다. Render·Railway 설정은 배포하지 않은
+  상태로 유지합니다.

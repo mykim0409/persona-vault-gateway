@@ -46,25 +46,33 @@ Illustrative requests to a connected agent:
 
 ### 1. Run the Gateway once (server)
 
-You need Docker Compose and a private GitHub repository for the Vault (with at least one commit).
-The default deployment uses keyword search.
+You need Docker Compose (or a platform, see [docs/hosting.md](docs/hosting.md)) and a private GitHub
+repository for the Vault (with at least one commit). The default deployment uses keyword search. To build
+from source instead, run `docker compose -f compose.yml -f compose.build.yml up -d --build`.
+
+Use a dedicated, permanent directory for a new install (the Compose project and volume identity depend on it, so keep it for upgrades).
+Existing installs must read the [upgrade instructions](docs/operations.md#업그레이드) before running these commands.
 
 ```bash
-docker compose run --rm persona-vault-init            # prompts for the GitHub SSH Vault URL and an admin password
-# register the printed PUBLIC deploy key on the Vault repository with write access, then:
-docker compose run --rm persona-vault-init --check    # read-only reachability check
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml.sha256
+sha256sum -c compose.yml.sha256            # macOS: shasum -a 256 -c
 docker compose up -d
+docker compose logs                        # one-time setup code
 ```
 
-The initializer writes `.env`, a deploy key, and a pinned GitHub `known_hosts` into the install
-directory; keep using that directory. Get the files from an install bundle on
-[GitHub Releases](https://github.com/mykim0409/persona-vault-gateway/releases) or from source
-(`docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway` once). Steps,
-admin login, and token issuing: [docs/setup.md](docs/setup.md). Upgrades, backup, semantic search:
+Open `http://127.0.0.1:18080/setup`, claim it with the setup code and choose an admin password, enter the
+GitHub repository SSH URL, register the shown **public** deploy key on the Vault repository with write
+access, then connect (retry if needed) and issue agent tokens. Until setup finishes, `/healthz` is 200 but
+`/readyz` is 503 and search and capture are off. The connection step does not prove write access.
+Step by step: [docs/setup.md](docs/setup.md). Docker, Railway, and Render install the same way; the Railway
+and Render configs are prepared but not verified on a live account: [docs/hosting.md](docs/hosting.md).
+Upgrades (including a safety note for older installs), backup, semantic search:
 [docs/operations.md](docs/operations.md).
 
-The Gateway binds to `127.0.0.1` by default. Reach it from other PCs only over an encrypted private
-path or a TLS endpoint that you operate; plain public HTTP exposes agent tokens and the admin password.
+Compose publishes the port only at `127.0.0.1` by default. The native server listens on `0.0.0.0` and hosted
+services are public HTTPS, so neither is loopback. Reach it from other PCs only over an encrypted private
+path or a TLS endpoint; plain public HTTP exposes agent tokens and the admin password.
 
 ### 2. Install the plugin (each PC)
 
@@ -89,7 +97,7 @@ codex plugin add persona-vault --marketplace persona-vault-gateway
 ```
 
 Review the hook commands before trusting them (`/hooks`). Then install the token helper and give it
-your Gateway URL and token as described in section 4 of [docs/setup.md](docs/setup.md), which also
+your Gateway URL and token as described in section 3 of [docs/setup.md](docs/setup.md), which also
 covers Windows PowerShell. Never paste a token into an agent chat.
 
 ### 3. Try it
@@ -118,22 +126,20 @@ implements each today.
 
 | Layer | Current implementation |
 | --- | --- |
-| Knowledge store | Private Git repository of Markdown files, kept in sync by a compose sidecar |
+| Knowledge store | Private Git repository of Markdown files, synced by the Gateway itself |
 | Gateway | FastAPI and SQLite: API, auth, path policy, Markdown writer, admin |
 | Semantic search (optional) | Qdrant, with embeddings from the Cloudflare Workers AI REST API |
 | Curator (optional) | `pvg-wiki`, an experimental local CLI |
 
-The provided Compose file defaults to keyword-only search (`EMBEDDING_PROVIDER=none`): no embedding
-provider or Qdrant is contacted. Semantic search is an explicit option that needs all of
-`EMBEDDING_PROVIDER=cloudflare`, `COMPOSE_PROFILES=semantic` (starts Qdrant), and the Cloudflare
-credentials. The direct Python runtime still defaults to `cloudflare` when `EMBEDDING_PROVIDER` is
+The Gateway defaults to keyword-only search (`EMBEDDING_PROVIDER=none`): no embedding provider or
+Qdrant is contacted. Semantic search is an explicit option that needs `EMBEDDING_PROVIDER=cloudflare`,
+the Cloudflare credentials, and a Qdrant service. The direct Python runtime still defaults to `cloudflare` when `EMBEDDING_PROVIDER` is
 unset, for older integrations; set it explicitly (for example `none` for CLI `compact-finish` against
 a keyword-only Gateway).
 
 Cloudflare Workers AI is the only production embedding path today. It is called directly over REST,
 so there is no separate Cloudflare Worker to develop or deploy. Other providers are not implemented
-yet, and the hash embedding in the code exists for tests only. Existing installs that relied on the
-old `cloudflare` default must enable the semantic profile before upgrading; see
+yet, and the hash embedding in the code exists for tests only. See
 [docs/operations.md](docs/operations.md).
 
 ## Data and control
@@ -176,6 +182,7 @@ This beta has not completed a security audit. See [SECURITY.md](SECURITY.md).
 | Guide | Covers |
 | --- | --- |
 | [docs/setup.md](docs/setup.md) | First install, plugins, token helper (written in Korean) |
+| [docs/hosting.md](docs/hosting.md) | Hosting options: Compose, Railway, Render, others (Korean) |
 | [docs/operations.md](docs/operations.md) | Vault layout, semantic search, remote access, upgrade, backup (Korean) |
 | [Windows guide](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows command syntax |
 | [docs/gpt-actions.md](docs/gpt-actions.md) | Custom GPT Actions as an alternative to the plugin |

@@ -1,10 +1,9 @@
 # PersonaVault Gateway 운영
 
-최초 설치는 [setup.md](setup.md)입니다. `docker compose` 명령은 설치 디렉토리에서 실행합니다. Vault 구조의 명령은
-Vault 로컬 checkout에서, Curator 명령은 소스 checkout에서 실행합니다.
+최초 설치는 [setup.md](setup.md), 호스팅 선택지는 [hosting.md](hosting.md)입니다. `docker compose` 명령은 `compose.yml`을
+둔 디렉토리에서 실행합니다. Vault 구조의 명령은 Vault 로컬 checkout에서, Curator 명령은 소스 checkout에서 실행합니다.
 
 - [Vault 구조](#vault-구조)
-- [다른 Git host](#다른-git-host)
 - [Semantic 검색](#semantic-검색)
 - [원격 접근](#원격-접근)
 - [Hook과 Curator](#hook과-curator)
@@ -27,8 +26,8 @@ Vault는 Markdown 파일의 Git 저장소입니다. 형식은 [metadata.md](meta
 | `50_Knowledge/` | 검증된 재사용 지식 | 사람, Curator |
 | `90_Private/` | 개인 메모 | 사람 |
 
-- `.git/`, `.obsidian/`, `.tmp/`는 색인·검색에서 제외됩니다. sync가 `git add .`를 실행하므로 `.obsidian/`과
-  `.tmp/`는 `.gitignore`에 넣어 첫 실행 전에 push하세요. 이미 추적 중이면 `git rm -r --cached --ignore-unmatch -- .obsidian .tmp`
+- `.git/`, `.obsidian/`, `.tmp/`는 색인·검색에서 제외됩니다. sync가 변경을 commit하므로 `.obsidian/`과
+  `.tmp/`는 `.gitignore`에 넣어 Gateway를 연결하기 전에 push하세요. 이미 추적 중이면 `git rm -r --cached --ignore-unmatch -- .obsidian .tmp`
   후 commit합니다(과거 history에는 남습니다).
 - 편집은 로컬 clone에서 하고 push 전에 `git pull --rebase`합니다. `30_Conversations/raw/`는 직접 수정하지 않습니다.
 - `90_Private/`도 read token으로 읽히고 semantic 검색을 켜면 Cloudflare로 전송됩니다.
@@ -40,34 +39,27 @@ test -e 10_User/WORKING_AGREEMENT.md || curl -fsSLo 10_User/WORKING_AGREEMENT.md
   https://raw.githubusercontent.com/mykim0409/persona-vault-gateway/main/docs/WORKING_AGREEMENT.md
 ```
 
-## 다른 Git host
-
-`persona-vault-init`은 GitHub SSH URL만 지원합니다(`--check`도 동일). 다른 host는 직접 준비합니다.
-
-```bash
-mkdir -p secrets && chmod 700 secrets
-ssh-keygen -t ed25519 -C persona-vault-sync -N "" -f secrets/persona_vault_sync
-chmod 600 secrets/persona_vault_sync
-test -f .env || install -m 600 .env.example .env     # VAULT_REPO_SSH_URL, ADMIN_PASSWORD 설정
-```
-
-`secrets/github_known_hosts`에는 host 공식 문서의 fingerprint와 직접 대조한 host key만 넣습니다.
-`ssh-keyscan` 출력은 검증 전에는 후보일 뿐입니다. `secrets/persona_vault_sync.pub`를 write 권한
-deploy key로 등록한 뒤 `docker compose up -d`를 실행합니다.
+Gateway가 서버에서 Vault를 clone해 commit, `pull --rebase`, push를 주기적으로 합니다(기본 300초,
+`VAULT_SYNC_INTERVAL_SECONDS`). 지원하는 Git host는 GitHub SSH URL입니다.
 
 ## Semantic 검색
 
-`.env`에 **모두** 설정하고 `docker compose up -d`를 다시 실행합니다.
+기본은 keyword 검색(`EMBEDDING_PROVIDER=none`)입니다. 켜려면 아래를 **모두** 설정하고 재시작합니다.
 
 ```text
 EMBEDDING_PROVIDER=cloudflare
-COMPOSE_PROFILES=semantic
 CLOUDFLARE_ACCOUNT_ID=<account-id>
 CLOUDFLARE_API_TOKEN=<workers-ai-token>
 ```
 
+- **Compose**: 위 값과 `COMPOSE_PROFILES=semantic`을 셸 환경 또는 `compose.yml` 옆의 `.env`에 두고 `docker compose up -d`를
+  다시 실행합니다. `semantic` profile이 고정된 Qdrant를 시작하고 `QDRANT_URL`은 `http://qdrant:6333`으로 고정되어 있습니다
+  (`QDRANT_COLLECTION` 기본 `persona_vault`).
+- **Railway·Render**: 제공된 설정에는 Qdrant가 없습니다. 위 값과 함께 `QDRANT_URL=<Gateway가 닿을 수 있는 Qdrant 주소>`
+  (필요하면 `QDRANT_COLLECTION`)를 서비스 환경 변수로 직접 추가하고, Qdrant는 직접 운영하세요. 사설 경로로만 닿게 하세요.
+
 - token: Cloudflare dashboard `Workers AI` → `Use REST API` → `Create a Workers AI API Token`
-  (`Workers AI - Read`, `Workers AI - Edit`). `.env`에만 저장합니다.
+  (`Workers AI - Read`, `Workers AI - Edit`). 플랫폼 secret 또는 `.env`에만 저장합니다.
 - 색인 chunk(`90_Private/` 포함)와 검색 query가 Cloudflare Workers AI로 전송됩니다.
   [데이터 정책](https://developers.cloudflare.com/workers-ai/platform/data-usage/).
 - 시작 후 admin의 `Update RAG index`를 한 번 실행하고 `/readyz`의 `rag_indexed`가 `true`인지 확인합니다.
@@ -79,10 +71,13 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
 
 ## 원격 접근
 
-- Gateway는 `GATEWAY_BIND_ADDR=127.0.0.1`(기본), `GATEWAY_HOST_PORT=18080`에 열립니다. 주소를 바꾸기 전에
-  암호화된 사설 경로 또는 TLS endpoint를 준비하세요. 평문 공개 HTTP로는 token·admin 비밀번호·대화가
-  노출됩니다. Admin과 Qdrant는 공개 인터넷에 노출하지 않습니다.
-- TLS를 종단하는 앞단이 있으면 `.env`에 그 앞단의 정확한 IP를 씁니다(쉼표로 여러 개).
+- 컨테이너는 `PORT`(기본 `8000`)로 듣고, Compose는 이를 호스트 `GATEWAY_BIND_ADDR`(기본 loopback `127.0.0.1`)의
+  `GATEWAY_HOST_PORT`(기본 `18080`)에 게시합니다. 주소를 바꾸기 전에 암호화된 사설 경로 또는 TLS endpoint를 준비하세요.
+  평문 공개 HTTP로는 token·admin 비밀번호·대화가 노출됩니다. Qdrant는 비공개로 두고 포트를 공개하지 않습니다.
+  공개 HTTPS로 호스팅하면 `/setup`과 `/admin`도 공개됩니다(claim 전에는 setup code, 후에는 admin 비밀번호·세션·CSRF·login 제한이 보호).
+  claim을 서둘러 끝내고 code를 공유하지 마세요. 비공개 배포라면 가능한 네트워크·접근 제어로 admin을 제한하세요.
+  이 저장소는 proxy·인증서·DDNS를 제공하지 않습니다.
+- HTTPS를 종단하는 앞단이 정확한 IP를 알 수 있다면 환경 변수에 그 IP를 씁니다(쉼표로 여러 개).
 
   ```text
   FORWARDED_ALLOW_IPS=203.0.113.10
@@ -90,6 +85,9 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
 
   `*`는 쓰지 않습니다. 신뢰 목록에 없는 주소의 `X-Forwarded-*`는 무시되며, 이때 Secure cookie 판단과
   login 제한은 연결 주소 기준입니다. 앞단을 거치는 모든 사용자는 앞단 주소 하나로 집계됩니다.
+- 앞단 주소를 신뢰할 수 없거나 모르는 플랫폼(Railway, Render 등)에서 HTTPS로만 접속한다면 `PVG_SECURE_COOKIES=true`로 admin
+  cookie에 Secure를 강제합니다. forwarded 헤더를 신뢰하지 않으므로 login 제한은 연결 주소 기준입니다. 평문 HTTP로 접속하면
+  Secure cookie는 전송되지 않아 로그인할 수 없으니 HTTPS 전용일 때만 쓰세요.
 - Admin login은 client 주소당 5분에 5회까지입니다. 초과하면 `429`와 `Retry-After`를 반환합니다.
   프로세스 메모리에서만 동작하며 재시작하면 초기화되고 공유되지 않으므로 네트워크 접근 제어를 대체하지
   못합니다. CSRF token과 same-origin 확인은 유지됩니다.
@@ -114,7 +112,7 @@ Curator(`pvg-wiki`)는 계획을 제안만 하며 승인·apply·commit·push는
 [CURATOR.md](CURATOR.md)를 따르세요. CLI는 소스 checkout에서 `uv sync --frozen` 후 `uv run pvg-wiki ...`로
 실행합니다.
 
-CLI와 직접 실행하는 Python은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본입니다(Compose 기본은 `none`).
+CLI와 직접 실행하는 Python은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본입니다(Gateway 서비스 기본은 `none`).
 keyword 전용 Gateway에서는 `compact-finish`에 `EMBEDDING_PROVIDER=none`을 명시합니다. semantic Gateway에서는
 Gateway와 같은 Vault·DB·Qdrant 설정과 호환되는 기존 색인이 필요합니다.
 
@@ -122,57 +120,44 @@ Gateway와 같은 Vault·DB·Qdrant 설정과 호환되는 기존 색인이 필�
 
 ## 문제 해결
 
-- **Gateway가 시작하지 않음**: sync가 최초 clone을 끝내야 시작합니다. `docker compose ps`,
-  `docker logs --tail=50 persona-vault-sync`로 확인합니다.
-- **`Permission denied`**: deploy key가 등록되지 않았거나 저장소 이름이 틀립니다. **`Host key verification failed`**:
-  `secrets/github_known_hosts`가 고정된 GitHub key와 다릅니다. 고친 뒤 `--check`를 다시 실행합니다.
-- **`--check`가 EMPTY**: 저장소에 commit을 만듭니다.
-- **큰 Vault에서 `up`이 sync unhealthy로 멈춤**(약 3분): clone이 계속 진행 중일 수 있습니다.
-  `docker top persona-vault-sync`에 `git clone`이 보이면 기다립니다. volume 삭제나 sync 재시작은 하지 마세요.
-  인증·host key 오류가 로그에 있으면 진행 중이 아니니 고치고, sync가 `healthy`가 되면 `docker compose up -d`를
-  다시 실행합니다.
-- **sync BLOCKED**: `/vault`의 rebase·merge·충돌 상태를 직접 해결하면 sync가 재개됩니다.
-- **`/readyz` 503**: semantic을 켠 경우 Qdrant 연결 또는 색인 불일치입니다. `Update RAG index`를 실행합니다.
+- **`/readyz`가 503**: 설정을 마치기 전(claim 또는 Vault 연결 전)에는 정상입니다. `/healthz`는 앱이 살아 있으면 200입니다.
+  `/setup` 또는 `/admin/vault`에서 이어서 진행합니다. semantic을 켠 경우에는 Qdrant 연결 또는 색인 불일치일 수도 있어
+  `Update RAG index`를 실행합니다.
+- **setup code를 놓침**: claim 전이면 `PVG_SETUP_TOKEN`(20~200자 printable ASCII, 공백 없음)을 설정하고 재시작해 새 값을 씁니다.
+  최초 시작 때 한 번 출력된 로그에서 찾을 수도 있습니다.
+- **연결 오류(`/admin/vault`)**: 화면의 고정 문구를 따릅니다. 흔한 원인은 deploy key 미등록 또는 **Allow write access** 누락,
+  저장소 URL 오타, commit이 없는 빈 저장소(commit을 만든 뒤 **Retry**), pinned GitHub host key 불일치입니다.
+  push가 거부되면 write 권한이나 protected branch를 확인합니다. 연결 단계는 쓰기 권한을 증명하지 못합니다.
+- **sync BLOCKED**: Vault의 rebase·merge·충돌 상태를 직접 해결하면 sync가 재개됩니다.
 - **로그인 429**: `Retry-After` 초 뒤에 다시 시도합니다.
 - API는 `/gateway/v3`입니다. `/gateway/v1`, `/gateway/v2`는 `410 client_upgrade_required`를 반환합니다.
   SQLite는 시작 시 자동 migration되며, 더 새로운 schema의 DB는 구버전 Gateway가 열지 않습니다.
 
 ## 업그레이드
 
-항상 같은 설치 디렉토리에서 합니다. 디렉토리를 옮기거나 이름을 바꾸면 새 빈 volume이 생기므로, 불가피하면
-모든 명령에 기존 이름으로 `docker compose -p <기존 이름> ...`을 씁니다. volume 삭제 명령은 쓰지 않습니다.
+같은 설치의 새 Release로 올릴 때는 `compose.yml`을 체크섬 확인 후 같은 위치에 교체하고 `docker compose up -d`를 실행합니다(image는
+digest로 고정). 플랫폼에서는 설정의 image 참조를 직접 새 release로 바꾸고 수동으로 배포합니다. 자동 재배포는 없습니다.
+`persona-vault-data`(`/data`)가 그대로 유지되므로 설정과 Vault는 남습니다.
 
-**먼저:** 예전 `.env`가 `EMBEDDING_PROVIDER`를 비우거나 `cloudflare` 기본값으로 semantic을 쓰고 있었다면
-`.env`에 `EMBEDDING_PROVIDER=cloudflare`와 `COMPOSE_PROFILES=semantic`을 명시합니다. 현재 기본은 `none`이고
-Qdrant는 `semantic` profile에서만 관리됩니다.
+**이전 버전에서 올 때(주의).** 이 설치는 제자리 migration이 아닙니다. 예전에는 sync 컨테이너와 별도 `/vault`·`/data` volume,
+호스트의 `.env`와 `secrets/` key를 썼고, 새 설치는 volume `persona-vault-data` 하나와 `/setup`에서 만든 설정을 씁니다.
+예전 데이터는 자동으로 옮겨지지 않습니다.
 
-- **bundle**: 새 bundle을 기존 설치 디렉토리에 풀어 compose 파일만 교체합니다(`.env`, `secrets/`는 bundle에
-  없어 그대로 남습니다).
+1. 예전 설치 디렉토리에서 예전 stack을 먼저 멈춥니다: `docker compose stop`(또는 `down`, **`-v` 없이**). 같은 디렉토리에서 새
+   `compose.yml`로 바로 `up`하면 예전 sync 컨테이너가 고아로 남고 같은 컨테이너 이름이 충돌할 수 있습니다.
+2. 예전 Vault, SQLite, `.env`, `secrets/`를 백업합니다(아래 [백업과 복구](#백업과-복구)처럼 암호화해 보관).
+3. 새 설치에서 `/setup`을 처음부터 하고 새 deploy key를 등록하며 agent token을 다시 발급합니다. 같은 Vault 저장소를 쓸 수 있지만
+   두 설치를 동시에 돌리지 마세요.
 
-  ```bash
-  tar -xzf persona-vault-gateway-X.Y.Z-install.tar.gz --strip-components=1 -C ~/persona-vault-gateway
-  cd ~/persona-vault-gateway && docker compose up -d
-  ```
-
-- **소스**:
-
-  ```bash
-  cd ~/persona-vault-gateway && git pull --ff-only
-  docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway
-  docker compose up -d
-  ```
-
-Compose 이미지는 digest로 고정되어 있으며 갱신은 의도적인 변경입니다.
+예전 volume은 삭제하지 마세요. 이 문서는 복사 스크립트나 삭제 절차를 제공하지 않습니다.
 
 ## 백업과 복구
 
-1. `docker compose stop persona-vault-gateway persona-vault-sync`로 멈춥니다.
-2. 보존: `.env`, `secrets/`(private key 포함), Vault volume(push되지 않은 commit과 미commit 변경 포함),
-   Gateway data volume의 SQLite(`gateway.db`: token hash, audit).
-3. Qdrant volume은 Vault에서 다시 만들 수 있는 파생 데이터입니다(`Update RAG index`, Cloudflare 사용량 발생).
+1. `docker compose stop`으로 멈춥니다.
+2. `/data` volume 하나를 보존합니다: Vault clone(push되지 않은 commit과 미commit 변경 포함, `/data/vault`), SQLite(`/data/gateway.db`:
+   token hash, audit), 설정(`/data/setup`: admin hash, deploy key의 private key).
+3. Qdrant volume을 쓴다면 Vault에서 다시 만들 수 있는 파생 데이터입니다(`Update RAG index`, Cloudflare 사용량 발생).
 
-복사본에는 비밀이 있으니 암호화해 보관합니다. 복구는 같은 설치 디렉토리(또는 같은 `-p` 이름)에 파일과
-volume 내용을 되돌리고 `docker compose up -d`를 실행합니다. SQLite가 없으면 token을 다시 발급합니다.
-
-`docker compose down -v`, `docker volume rm`, `docker system prune --volumes`는 일상 절차가 아닙니다.
-복원을 확인하기 전에는 쓰지 마세요.
+복사본에는 비밀이 있으니 암호화해 보관합니다. 복구는 같은 구성에 volume 내용을 되돌리고 `docker compose up -d`를 실행합니다.
+SQLite가 없으면 token을 다시 발급합니다. `docker compose down -v`, `docker volume rm`, `docker system prune --volumes`는
+일상 절차가 아닙니다. 복원을 확인하기 전에는 쓰지 마세요.

@@ -45,25 +45,32 @@ Obsidian, VS Code 등 Markdown 편집기는 자유롭게 선택할 수 있습니
 
 ### 1. Gateway를 서버에 한 번 실행
 
-Docker Compose와 commit이 하나 이상 있는 GitHub private Vault 저장소가 필요합니다. 기본 배포는 keyword
-검색입니다.
+Docker Compose(또는 [docs/hosting.md](docs/hosting.md)의 플랫폼)와 commit이 하나 이상 있는 GitHub private
+Vault 저장소가 필요합니다. 기본 배포는 keyword 검색입니다. 소스에서 빌드하려면
+`docker compose -f compose.yml -f compose.build.yml up -d --build`를 실행하세요.
+
+새 설치는 전용 영구 디렉토리에서 하세요(Compose project와 volume 식별이 디렉토리에 달려 있어 업그레이드 때도 유지합니다).
+기존 설치는 아래 명령을 실행하기 전에 [업그레이드 안내](docs/operations.md#업그레이드)를 먼저 읽으세요.
 
 ```bash
-docker compose run --rm persona-vault-init            # GitHub SSH Vault URL과 admin 비밀번호를 묻습니다
-# 출력된 PUBLIC deploy key를 Vault 저장소에 쓰기 권한으로 등록한 뒤:
-docker compose run --rm persona-vault-init --check    # 읽기 전용 접속 확인
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
+curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml.sha256
+sha256sum -c compose.yml.sha256            # macOS: shasum -a 256 -c
 docker compose up -d
+docker compose logs                        # 일회용 setup code
 ```
 
-initializer는 설치 디렉토리에 `.env`, deploy key, 고정된 GitHub `known_hosts`를 만듭니다. 이후에도 같은
-디렉토리를 쓰세요. 파일은
-[GitHub Releases](https://github.com/mykim0409/persona-vault-gateway/releases)의 설치 bundle 또는 소스
-(`docker compose -f compose.yml -f compose.build.yml build persona-vault-gateway` 한 번)로 준비합니다.
-전체 단계, admin 로그인, token 발급은 [docs/setup.md](docs/setup.md), 업그레이드·백업·semantic 검색은
-[docs/operations.md](docs/operations.md)입니다.
+`http://127.0.0.1:18080/setup`을 열어 setup code로 claim하고 admin 비밀번호를 정한 뒤 GitHub 저장소 SSH URL을
+입력하고, 화면의 **public** deploy key를 Vault 저장소에 쓰기 권한으로 등록합니다. 그다음 연결(필요하면
+재시도)하고 agent token을 발급합니다. 설정이 끝나기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과
+capture는 꺼져 있습니다. 연결 단계는 쓰기 권한을 증명하지 못합니다.
+단계별 안내는 [docs/setup.md](docs/setup.md)입니다. Docker, Railway, Render 모두 같은 방식으로 설치하며 Railway·Render
+설정은 준비만 되었고 실제 계정에서 검증하지 않았습니다([docs/hosting.md](docs/hosting.md)). 업그레이드(이전 설치 안전
+메모 포함)·백업·semantic 검색은 [docs/operations.md](docs/operations.md)입니다.
 
-Gateway는 기본적으로 `127.0.0.1`에 바인딩됩니다. 다른 PC에서는 운영자가 관리하는 암호화된 사설 경로나 TLS
-endpoint로만 접근하세요. 평문 공개 HTTP는 agent token과 admin 비밀번호를 노출합니다.
+Compose는 기본적으로 포트를 `127.0.0.1`에만 게시합니다. 네이티브 서버는 `0.0.0.0`에서 듣고 호스팅 서비스는 공개
+HTTPS이므로 둘 다 loopback이 아닙니다. 다른 PC에서는 암호화된 사설 경로나 TLS endpoint로만 접근하세요.
+평문 공개 HTTP는 agent token과 admin 비밀번호를 노출합니다.
 
 ### 2. Plugin 설치 (각 PC)
 
@@ -87,7 +94,7 @@ codex plugin add persona-vault --marketplace persona-vault-gateway
 ```
 
 hook 명령을 확인한 뒤에 신뢰하세요(`/hooks`). 그다음 token helper를 설치하고 Gateway URL과 token을
-[docs/setup.md](docs/setup.md) 4절대로 입력합니다. Windows PowerShell 방법도 거기에 있습니다.
+[docs/setup.md](docs/setup.md) 3절대로 입력합니다. Windows PowerShell 방법도 거기에 있습니다.
 token을 에이전트 대화에 붙여 넣지 마세요.
 
 ### 3. 사용해 보기
@@ -114,21 +121,20 @@ pvg-rag-search --view evidence "token rotate 후 인증 실패"
 
 | 계층 | 현재 구현 |
 | --- | --- |
-| 지식 저장소 | Markdown 파일의 private Git 저장소. compose sidecar가 동기화 |
+| 지식 저장소 | Markdown 파일의 private Git 저장소. Gateway가 직접 동기화 |
 | Gateway | FastAPI와 SQLite: API, auth, 경로 정책, Markdown writer, admin |
 | semantic 검색 (선택) | Qdrant, embedding은 Cloudflare Workers AI REST API |
 | Curator (선택) | `pvg-wiki`, 실험적 로컬 CLI |
 
-제공되는 Compose는 기본이 keyword 전용 검색(`EMBEDDING_PROVIDER=none`)이며 embedding provider나 Qdrant를
-호출하지 않습니다. semantic 검색은 `EMBEDDING_PROVIDER=cloudflare`, `COMPOSE_PROFILES=semantic`(Qdrant 시작),
-Cloudflare 자격 증명을 **모두** 명시해야 켜집니다. 직접 실행하는 Python 런타임은 기존 연동 호환을 위해
+Gateway는 기본이 keyword 전용 검색(`EMBEDDING_PROVIDER=none`)이며 embedding provider나 Qdrant를
+호출하지 않습니다. semantic 검색은 `EMBEDDING_PROVIDER=cloudflare`, Cloudflare 자격 증명, Qdrant 서비스를
+**모두** 갖춰야 켜집니다. 직접 실행하는 Python 런타임은 기존 연동 호환을 위해
 `EMBEDDING_PROVIDER`가 없으면 여전히 `cloudflare`가 기본이므로, keyword 전용 Gateway에 대한 CLI
 `compact-finish` 등에서는 `none`처럼 명시적으로 설정하세요.
 
 Cloudflare Workers AI는 현재 유일한 production embedding 경로입니다. REST로 직접 호출하므로 별도
 Cloudflare Worker를 개발·배포할 필요가 없습니다. 다른 provider는 아직 구현되지 않았고, 코드의 hash
-embedding은 테스트 전용입니다. 예전 `cloudflare` 기본값에 기대던 기존 설치는 업그레이드 전에 semantic
-profile을 명시해야 합니다. [docs/operations.md](docs/operations.md)를 보세요.
+embedding은 테스트 전용입니다. [docs/operations.md](docs/operations.md)를 보세요.
 
 ## 데이터와 통제
 
@@ -166,6 +172,7 @@ profile을 명시해야 합니다. [docs/operations.md](docs/operations.md)를 �
 | 문서 | 내용 |
 | --- | --- |
 | [docs/setup.md](docs/setup.md) | 최초 설치, plugin, token helper |
+| [docs/hosting.md](docs/hosting.md) | 호스팅 선택지: Compose, Railway, Render, 기타 |
 | [docs/operations.md](docs/operations.md) | Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업 |
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
 | [docs/gpt-actions.md](docs/gpt-actions.md) | plugin 대신 쓰는 Custom GPT Actions |
