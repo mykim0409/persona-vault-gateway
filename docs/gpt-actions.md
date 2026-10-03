@@ -63,6 +63,7 @@ paths:
                 body:
                   type: string
                   minLength: 1
+                  maxLength: 64000
                 note_type:
                   type: string
                   enum:

@@ -1,9 +1,10 @@
 # PersonaVault Gateway 설치
 
-이 문서는 public gateway repo 기준의 서버 bootstrap입니다.
+이 문서는 public gateway repo 기준의 서버 bootstrap입니다. Vault는 일반 Markdown 파일의 Git
+저장소이며, Obsidian은 그 Vault를 편집하는 선택 도구 중 하나입니다.
 
 ```text
-Obsidian Git plugin -> vault repo
+Markdown 편집기 + Git client -> vault repo
 gateway container -> Docker volume에 Markdown 기록
 qdrant container -> vault Markdown embedding index 저장
 vault-sync sidecar -> vault repo에 pull/push
@@ -21,7 +22,7 @@ vault-sync sidecar -> vault repo에 pull/push
 | `40_Agents/<agent_id>/` | 이전 버전 agent memo의 legacy curation input | legacy read-only |
 | `50_Knowledge/` | 프로젝트를 넘어 재사용하는 검증된 지식과 reference | 사람 또는 Curator |
 | `90_Private/` | 개인적 맥락과 메모 | 사람 |
-| `.obsidian/` | Obsidian 설정, 플러그인 설정 | Obsidian |
+| `.obsidian/` | 선택. Obsidian을 쓸 때만 생기는 설정, 플러그인 설정. 다른 편집기를 쓰면 필요 없음 | Obsidian |
 
 Gateway v3의 모든 write는 `30_Conversations/raw/`에만 저장됩니다. 대화와 note는
 `kind=conversation|note`로 구분하며, note는 `note_type=observation|proposal|handoff`와
@@ -56,19 +57,28 @@ cd ~/Documents/persona-vault
 mkdir -p 00_Inbox 10_User 20_Projects \
   30_Conversations/raw 30_Conversations/summaries \
   50_Knowledge 90_Private
-curl -fsSLo 10_User/WORKING_AGREEMENT.md \
+# Do not overwrite an existing 10_User/WORKING_AGREEMENT.md (download only if it is missing).
+test -e 10_User/WORKING_AGREEMENT.md || curl -fsSLo 10_User/WORKING_AGREEMENT.md \
   https://raw.githubusercontent.com/mykim0409/persona-vault-gateway/main/docs/WORKING_AGREEMENT.md
 touch 30_Conversations/raw/.gitkeep
-grep -qxF '.tmp/' .gitignore 2>/dev/null || printf '%s\n' '.tmp/' >> .gitignore
+for p in .obsidian/ .tmp/; do
+  grep -qxF "$p" .gitignore 2>/dev/null || printf '%s\n' "$p" >> .gitignore
+done
+git ls-files -- .obsidian .tmp   # 이미 추적 중인 파일이 있으면 아래 설명을 먼저 읽습니다
 git add .
 git diff --cached --quiet || git commit -m "Initialize vault structure"
 git push
 ```
 
-`.tmp/`는 Curator의 plan·draft·checkpoint 작업 공간이라 Vault에 commit하지 않습니다.
-`.gitignore`는 아직 추적되지 않은 파일만 제외하므로 이미 commit된 `.tmp/` 파일은 계속 추적됩니다.
-이 경우 `git rm -r --cached .tmp`로 추적만 해제하고 commit하세요. `--cached`는 로컬 파일을 삭제하지
-않지만, 이미 push한 과거 commit에는 내용이 남습니다. private 내용을 history에서 지우는 일은 별도로 판단합니다.
+`.tmp/`는 Curator의 plan·draft·checkpoint 작업 공간이고 `.obsidian/`에는 plugin 설정과 workspace 상태가
+있으므로 private Vault라도 commit하지 않는 것을 권장합니다(설정을 의도적으로 공유한다면 `.obsidian/`은 선택).
+Obsidian을 쓰지 않아도 `.obsidian/` 제외 항목은 그대로 두어도 됩니다.
+서버의 sync sidecar가 주기적으로 `git add .`를 실행하므로 첫 실행 전에 `.gitignore`를 push해 두세요.
+`.gitignore`는 아직 추적되지 않은 파일만 제외하므로 이미 commit된 `.obsidian/`·`.tmp/` 파일은 계속 추적됩니다.
+위 `git ls-files`가 무언가를 출력하면 내용을 확인한 뒤 직접 `git rm -r --cached --ignore-unmatch -- .obsidian .tmp`로
+추적만 해제하고 commit하세요. 이 문서의 명령은 추적 중인 파일을 자동으로 지우지 않으며, `--cached`는
+로컬 파일을 삭제하지 않지만 이미 push한 과거 commit에는 내용이 남습니다. private 내용을 history에서
+지우는 일은 별도로 판단합니다.
 
 Curator를 사용하려면 [CURATOR.md 템플릿](CURATOR.md)을 이름 변경 없이 Vault
 root에 둡니다. 기존 파일은 protocol v22 템플릿으로 교체하고 과거 절차를 병합하지 않습니다.
@@ -79,10 +89,31 @@ root에 둡니다. 기존 파일은 protocol v22 템플릿으로 교체하고 �
 SessionStart가 자동으로 읽는 문서는 `WORKING_AGREEMENT.md` 하나뿐입니다. 기존
 `10_People/`는 자동으로 이동하거나 삭제하지 않으며 남아 있어도 RAG 검색은 계속됩니다.
 
-## 1. Obsidian Git plugin 설정
+## 1. 로컬 편집과 Git 동기화
 
-Obsidian은 `~/Documents/persona-vault`를 vault로 엽니다.
-gateway repo는 Obsidian에서 열지 않습니다.
+Vault repo는 어떤 편집기를 쓰든 필요합니다. 편집기는 `~/Documents/persona-vault`를 열고, 변경은
+Git client로 vault repo에 pull/push합니다. Obsidian, VS Code 등 어떤 Markdown 편집기든 되며
+교체할 수 있습니다. 계약은 편집기가 아니라 Vault 규칙과 [metadata](metadata.md)입니다.
+gateway repo는 편집기에서 Vault로 열지 않습니다.
+
+권장 동작은 편집기와 무관합니다. 시작할 때 pull하고, push 전에 pull하며(rebase), 주기적으로
+commit·push합니다. 충돌이 나면 pull한 뒤 해결하고 다시 push합니다.
+
+운영 규칙:
+
+| 대상 | 규칙 |
+| --- | --- |
+| `00_Inbox/`, `10_User/`, `20_Projects/`, `30_Conversations/summaries/`, `50_Knowledge/`, `90_Private/` | 편집기에서 수정 |
+| `30_Conversations/raw/`와 기존 `40_Agents/<agent_id>/` | 직접 수정하지 않고 curation input으로만 읽음 |
+| 충돌 발생 시 | pull 후 다시 commit·push |
+
+Desktop에서는 SSH remote를 권장합니다.
+
+### Obsidian을 쓰는 경우 (선택)
+
+Obsidian을 쓰지 않아도 Vault repo 준비(0절)는 건너뛰지 않습니다. Obsidian은 위 clone한
+`~/Documents/persona-vault`를 vault로 엽니다. Obsidian Git plugin을 쓰면 pull/push를 자동화할 수
+있습니다.
 
 권장 동작:
 
@@ -94,15 +125,7 @@ gateway repo는 Obsidian에서 열지 않습니다.
 | Pull before push | 켬 |
 | Merge strategy | rebase |
 
-운영 규칙:
-
-| 대상 | 규칙 |
-| --- | --- |
-| `00_Inbox/`, `10_User/`, `20_Projects/`, `30_Conversations/summaries/`, `50_Knowledge/`, `90_Private/` | Obsidian에서 수정 |
-| `30_Conversations/raw/`와 기존 `40_Agents/<agent_id>/` | 직접 수정하지 않고 curation input으로만 읽음 |
-| 충돌 발생 시 | Obsidian Git에서 pull 후 다시 commit-and-sync |
-
-Desktop에서는 SSH remote를 권장합니다.
+충돌이 나면 Obsidian Git에서 pull 후 다시 commit-and-sync합니다.
 Mobile은 Obsidian Git의 Git 구현 제약이 커서 이 문서의 기본 운영 대상에서 제외합니다.
 
 ## 2. 서버 준비
@@ -116,15 +139,21 @@ command -v ssh-keygen
 ```
 
 ```bash
-git clone https://github.com/OWNER/persona-vault-gateway.git ~/persona-vault-gateway
+git clone https://github.com/mykim0409/persona-vault-gateway.git ~/persona-vault-gateway
 cd ~/persona-vault-gateway
-cp .env.example .env
+test -e .env || install -m 600 .env.example .env
+chmod 600 .env
 ```
 
 Cloudflare dashboard의 `Workers AI` -> `Use REST API`에서 Account ID를 복사하고
 `Create a Workers AI API Token`으로 token을 만듭니다. custom token을 직접 구성한다면
 account의 `Workers AI - Read`, `Workers AI - Edit` 권한이 모두 필요합니다. token은
 아래 `.env`에만 저장하고 Git에는 올리지 않습니다.
+
+현재 semantic 구현은 이 Account ID와 token으로 Cloudflare Workers AI REST API
+(`api.cloudflare.com`)를 직접 호출합니다. 별도 Cloudflare Worker를 개발하거나 배포할 필요가
+없습니다. 다른 embedding provider로의 이식은 아직 구현되지 않았고, 제공 compose는 Account ID와
+token이 없으면 시작하지 않습니다.
 
 `.env`를 수정합니다.
 
@@ -146,10 +175,29 @@ QDRANT_COLLECTION=persona_vault
 vault sync용 deploy key를 만듭니다.
 
 ```bash
-mkdir -p secrets
+mkdir -p secrets && chmod 700 secrets
 test -f secrets/persona_vault_sync || ssh-keygen -t ed25519 -C "persona-vault-sync" -N "" -f secrets/persona_vault_sync
-test -f secrets/github_known_hosts || ssh-keyscan -H github.com > secrets/github_known_hosts
+chmod 600 secrets/persona_vault_sync
 cat secrets/persona_vault_sync.pub
+```
+
+`secrets/` 디렉토리는 700, private key와 `.env`는 600이어야 합니다. 둘 다 Git에 올리지 않습니다.
+
+GitHub host key는 `ssh-keyscan` 출력을 그대로 신뢰하지 않습니다. 같은 네트워크 경로가 보낸 값이라
+검증 전에는 후보일 뿐입니다. 이미 검증해 둔 `secrets/github_known_hosts`가 있으면 이 단계는 건너뜁니다.
+
+```bash
+ssh-keyscan -t ed25519 github.com > secrets/github_known_hosts.candidate
+ssh-keygen -lf secrets/github_known_hosts.candidate -E sha256
+```
+
+출력된 `SHA256:` fingerprint를 GitHub 공식 문서
+[GitHub's SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)의
+Ed25519 값과 직접 비교합니다. 완전히 같을 때만 다음 명령으로 사용하고, 다르면 후보 파일을 지우고
+네트워크를 바꿔 다시 확인하세요.
+
+```bash
+mv secrets/github_known_hosts.candidate secrets/github_known_hosts
 ```
 
 출력된 public key를 vault repo에 등록합니다.
@@ -171,6 +219,31 @@ sudo docker logs --tail=50 persona-vault-sync
 curl -fsS http://127.0.0.1:18080/healthz
 curl -fsS http://127.0.0.1:18080/readyz
 ```
+
+Gateway는 sync 서비스가 **최초 clone/checkout을 끝낸 뒤**(sync 컨테이너의 `/tmp/pv-sync-clone-ready`
+marker로 판단하는 Compose `service_healthy` 의존성)에만 시작합니다. clone이 실패하면(deploy key 미등록,
+host key 불일치 등) sync가 재시작을 반복하고 Gateway는 시작하지 않으니 `docker logs persona-vault-sync`를
+확인하세요. 이는 최초 clone 준비 상태이며 이후 Git sync의 원자성을 보장하지 않습니다.
+
+Vault가 커서 최초 clone이 시작 대기 시간(sync healthcheck의 `start_period` 120초와 2초 간격 30회 재시도,
+합쳐 약 3분)을 넘기면 `docker compose up`이 sync가 unhealthy라는 오류로 먼저 멈출 수 있습니다. 이때
+clone은 컨테이너 안에서 계속 진행 중일 수 있으며 Gateway는 아직 시작하지 않은 상태입니다. 다음으로 진행
+상황을 확인합니다.
+
+```bash
+sudo docker compose ps
+sudo docker logs --tail=50 persona-vault-sync
+sudo docker top persona-vault-sync   # git clone 프로세스가 보이면 아직 진행 중
+sudo docker inspect -f '{{.State.Health.Status}}' persona-vault-sync
+```
+
+clone이 진행 중이면 기다립니다. volume을 삭제하거나 sync 컨테이너를 재시작하지 마세요. 진행 중인 clone이
+중단됩니다. 로그에 인증이나 host key 오류가 있으면 clone이 진행 중인 것이 아니므로 deploy key와
+`known_hosts` 설정을 고친 뒤 다시 실행합니다. sync가 `healthy`가 되면 `sudo docker compose up -d`를
+다시 실행해 Gateway를 시작합니다.
+처음에는 색인이 없으므로 `/readyz` 응답의 `rag_indexed`가 `false`입니다. Qdrant에 연결할 수 없거나
+색인이 현재 Vault와 맞지 않으면 `503`이며, 초기 설치에서는 아래 admin 화면의 `Update RAG index`를
+한 번 실행한 뒤 `rag_indexed`가 `true`가 되는지 확인합니다.
 
 브라우저에서 `<GATEWAY_URL>/admin/login`에 접속하고 `ADMIN_PASSWORD`로 로그인합니다.
 `/admin/tokens`에서 agent token 생성, rotate, disable을 관리합니다. token은 생성 시 한 번만 표시됩니다.
@@ -316,7 +389,14 @@ SessionStart는 `Read` scope가 있는 token으로 승인된
 발화로 취급하지 않습니다. 파일이 없거나 승인 metadata가 맞지 않거나 구버전 Gateway가
 endpoint를 제공하지 않으면 기존 PersonaVault 안내만 사용하고 세션을 막지 않습니다.
 
-명백한 token, API key, password, private key 패턴은 hook에서 가리지만 비밀을
+hook은 로컬 spool에 저장하기 전과 Gateway로 보낼 때마다 token, API key, password(JSON·key=value·URL·
+Bearer/Basic), private key 패턴을 가리고, 인식된 fenced 코드·설정·env·diff·log block은
+`[omitted <kind> block, N lines]`로 바꾸며 절대 cwd 메타데이터 대신 프로젝트 디렉터리 이름만 보냅니다
+(메시지 본문의 경로는 지우지 않음). 필터가 실패하면 해당 새 이벤트는 저장하지 않고 해당 대기 batch는
+전송하지 않으며(에이전트는 막지 않음, 이미 깨끗한 다른 대기 기록과 무관) `status.json`에 고정 문구만
+남깁니다. 휴리스틱이므로 문장 속 코드는 남을 수 있고, 이미 저장된 기존 spool 원문은 지우지 않으며
+(전송 시에만 걸러짐), 이미 Gateway에 저장된 이벤트와 내용이 달라지면 409 conflict 상태로 남습니다.
+직접 API·수동 Vault 파일·Cloudflare embedding 입력은 이 필터의 대상이 아닙니다. 비밀을
 대화에 붙여 넣지 않는 것이 기본 원칙입니다. 자동 수집을 원하지 않으면 해당
 플랫폼의 `/hooks`에서 PersonaVault hook을 비활성화합니다.
 
@@ -349,11 +429,11 @@ Exact plan 승인 전에는 tracked Vault 파일을 수정하지 않습니다. �
 
 ```bash
 uv run pvg-wiki --vault /path/to/persona-vault compact-plan --deferrals /path/to/persona-vault/.tmp/curating/deferred.json --output /path/to/persona-vault/.tmp/curating/next-plan.json
-# review에 drafts/probes를 추가하고, tracked 파일은 그대로 둔 채 초안 검사
+# Add drafts/probes to review, then check the drafts without modifying tracked files
 uv run pvg-wiki --vault /path/to/persona-vault compact-review /path/to/persona-vault/.tmp/curating/next-plan.json
-# 독립 의미 검토 완료 후 hash 기록 (사용자 승인이 아님)
+# After the independent semantic review is complete, record the hash (this is not user approval)
 uv run pvg-wiki --vault /path/to/persona-vault compact-review /path/to/persona-vault/.tmp/curating/next-plan.json --record
-# Exact plan 승인·적용 후, Gateway와 같은 Vault/DB/Qdrant 설정으로 최종 검사·증분 색인·검색
+# After the exact plan is approved and applied, run the final check, incremental indexing and search with the same Vault/DB/Qdrant settings as the Gateway
 uv run pvg-wiki --vault /path/to/persona-vault compact-finish /path/to/persona-vault/.tmp/curating/next-plan.json
 ```
 
@@ -418,3 +498,7 @@ cd ~/persona-vault-gateway
 git pull --ff-only
 sudo docker compose up -d --build
 ```
+
+Compose 이미지(Qdrant, sync용 `alpine/git`, Gateway base `python:3.13-slim`)는 multi-arch index digest로
+고정되어 있습니다. digest 갱신은 의도적으로 하는 변경이며, apt 패키지와 build backend는 고정되지 않아
+build가 bit 단위로 같다고 보장하지 않습니다.

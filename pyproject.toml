@@ -1,7 +1,7 @@
 [project]
 name = "persona-vault-gateway"
 version = "0.1.0"
-description = "FastAPI gateway for writing agent memory into a PersonaVault Obsidian vault"
+description = "FastAPI gateway for Markdown-based, user-owned agent memory"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

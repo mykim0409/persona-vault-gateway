@@ -8,6 +8,9 @@
 - Python 3.13, Node 22, uv `0.12.17` (CI와 Docker가 같은 버전을 고정)
 - 의존성은 `uv.lock` 그대로 설치합니다: `uv sync --frozen`
 - 빌드 backend는 setuptools(>=77)이고 license는 [MIT](LICENSE)입니다.
+- Compose 이미지(Qdrant, `alpine/git`, Gateway base `python:3.13-slim`)는 multi-arch index digest로
+  고정합니다. digest 갱신은 의도적인 변경이며, apt 패키지와 build backend는 고정되지 않아 build가
+  bit 단위로 같다고 보장하지 않습니다.
 
 ## 테스트
 
@@ -30,6 +33,7 @@ uv run --frozen python tests/test_capture_integration.py
 | 핵심·auth·path 정책 | `test_core.py` |
 | admin 화면 | `test_admin.py` |
 | vault sync | `test_sync.py` |
+| Compose 계약·초기 clone readiness | `test_sync.py` (compose.yml 텍스트와 sync script를 임시 경로에서 검사) |
 | RAG 검색 | `test_rag_benchmark.py` |
 | wiki·compaction | `test_wiki.py`, `test_compaction.py` |
 | hook·capture | `test_hook.js`, `test_capture_integration.py` |
@@ -38,6 +42,32 @@ uv run --frozen python tests/test_capture_integration.py
   실행하지 못했다면 **skip이지 pass가 아닙니다.**
 - 개인 Vault, 실제 token, `.env`, 설치된 agent 설정에 대해 테스트를 실행하지 마세요. 실제 Cloudflare
   API를 호출하는 테스트도 두지 않습니다.
+
+## Compose smoke (Docker 필요)
+
+위 목록과 별개이며 Docker CLI, Compose v2 plugin(`docker compose`), 실행 중인 Docker daemon, 이미지
+pull·build용 네트워크가 필요합니다. CI에서는 `compose-smoke` job(ubuntu)이 같은 명령을 실행합니다.
+
+```bash
+python tests/test_compose_smoke.py
+```
+
+실제 `compose.yml`에 최소 override를 얹어 고유한 `pvg-smoke-*` project로 실행합니다. 컨테이너 이름, Gateway
+image tag(`persona-vault-gateway:local`은 쓰지 않음), volume은 모두 project 전용이고 port는 loopback
+ephemeral입니다. 임시 bare Git repo(합성 Markdown 한 건)를 sync에만 `file://`로 mount하며 dummy
+secret·`--env-file`만 쓰고 개인 `.env`는 읽지 않습니다. 확인 항목: 최초 clone이 끝나기 전에는 Gateway가
+시작하지 않음, `/healthz`, 색인 전 `rag_indexed`가 true가 아님, `hash` provider로 색인 후 `/readyz` 200,
+인증된 search·capture. 종료 시 자기 project의 container·volume·image tag·임시 파일만 지웁니다.
+
+- 아래 중 하나라도 해당하면 exit 2(`SKIPPED`)이며 **skip이지 pass가 아닙니다.** Docker CLI가 없음,
+  `docker compose version`이 실패함(Compose v2 plugin 없음), 전체 실행에서 `docker info`가 실패함(daemon
+  없음). `--prepare-only`도 Docker CLI와 Compose v2가 필요하며(`docker compose config`를 실행), daemon
+  없이 임시 파일 생성과 그 검사까지만 합니다.
+- 이 skip 조건은 `test_sync.py`가 mock으로 검증하며 실제 Docker는 호출하지 않습니다.
+- 한계: SSH deploy key·known_hosts 경로, Cloudflare embedding, 의미 검색 품질, clone 실패 시 Compose
+  동작은 검증하지 않습니다(clone 실패의 marker 처리는 `test_sync.py`의 script 수준 테스트만 다룹니다).
+  CI는 amd64 한 환경이라 arm64 실행은 확인하지 않습니다. 최초 clone 준비 상태를 보는 것이며 이후 Git
+  sync의 원자성은 검증하지 않습니다.
 
 ## 로컬 실행 (격리·합성 데이터)
 
@@ -69,6 +99,8 @@ gitleaks git . --log-opts="--branches --remotes --tags --full-history" --redact=
 
 하나의 공유 Node client(`pvg-client.js`)와 하나의 `persona-vault` skill을 Codex·Claude가 함께 씁니다.
 host manifest와 OS별 launcher만 표면 차이를 가집니다. 명령 이름·flag는 모든 OS에서 같게 유지하세요.
+
+Language: skills and references, agent-facing templates, source comments and docstrings, and user-facing UI/CLI text are authored in English. This does not require Vault content to be in English, and it does not replace the localized README/docs or multilingual test fixtures.
 
 ## 브랜치와 commit
 
