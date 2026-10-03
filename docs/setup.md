@@ -13,7 +13,7 @@ On Linux, put `sudo` before `docker` if you need elevated permissions.
 
 Prepare a **private** GitHub repository and make at least one commit (for example, add a README). An empty repository cannot be connected.
 
-## 1. Start the Gateway
+## 1. Start the Gateway (on the server)
 
 For a new install, use a dedicated, permanent directory (the Compose project and volume identity depend on it, so keep it for upgrades).
 
@@ -30,9 +30,20 @@ No `.env` or key file is needed. All data (the Vault clone, SQLite, and settings
 otherwise it is printed once in the log.
 To run from source, clone the repository and run `docker compose -f compose.yml -f compose.build.yml up -d --build`.
 
-## 2. Configure in the browser
+## 2. Configure in the browser (on your PC)
 
-Open `http://127.0.0.1:18080/setup`. Until setup is finished, only `/healthz` returns 200, `/readyz` returns 503, and search and capture are off.
+By default Compose publishes the port only on the server's `127.0.0.1`, so a PC that is not the server can use an SSH tunnel. Run this on the PC
+and leave it open (it prints nothing):
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
+```
+
+`user` is your login name on the server and `SERVER_IP` is its address or hostname. While the tunnel is open, `http://127.0.0.1:18080` is the
+Gateway URL in the browser and in the plugin installer, and the tunnel must stay open whenever the plugin is used later.
+If the server is this PC, no tunnel is needed. A hosted service or an already configured encrypted address uses its own HTTPS URL as the Gateway URL.
+
+Open `/setup` on your Gateway URL (for example `http://127.0.0.1:18080/setup`). Until setup is finished, only `/healthz` returns 200, `/readyz` returns 503, and search and capture are off.
 
 1. Enter the setup code and an admin password (16 to 128 characters), then **Claim this Gateway**.
 2. Enter `git@github.com:OWNER/REPO.git` in **Repository SSH URL** and **Generate deploy key**.
@@ -43,15 +54,12 @@ Open `http://127.0.0.1:18080/setup`. Until setup is finished, only `/healthz` re
 The connection step does not prove write access. Without it, later sync pushes are rejected and shown on the Vault sync screen.
 Do not paste the setup code into chats.
 
-Compose publishes the port only on the server's `127.0.0.1` (the native server listens on `0.0.0.0` and hosted services are public HTTPS, so neither is loopback).
-From other PCs, use an address reachable over an encrypted path (a private network or a TLS endpoint) as the plugin's Gateway URL. Exposing plain HTTP
-publicly exposes tokens and the admin password.
-See [operations.md](operations.md#remote-access).
+Never expose plain HTTP publicly: it exposes tokens and the admin password. See [operations.md](operations.md#remote-access).
 
 Note: a read token reads the whole Vault including `90_Private/`, and automatic capture stores conversation content as plaintext in the Gateway and
 in Git. Read [SECURITY.md](../SECURITY.md).
 
-## 3. Set up the agent plugin
+## 3. Set up the agent plugin (on each PC)
 
 Use a separate agent id and token for each PC. Node.js is required.
 
@@ -102,10 +110,22 @@ To replace a token, run `install-agent-config.ps1` again with `-ReplaceToken`.
 For command syntax, follow the [Windows guide](https://github.com/mykim0409/persona-vault-gateway/blob/main/plugins/persona-vault/skills/persona-vault/references/windows.md).
 </details>
 
-Verify the install:
+Verify the install by saving one memo and finding it again (with the tunnel open, if you use one). The helpers are called by full path, so no PATH refresh is needed.
+macOS / Linux:
 
 ```bash
-pvg-rag-search --view current "current operations policy"
+printf '%s\n' "For this project, record the reason for deployment decisions." \
+  | "$HOME/.local/bin/pvg-agent-memo" --title "Deployment notes" --project Example
+"$HOME/.local/bin/pvg-rag-search" --view evidence "deployment decisions"
 ```
 
-On Windows: `& "$HOME\.local\bin\pvg-rag-search.ps1" --view current "current operations policy"`.
+Windows PowerShell:
+
+```powershell
+"For this project, record the reason for deployment decisions." |
+  & "$HOME\.local\bin\pvg-agent-memo.ps1" --title 'Deployment notes' --project Example
+& "$HOME\.local\bin\pvg-rag-search.ps1" --view evidence "deployment decisions"
+```
+
+The memo command prints JSON that includes the saved `path` (under `30_Conversations/raw/`), and the search should list the same memo. This writes a raw note
+to your Vault, not approved knowledge, so `--view current` can legitimately be empty or abstain on a new Vault.

@@ -50,7 +50,7 @@ You need Docker Compose (or a platform, see [docs/hosting.md](docs/hosting.md)) 
 repository for the Vault (with at least one commit). The default deployment uses keyword search. To build
 from source instead, run `docker compose -f compose.yml -f compose.build.yml up -d --build`.
 
-Use a dedicated, permanent directory for a new install (the Compose project and volume identity depend on it, so keep it for upgrades).
+Run the Docker commands on the **server**. Use a dedicated, permanent directory for a new install (the Compose project and volume identity depend on it, so keep it for upgrades).
 
 ```bash
 curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
@@ -60,7 +60,17 @@ docker compose up -d
 docker compose logs                        # one-time setup code
 ```
 
-Open `http://127.0.0.1:18080/setup`, claim it with the setup code and choose an admin password, enter the
+By default Compose binds the port only to the server's `127.0.0.1`. From another PC, first open an SSH tunnel and keep it running,
+including whenever the plugin is used later (replace `user` with your server login and `SERVER_IP` with its address):
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
+```
+
+Then `http://127.0.0.1:18080` is your Gateway URL. No tunnel is needed if the server is this PC; a hosted service or an
+already configured encrypted address uses its own HTTPS URL.
+
+Open `/setup` on the Gateway URL (for example `http://127.0.0.1:18080/setup`), claim it with the setup code and choose an admin password, enter the
 GitHub repository SSH URL, register the shown **public** deploy key on the Vault repository with write
 access, then connect (retry if needed) and issue agent tokens. Until setup finishes, `/healthz` is 200 but
 `/readyz` is 503 and search and capture are off. The connection step does not prove write access.
@@ -68,9 +78,7 @@ Step by step: [docs/setup.md](docs/setup.md). Docker, Railway, and Render instal
 and Render configs are prepared but not verified on a live account: [docs/hosting.md](docs/hosting.md).
 Upgrades, backup, semantic search: [docs/operations.md](docs/operations.md).
 
-Compose publishes the port only at `127.0.0.1` by default. The native server listens on `0.0.0.0` and hosted
-services are public HTTPS, so neither is loopback. Reach it from other PCs only over an encrypted private
-path or a TLS endpoint; plain public HTTP exposes agent tokens and the admin password.
+Reach it from other PCs only over an encrypted path; plain public HTTP exposes agent tokens and the admin password.
 
 ### 2. Install the plugin (each PC)
 
@@ -101,12 +109,13 @@ covers Windows PowerShell. Never paste a token into an agent chat.
 ### 3. Try it
 
 ```bash
-pvg-rag-search --view current "current token management policy"
-pvg-rag-search --view evidence "auth failure after token rotation"
+printf '%s\n' "For this project, record the reason for deployment decisions." \
+  | "$HOME/.local/bin/pvg-agent-memo" --title "Deployment notes" --project Example
+"$HOME/.local/bin/pvg-rag-search" --view evidence "deployment decisions"
 ```
 
-Agents can also save notes with `pvg-agent-memo`; see the setup guide and the
-[Windows guide](plugins/persona-vault/skills/persona-vault/references/windows.md).
+This saves a raw note (not approved knowledge) and finds it again; `--view current` may legitimately be empty on a new Vault.
+Windows PowerShell version: [docs/setup.md](docs/setup.md#3-set-up-the-agent-plugin-on-each-pc).
 
 ## How it works
 

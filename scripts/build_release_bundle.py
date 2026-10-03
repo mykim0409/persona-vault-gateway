@@ -34,7 +34,6 @@ PROVIDER_IMAGE_FILES = ("render.yaml", ".railway/railway.ts")
 # with its .ko.md reader translation; docs/WORKING_AGREEMENT.md is deliberately not shipped (and neither is its translation).
 ALLOWLIST = (
     "compose.yml",
-    ".env.example",
     "LICENSE",
     "SECURITY.md",
     "SECURITY.ko.md",
@@ -48,8 +47,6 @@ ALLOWLIST = (
     "docs/CURATOR.ko.md",
     "docs/metadata.md",
     "docs/metadata.ko.md",
-    "docs/evaluation-error-book.md",
-    "docs/evaluation-error-book.ko.md",
     # Provider recipes with the image pinned to the release digest. Railway needs its whole (optional) tooling folder
     # to be usable: `npm ci --ignore-scripts && npm run typecheck` inside .railway.
     "render.yaml",
