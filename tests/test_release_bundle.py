@@ -192,6 +192,27 @@ class ContentTests(BundleCase):
             pinned = rb.pin_provider_image((ROOT / rel).read_text(), real, f"gateway-v{version}", rel)
             self.assertEqual(pinned.count(real), 1, rel)
 
+    def test_shipped_docs_are_paired_with_korean_translations(self):
+        shipped = set(rb.ALLOWLIST)
+        docs = [rel for rel in rb.ALLOWLIST if rel.endswith(".md") and not rel.endswith(".ko.md")]
+        self.assertTrue(docs)
+        for rel in docs:
+            with self.subTest(doc=rel):
+                self.assertIn(rel[: -len(".md")] + ".ko.md", shipped)
+        for rel in (r for r in rb.ALLOWLIST if r.endswith(".ko.md")):
+            with self.subTest(translation=rel):
+                self.assertIn(rel[: -len(".ko.md")] + ".md", shipped)
+
+    def test_real_tree_bundle_includes_localized_docs(self):
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+        image = f"ghcr.io/mykim0409/persona-vault-gateway@{DIGEST}"
+        archive, _ = rb.build_bundle(ROOT, f"gateway-v{version}", image, self.out)
+        files = {n.split("/", 1)[1] for n, d in members(archive).items() if d is not None}
+        for rel in ("SECURITY.ko.md", "docs/setup.ko.md", "docs/hosting.ko.md", "docs/operations.ko.md",
+                    "docs/CURATOR.ko.md", "docs/metadata.ko.md", "docs/evaluation-error-book.ko.md"):
+            self.assertIn(rel, files)
+        self.assertFalse([n for n in files if "WORKING_AGREEMENT" in n])
+
 
 class ValidationTests(BundleCase):
     def test_invalid_tags(self):

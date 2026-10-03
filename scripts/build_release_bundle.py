@@ -30,18 +30,26 @@ COMPOSE_IMAGE_COUNTS = {STANDALONE_COMPOSE: 1}
 # Provider recipes reference the released image by tag in the repository; the bundle copy gets the digest instead.
 PROVIDER_IMAGE_FILES = ("render.yaml", ".railway/railway.ts")
 
-# Everything that ships, relative to the repo root. docs/setup.md links the other docs.
+# Everything that ships, relative to the repo root. docs/setup.md links the other docs. Every shipped Markdown doc ships
+# with its .ko.md reader translation; docs/WORKING_AGREEMENT.md is deliberately not shipped (and neither is its translation).
 ALLOWLIST = (
     "compose.yml",
     ".env.example",
     "LICENSE",
     "SECURITY.md",
+    "SECURITY.ko.md",
     "docs/setup.md",
+    "docs/setup.ko.md",
     "docs/hosting.md",
+    "docs/hosting.ko.md",
     "docs/operations.md",
+    "docs/operations.ko.md",
     "docs/CURATOR.md",
+    "docs/CURATOR.ko.md",
     "docs/metadata.md",
+    "docs/metadata.ko.md",
     "docs/evaluation-error-book.md",
+    "docs/evaluation-error-book.ko.md",
     # Provider recipes with the image pinned to the release digest. Railway needs its whole (optional) tooling folder
     # to be usable: `npm ci --ignore-scripts && npm run typecheck` inside .railway.
     "render.yaml",

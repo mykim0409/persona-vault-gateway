@@ -51,7 +51,6 @@ repository for the Vault (with at least one commit). The default deployment uses
 from source instead, run `docker compose -f compose.yml -f compose.build.yml up -d --build`.
 
 Use a dedicated, permanent directory for a new install (the Compose project and volume identity depend on it, so keep it for upgrades).
-Existing installs must read the [upgrade instructions](docs/operations.md#업그레이드) before running these commands.
 
 ```bash
 curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
@@ -67,8 +66,7 @@ access, then connect (retry if needed) and issue agent tokens. Until setup finis
 `/readyz` is 503 and search and capture are off. The connection step does not prove write access.
 Step by step: [docs/setup.md](docs/setup.md). Docker, Railway, and Render install the same way; the Railway
 and Render configs are prepared but not verified on a live account: [docs/hosting.md](docs/hosting.md).
-Upgrades (including a safety note for older installs), backup, semantic search:
-[docs/operations.md](docs/operations.md).
+Upgrades, backup, semantic search: [docs/operations.md](docs/operations.md).
 
 Compose publishes the port only at `127.0.0.1` by default. The native server listens on `0.0.0.0` and hosted
 services are public HTTPS, so neither is loopback. Reach it from other PCs only over an encrypted private
@@ -181,9 +179,9 @@ This beta has not completed a security audit. See [SECURITY.md](SECURITY.md).
 
 | Guide | Covers |
 | --- | --- |
-| [docs/setup.md](docs/setup.md) | First install, plugins, token helper (written in Korean) |
-| [docs/hosting.md](docs/hosting.md) | Hosting options: Compose, Railway, Render, others (Korean) |
-| [docs/operations.md](docs/operations.md) | Vault layout, semantic search, remote access, upgrade, backup (Korean) |
+| [docs/setup.md](docs/setup.md) | First install, plugins, token helper |
+| [docs/hosting.md](docs/hosting.md) | Hosting options: Compose, Railway, Render, others |
+| [docs/operations.md](docs/operations.md) | Vault layout, semantic search, remote access, upgrade, backup |
 | [Windows guide](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows command syntax |
 | [docs/gpt-actions.md](docs/gpt-actions.md) | Custom GPT Actions as an alternative to the plugin |
 | [docs/metadata.md](docs/metadata.md) | Markdown metadata contract |

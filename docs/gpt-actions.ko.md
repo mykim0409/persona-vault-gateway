@@ -1,18 +1,21 @@
-# Custom GPT Actions setup
+# Custom GPT Actions 설정
 
-**English** | [한국어](gpt-actions.ko.md)
+[English](gpt-actions.md) | **한국어**
 
-To use PersonaVault from a Custom GPT, create one `Read + Write` token on the admin page and put it
-only in the Actions authentication. The admin UI shows only `Read`, `Write`, and `Read + Write`,
-while the token list may show the internal scopes `vault-rag`, `conversation-log`, and `agent-memo`.
-Do not put the token in the OpenAPI schema.
+PersonaVault를 Custom GPT에서 쓰려면 관리 페이지에서 `Read + Write` token을 하나
+만들고 Actions 인증에만 넣습니다. 관리 UI는 `Read`, `Write`, `Read + Write`만 표시하며,
+token 목록에는 내부 scope인 `vault-rag`, `conversation-log`, `agent-memo`가 보일 수 있습니다.
+OpenAPI schema에는 token을 쓰지 않습니다.
 
-The current public API is v3. The v1 and v2 routes authenticate the token first and then
-return `410 client_upgrade_required`.
+현재 public API는 v3입니다. v1과 v2 route는 token을 먼저 인증한 뒤
+`410 client_upgrade_required`를 반환합니다.
 
-## Authentication
+아래 OpenAPI schema와 GPT instructions는 Custom GPT에 그대로 붙여 넣는 영어 원문이며 번역하지 않습니다. 영어 문서
+[gpt-actions.md](gpt-actions.md)의 같은 블록과 바이트 단위로 같아야 합니다.
 
-Configure Custom GPT Actions as follows.
+## 인증
+
+Custom GPT Actions에서 다음처럼 설정합니다.
 
 ```text
 Authentication: API Key
@@ -20,25 +23,25 @@ Auth Type: Bearer
 API Key: pvg_...
 ```
 
-Create or rotate the token at `<gateway-url>/admin/tokens`.
+token은 `<gateway-url>/admin/tokens`에서 생성하거나 rotate합니다.
 
-## Public exposure
+## 공개 노출 범위
 
-GPT Actions needs a Gateway reachable over HTTPS, and ideally only the `/gateway/v3/...` routes that Actions uses
-should be open to the public. Keep `/admin`, `/docs`, `/redoc`, `/openapi.json`, and Qdrant off the public side,
-and use the admin screen only over a private path with TLS and access control (VPN, IP allowlist, etc.). No specific
-proxy configuration is required, and the endpoints and authentication method do not change.
+GPT Actions에는 HTTPS로 접근 가능한 Gateway가 필요하며, 공개 대상에는 Actions가 쓰는 `/gateway/v3/...`
+route만 열어 두는 것이 이상적입니다. `/admin`, `/docs`, `/redoc`, `/openapi.json`과 Qdrant는 공개 대상에서 제외하고,
+관리 화면은 TLS와 접근 제어(VPN·IP allowlist 등)가 있는 private 경로로만 쓰세요. 특정 proxy 구성을
+요구하지 않으며 endpoint와 인증 방식은 바뀌지 않습니다.
 
-This isolation is not automatic. The hosted service (the unified browser setup deployment, including the provided Railway and
-Render configurations) exposes `/setup` and `/admin` from the same public HTTPS service unless the operator
-restricts them separately with platform access control. Qdrant stays private. Admin login is rate limited per client address
-(5 attempts per 5 minutes, then `429` with `Retry-After`), but that limit is held in process memory only
-and does not replace network access control. See [../SECURITY.md](../SECURITY.md).
+이 격리는 자동으로 보장되지 않습니다. 호스팅 서비스(제공된 Railway·Render 설정을 포함한 통합 브라우저 설정 배포)는
+운영자가 플랫폼 접근 제어로 따로 제한하지 않는 한 `/setup`과 `/admin`을 같은 공개 HTTPS 서비스로 함께 노출합니다.
+Qdrant는 비공개로 둡니다. Admin login에는 client 주소당 5분에 5회 제한이 있고 초과 시 `429`와 `Retry-After`를
+반환하지만, 이 제한은 프로세스 메모리에서만 동작하므로 네트워크 접근 제어를 대체하지 못합니다.
+[../SECURITY.ko.md](../SECURITY.ko.md)를 보세요.
 
 ## OpenAPI schema
 
-Change only `servers.url` to the actual gateway address. Do not append a trailing `/` or `/gateway/v3`.
-Do not add a `components` section.
+`servers.url`만 실제 gateway 주소로 바꿉니다. 끝 `/`나 `/gateway/v3`를 붙이지 않습니다.
+`components` 섹션은 넣지 않습니다.
 
 ```yaml
 openapi: 3.1.0
@@ -332,7 +335,7 @@ paths:
                   - answer_state
 ```
 
-## GPT instructions
+## GPT 지침 (Instructions)
 
 ```text
 Use searchPersonaVault when the user asks about prior notes, personal memory,
@@ -365,8 +368,8 @@ PersonaVault Action schema and plugin, then retry the unchanged request. Do not
 claim that a note was saved before the retry succeeds.
 ```
 
-## Why not every endpoint?
+## 모든 endpoint를 연결하지 않는 이유
 
-Connect only `search` and the `capture` note input to the Custom GPT. Conversation input is for the trusted
-plugin hook only, and the GPT does not need to call the capabilities, working agreement, health, or admin endpoints
-directly. The helper names remain `pvg-agent-memo` and `pvg-rag-search`.
+Custom GPT에는 `search`와 `capture`의 note 입력만 연결합니다. Conversation 입력은 신뢰된
+plugin hook 전용이고, capabilities, working agreement, health와 admin endpoint는 GPT가 직접
+호출할 필요가 없습니다. Helper 이름은 계속 `pvg-agent-memo`, `pvg-rag-search`를 사용합니다.
