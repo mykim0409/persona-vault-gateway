@@ -44,7 +44,23 @@ jobs:
           uv run --frozen python tests/test_compaction.py
           node tests/test_hook.js
           uv run --frozen python tests/test_capture_integration.py
-          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_rag_benchmark.py tests/test_wiki.py
+          uv run --frozen python -m py_compile gateway/core.py gateway/wiki.py gateway/cli.py gateway/app.py tests/test_core.py tests/test_admin.py tests/test_sync.py tests/test_rag_benchmark.py tests/test_wiki.py tests/test_compose_smoke.py
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Real compose.yml + pinned images, unique pvg-smoke-* project, hash embeddings, synthetic Vault.
+      # No secrets: dummy values only. Exit 2 (no Docker) fails this job; a skip is not a pass.
+      - name: Fresh Compose smoke
+        run: python tests/test_compose_smoke.py
 
   windows-client:
     runs-on: windows-latest

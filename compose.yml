@@ -1,3 +1,5 @@
+# Images are pinned to multi-arch index digests (verified linux/amd64 + linux/arm64).
+# Upgrading a digest is a deliberate change; apt and the Python build backend are not locked.
 services:
   persona-vault-gateway:
     build: .
@@ -22,7 +24,11 @@ services:
       QDRANT_URL: "http://qdrant:6333"
       QDRANT_COLLECTION: "${QDRANT_COLLECTION:-persona_vault}"
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_started
+      # Healthy only after the sync service finished its INITIAL clone/checkout (marker below).
+      persona-vault-sync:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -34,20 +40,21 @@ services:
       retries: 3
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
     container_name: persona-vault-qdrant
     restart: unless-stopped
     volumes:
       - persona-vault-qdrant:/qdrant/storage
 
   persona-vault-sync:
-    image: alpine/git:latest
+    image: alpine/git@sha256:fac7bc2c12aa52bff1c78a26359990e149954a60cdd5d6e20e7e009666c73e0a
     container_name: persona-vault-sync
     restart: unless-stopped
     entrypoint:
       - /bin/sh
       - -ec
       - |
+        rm -f /tmp/pv-sync-clone-ready
         git config --global --add safe.directory /vault
         git config --global user.name "PersonaVault Sync"
         git config --global user.email "persona-vault-sync@localhost"
@@ -70,11 +77,17 @@ services:
           } >&2
           return 0
         }
+        if [ ! -d /vault/.git ]; then
+          git clone "$${VAULT_REPO_SSH_URL:?set VAULT_REPO_SSH_URL}" /vault
+        fi
+        if [ "$$(git -C /vault rev-parse --is-inside-work-tree 2>/dev/null)" != true ] ||
+           [ -n "$$(git -C /vault rev-parse --show-cdup 2>/dev/null)" ]; then
+          echo "persona-vault-sync: /vault is not a usable git work tree; initial clone not ready." >&2
+          exit 1
+        fi
+        # Initial clone/checkout finished; releases the Gateway start only (not a sync atomicity promise).
+        : > /tmp/pv-sync-clone-ready
         while true; do
-          if [ ! -d /vault/.git ]; then
-            git clone "$${VAULT_REPO_SSH_URL:?set VAULT_REPO_SSH_URL}" /vault
-          fi
-
           cd /vault
           if sync_blocked; then
             sleep "$${VAULT_SYNC_INTERVAL_SECONDS:-300}"
@@ -97,6 +110,12 @@ services:
       GIT_SSH_COMMAND: "ssh -i /run/secrets/persona_vault_sync_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/run/secrets/github_known_hosts"
       VAULT_REPO_SSH_URL: "${VAULT_REPO_SSH_URL:?set VAULT_REPO_SSH_URL}"
       VAULT_SYNC_INTERVAL_SECONDS: "${VAULT_SYNC_INTERVAL_SECONDS:-300}"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/pv-sync-clone-ready"]
+      interval: 2s
+      timeout: 3s
+      start_period: 120s
+      retries: 30
     volumes:
       - persona-vault:/vault
     secrets:
