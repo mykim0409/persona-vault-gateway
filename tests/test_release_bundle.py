@@ -140,7 +140,7 @@ class ContentTests(BundleCase):
         self.assertIn("${PVG_IMAGE:-" + IMAGE + "}", standalone.read_text())
 
     def test_provider_files_railway_tooling_and_hosting_doc_ship(self):
-        for rel in ("docs/hosting.md", "render.yaml", ".railway/railway.ts", "compose.yml", ".env.example"):
+        for rel in ("docs/hosting.md", "render.yaml", ".railway/railway.ts", "compose.yml"):
             self.assertIn(rel, rb.ALLOWLIST)
         # railway.ts alone is not usable: the pinned tooling that typechecks it ships with it (never node_modules).
         for rel in (".railway/package.json", ".railway/package-lock.json", ".railway/tsconfig.json"):
@@ -169,11 +169,11 @@ class ContentTests(BundleCase):
         self.assertEqual(data[4:8], b"\x00\x00\x00\x00")  # gzip mtime
 
     def test_symlinked_or_missing_allowlist_file_is_rejected(self):
-        (self.src / ".env.example").unlink()
-        (self.src / ".env.example").symlink_to(self.src / ".env")
+        (self.src / "LICENSE").unlink()
+        (self.src / "LICENSE").symlink_to(self.src / ".env")
         with self.assertRaises(rb.ReleaseError):
             self.build()
-        (self.src / ".env.example").unlink()
+        (self.src / "LICENSE").unlink()
         with self.assertRaises(rb.ReleaseError):
             self.build()
         self.assertFalse(self.out.exists())
@@ -209,9 +209,18 @@ class ContentTests(BundleCase):
         archive, _ = rb.build_bundle(ROOT, f"gateway-v{version}", image, self.out)
         files = {n.split("/", 1)[1] for n, d in members(archive).items() if d is not None}
         for rel in ("SECURITY.ko.md", "docs/setup.ko.md", "docs/hosting.ko.md", "docs/operations.ko.md",
-                    "docs/CURATOR.ko.md", "docs/metadata.ko.md", "docs/evaluation-error-book.ko.md"):
+                    "docs/CURATOR.ko.md", "docs/metadata.ko.md"):
             self.assertIn(rel, files)
         self.assertFalse([n for n in files if "WORKING_AGREEMENT" in n])
+
+    def test_real_tree_bundle_does_not_ship_obsolete_files(self):
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+        image = f"ghcr.io/mykim0409/persona-vault-gateway@{DIGEST}"
+        archive, _ = rb.build_bundle(ROOT, f"gateway-v{version}", image, self.out)
+        files = {n.split("/", 1)[1] for n, d in members(archive).items() if d is not None}
+        for rel in (".env.example", "docs/evaluation-error-book.md", "docs/evaluation-error-book.ko.md"):
+            self.assertNotIn(rel, rb.ALLOWLIST)
+            self.assertNotIn(rel, files)
 
 
 class ValidationTests(BundleCase):
