@@ -49,7 +49,7 @@ Docker Compose(또는 [docs/hosting.ko.md](docs/hosting.ko.md)의 플랫폼)와 
 Vault 저장소가 필요합니다. 기본 배포는 keyword 검색입니다. 소스에서 빌드하려면
 `docker compose -f compose.yml -f compose.build.yml up -d --build`를 실행하세요.
 
-새 설치는 전용 영구 디렉토리에서 하세요(Compose project와 volume 식별이 디렉토리에 달려 있어 업그레이드 때도 유지합니다).
+Docker 명령은 **서버**에서 실행합니다. 새 설치는 전용 영구 디렉토리에서 하세요(Compose project와 volume 식별이 디렉토리에 달려 있어 업그레이드 때도 유지합니다).
 
 ```bash
 curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
@@ -59,7 +59,17 @@ docker compose up -d
 docker compose logs                        # 일회용 setup code
 ```
 
-`http://127.0.0.1:18080/setup`을 열어 setup code로 claim하고 admin 비밀번호를 정한 뒤 GitHub 저장소 SSH URL을
+Compose는 기본적으로 포트를 서버의 `127.0.0.1`에만 바인딩합니다. 다른 PC에서는 먼저 SSH tunnel을 열고, 나중에 plugin을 쓸 때도
+계속 실행해 두세요(`user`는 서버 로그인 이름, `SERVER_IP`는 서버 주소로 바꿉니다).
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
+```
+
+그러면 `http://127.0.0.1:18080`이 Gateway URL입니다. 서버가 이 PC라면 tunnel은 필요 없고, 호스팅 서비스나 이미 구성된 암호화
+주소는 해당 HTTPS URL을 씁니다.
+
+Gateway URL의 `/setup`(예: `http://127.0.0.1:18080/setup`)을 열어 setup code로 claim하고 admin 비밀번호를 정한 뒤 GitHub 저장소 SSH URL을
 입력하고, 화면의 **public** deploy key를 Vault 저장소에 쓰기 권한으로 등록합니다. 그다음 연결(필요하면
 재시도)하고 agent token을 발급합니다. 설정이 끝나기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과
 capture는 꺼져 있습니다. 연결 단계는 쓰기 권한을 증명하지 못합니다.
@@ -67,9 +77,7 @@ capture는 꺼져 있습니다. 연결 단계는 쓰기 권한을 증명하지 �
 설정은 준비만 되었고 실제 계정에서 검증하지 않았습니다([docs/hosting.ko.md](docs/hosting.ko.md)). 업그레이드·백업·
 semantic 검색은 [docs/operations.ko.md](docs/operations.ko.md)입니다.
 
-Compose는 기본적으로 포트를 `127.0.0.1`에만 게시합니다. 네이티브 서버는 `0.0.0.0`에서 듣고 호스팅 서비스는 공개
-HTTPS이므로 둘 다 loopback이 아닙니다. 다른 PC에서는 암호화된 사설 경로나 TLS endpoint로만 접근하세요.
-평문 공개 HTTP는 agent token과 admin 비밀번호를 노출합니다.
+다른 PC에서는 암호화된 경로로만 접근하세요. 평문 공개 HTTP는 agent token과 admin 비밀번호를 노출합니다.
 
 ### 2. Plugin 설치 (각 PC)
 
@@ -99,12 +107,13 @@ token을 에이전트 대화에 붙여 넣지 마세요.
 ### 3. 사용해 보기
 
 ```bash
-pvg-rag-search --view current "현재 token 관리 정책"
-pvg-rag-search --view evidence "token rotate 후 인증 실패"
+printf '%s\n' "For this project, record the reason for deployment decisions." \
+  | "$HOME/.local/bin/pvg-agent-memo" --title "Deployment notes" --project Example
+"$HOME/.local/bin/pvg-rag-search" --view evidence "deployment decisions"
 ```
 
-에이전트는 `pvg-agent-memo`로 메모도 남길 수 있습니다. setup 문서와
-[Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md)를 보세요.
+raw note(승인된 지식 아님)를 저장하고 다시 찾습니다. 새 Vault에서는 `--view current`가 비어 있을 수 있습니다.
+Windows PowerShell 버전: [docs/setup.ko.md](docs/setup.ko.md).
 
 ## 동작 방식
 
