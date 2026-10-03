@@ -4,9 +4,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const pvgClient = require('../scripts/pvg-client.js');
+
 const {
-  gatewayConfig, gatewayRequest, parseEnvFile, redactSecrets, truncateText, wellFormed,
-} = require('../scripts/pvg-client.js');
+  gatewayConfig, gatewayRequest, parseEnvFile, truncateText, wellFormed,
+} = pvgClient;
 
 const MAX_TEXT_CHARS = 64_000;
 const MAX_TRANSCRIPT_READ_BYTES = 1_000_000;
@@ -14,6 +16,8 @@ const MAX_BATCH_BYTES = 3 * 1024 * 1024;
 const MAX_CAPTURE_POSTS = 4;
 const ORPHAN_IDLE_MS = 15 * 60_000;
 const MERGE_FEATURE = 'conversation-merge-v1';
+// Static on purpose: a filter failure must never carry captured text into status or logs.
+const PRIVACY_FAILURE = { kind: 'privacy', status: 0, error: 'privacy_filter_failed' };
 
 function localTimestamp(date = new Date()) {
   const offsetMinutes = -date.getTimezoneOffset();
@@ -29,10 +33,15 @@ function hash(value, length = 24) {
 }
 
 function cleanText(value) {
-  const text = wellFormed(redactSecrets(value))
+  const text = wellFormed(pvgClient.minimizeText(value))
     .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g, '')
     .trim();
   return truncateText(text, MAX_TEXT_CHARS, '\n\n[truncated by PersonaVault hook]');
+}
+
+// Absolute paths stay local: only the project directory name is stored or transmitted.
+function projectName(cwd) {
+  return truncateText(cleanText(String(cwd || '').split(/[\\/]+/).filter(Boolean).pop() || ''), 120);
 }
 
 function textContent(value) {
@@ -276,7 +285,7 @@ function recordForInput(input, records, client, now = localTimestamp()) {
       role: 'user',
       content,
       timestamp: now,
-      cwd: input.cwd || '',
+      cwd: projectName(input.cwd),
       client,
     };
   }
@@ -300,7 +309,7 @@ function recordForInput(input, records, client, now = localTimestamp()) {
       role: 'assistant',
       content,
       timestamp: now,
-      cwd: input.cwd || request?.cwd || '',
+      cwd: projectName(input.cwd) || projectName(request?.cwd),
       client,
     };
   }
@@ -337,7 +346,7 @@ function recordForInput(input, records, client, now = localTimestamp()) {
       agent_id: agentId,
       agent_type: truncateText(cleanText(input.agent_type || 'subagent'), 120),
       timestamp: now,
-      cwd: input.cwd || '',
+      cwd: projectName(input.cwd),
       client,
     };
   }
@@ -385,6 +394,30 @@ function payloadsFromRecords(records, input) {
     days.set(day, dailyRecords);
   }
   return [...days.values()].map((dailyRecords) => payloadFromRecords(dailyRecords, input));
+}
+
+// What actually leaves the machine. The local payload (and its checkpoint hash) is untouched, so
+// already-acknowledged days never replay; spooled legacy records are filtered here on every send.
+// Throws on any filter failure and the caller then sends nothing.
+function wireBatch(batch) {
+  const { cwd, ...rawContext } = batch.context || {};
+  const text = (value) => (typeof value === 'string' ? cleanText(value) : value);
+  const context = Object.fromEntries(Object.entries(rawContext).map(([key, value]) => [key, text(value)]));
+  const project = cleanText(batch.project) || context.client || 'agent';
+  const optional = (value) => (value == null ? null : cleanText(value) || null);
+  return {
+    ...batch,
+    project,
+    title: truncateText(cleanText(batch.title) || `${project} agent session`, 160),
+    context,
+    tags: Array.isArray(batch.tags) ? batch.tags.map(text) : batch.tags,
+    messages: batch.messages.map((message) => ({
+      ...message,
+      content: cleanText(message.content) || '[omitted by PersonaVault privacy filter]',
+      agent_type: message.agent_type == null ? null : truncateText(cleanText(message.agent_type), 120) || null,
+      request: optional(message.request),
+    })),
+  };
 }
 
 function payloadDay(payload) {
@@ -532,10 +565,18 @@ async function processSession(input, options) {
   }
 
   let records;
+  let privacyFailure = null;
   try {
     records = readRecords(spoolPath);
     const client = process.env.PLUGIN_DATA ? 'codex' : 'claude';
-    const record = recordForInput(input, records, client);
+    let record = null;
+    try {
+      record = recordForInput(input, records, client);
+    } catch {
+      // Fail closed for capture data: nothing from this event is stored. The agent is never blocked.
+      privacyFailure = PRIVACY_FAILURE;
+      writeStatus(dataDir, privacyFailure);
+    }
     if (record) {
       appendRecord(spoolPath, record);
       records.push(record);
@@ -601,7 +642,16 @@ async function processSession(input, options) {
       if (Number.isInteger(progress?.count) && progress.count > 0
           && progress.count <= payload.messages.length
           && progress.hash === prefixHash(payload, progress.count)) count = progress.count;
-      const batch = mergeBatch(payload, count);
+      let batch;
+      try {
+        // Filter first, then pack by the bytes that will actually be sent (markers can be longer than
+        // what they replace); progress advances by the messages in the sent batch.
+        batch = mergeBatch(wireBatch({ ...payload, messages: payload.messages.slice(count, count + 500) }), 0);
+      } catch {
+        // Never fall back to the unfiltered batch; progress and checkpoint stay as they were.
+        failure = PRIVACY_FAILURE;
+        continue;
+      }
       if (!batch || batch.messages.length > 500
           || Buffer.byteLength(JSON.stringify(batch)) > MAX_BATCH_BYTES) continue;
       checkpoint.last_day = day;
@@ -620,7 +670,7 @@ async function processSession(input, options) {
       else queue.push(job);
       writePrivateFile(checkpointPath, `${JSON.stringify(checkpoint)}\n`);
     }
-    if (!orphan && (failure || probe?.ok || !pending.length)) writeStatus(dataDir, failure);
+    if (!orphan && (failure || privacyFailure || probe?.ok || !pending.length)) writeStatus(dataDir, failure || privacyFailure);
 
     const pruneLock = acquireLock(lockPath, Math.max(0, Math.min(200, deadline - Date.now())));
     if (pruneLock === null) return false;

@@ -23,6 +23,7 @@ delete process.env.PERSONA_VAULT_TOKEN;
 process.on('exit', () => fs.rmSync(SANDBOX, { recursive: true, force: true }));
 
 const capture = require('../plugins/persona-vault/hooks/persona-vault-capture.js');
+const pvgClient = require('../plugins/persona-vault/scripts/pvg-client.js');
 const sessionStart = require('../plugins/persona-vault/hooks/persona-vault-session-start.js');
 
 function runProcess(command, args, options = {}) {
@@ -506,6 +507,110 @@ async function captureIntegrationTest() {
       'a spool captured under another token stays held; identity cannot be proven');
     assert.strictEqual(sent[0].authorization, 'Bearer pvg_rotated_token');
     assert.strictEqual(readSpoolDates(spoolOf('orphan-rotated')).length, 1);
+
+    // ---- Privacy: new spool, legacy retry, ACK, conflict, failure, expansion ----
+    const pw = 'hunter2-synthetic';
+    const tokenDir = `pvg_${'A'.repeat(43)}`;
+    const unsafe = `Use password=${pw} and ${SYNTH.github}\n${FENCE}js\nconst internalName = 1;\n${FENCE}\nkeep this sentence`;
+    const leaks = [pw, SYNTH.github, 'internalName', tokenDir, '/Users/alice'];
+    const assertClean = (value, label) => {
+      for (const leak of leaks) assert(!String(value).includes(leak), `${label}: leaked ${leak}`);
+    };
+    const rewrite = (item) => fs.writeFileSync(item.file, item.records.map((record) => `${JSON.stringify(record)}\n`).join(''));
+
+    // New records are clean in the spool itself and on the wire.
+    const fresh = 'privacy-new';
+    await capture.processHook({
+      hook_event_name: 'UserPromptSubmit', session_id: fresh, turn_id: 't1', prompt: unsafe, cwd: `/Users/alice/${tokenDir}`,
+    });
+    start = requests.length;
+    assert(await capture.processHook({
+      hook_event_name: 'Stop', session_id: fresh, turn_id: 't1', last_assistant_message: unsafe,
+    }));
+    assertClean(fs.readFileSync(spoolOf(fresh), 'utf8'), 'new spool');
+    assert(fs.readFileSync(spoolOf(fresh), 'utf8').includes('keep this sentence'));
+    assert.strictEqual(requests.length - start, 1);
+    assertClean(JSON.stringify(requests[start].body), 'new wire');
+    assert(!('cwd' in requests[start].body.context));
+    assert.deepStrictEqual(requests[start].body.messages.map((message) => message.role), ['user', 'assistant']);
+
+    // Legacy unacknowledged spool: the wire is filtered, the local checkpoint basis is not.
+    const legacyPrivacy = seed('privacy-legacy', 2);
+    for (const record of legacyPrivacy.records) {
+      Object.assign(record, { content: unsafe, request: `password=${pw}`, cwd: `/Users/alice/${tokenDir}` });
+    }
+    rewrite(legacyPrivacy);
+    start = requests.length;
+    assert(await capture.processHook(legacyPrivacy.input));
+    assert.strictEqual(requests.length - start, 1);
+    assertClean(JSON.stringify(requests[start].body), 'legacy wire');
+    assert.deepStrictEqual(requests[start].body.messages.map((message) => message.event_id), legacyPrivacy.records.map((record) => record.event_id));
+    assert.strictEqual(legacyPrivacy.checkpoint().days[today], digest(capture.payloadFromRecords(legacyPrivacy.records, legacyPrivacy.input)));
+    assert(fs.readFileSync(legacyPrivacy.file, 'utf8').includes(pw), 'existing local spools are not rewritten');
+
+    // Already acknowledged: no replay merely because filtering exists.
+    const acked = seed('privacy-acked', 2);
+    for (const record of acked.records) record.content = unsafe;
+    rewrite(acked);
+    fs.writeFileSync(acked.checkpointFile, JSON.stringify({
+      version: 1, days: { [today]: digest(capture.payloadFromRecords(acked.records, acked.input)) },
+    }));
+    start = requests.length;
+    assert(await capture.processHook(acked.input));
+    assert.strictEqual(requests.length, start, 'ACKed days are not resent');
+
+    // A 409 for an already-persisted event stays an explicit status; unsafe text is never resent.
+    const conflicted = seed('privacy-conflict', 1);
+    conflicted.records[0].content = unsafe;
+    rewrite(conflicted);
+    captureStatus = () => 409;
+    start = requests.length;
+    assert.strictEqual(await capture.processHook(conflicted.input), false);
+    assert.strictEqual(readStatus().kind, 'conflict');
+    assert.strictEqual(conflicted.checkpoint().days[today], undefined);
+    assertClean(JSON.stringify(requests.slice(start).map((request) => request.body)), 'conflict wire');
+    captureStatus = () => statusCode;
+
+    // Filter failure: fail closed for capture data, nothing sent, nothing stored, static status.
+    const failing = seed('privacy-fail', 1);
+    failing.records[0].content = unsafe;
+    rewrite(failing);
+    const spoolBefore = fs.readFileSync(failing.file, 'utf8');
+    const realMinimize = pvgClient.minimizeText;
+    pvgClient.minimizeText = () => { throw new Error(`boom ${pw}`); };
+    try {
+      start = requests.length;
+      assert.strictEqual(await capture.processHook(failing.input), false);
+      assert.strictEqual(requests.length, start, 'no request when the filter throws');
+      assert.deepStrictEqual(Object.keys(readStatus()).sort(), ['at', 'error', 'kind', 'status']);
+      assert.strictEqual(readStatus().kind, 'privacy');
+      assert.strictEqual(readStatus().error, 'privacy_filter_failed');
+      assertClean(fs.readFileSync(statusFile, 'utf8'), 'status');
+      await capture.processHook({ hook_event_name: 'UserPromptSubmit', session_id: 'privacy-fail-new', turn_id: 't1', prompt: unsafe });
+      assert(!fs.existsSync(spoolOf('privacy-fail-new')) || fs.readFileSync(spoolOf('privacy-fail-new'), 'utf8') === '');
+      assert.strictEqual(fs.readFileSync(failing.file, 'utf8'), spoolBefore);
+    } finally {
+      pvgClient.minimizeText = realMinimize;
+    }
+    start = requests.length;
+    assert(await capture.processHook(failing.input), 'filtering recovers on the next hook');
+    assertClean(JSON.stringify(requests.slice(start).map((request) => request.body)), 'recovered wire');
+
+    // Expansion: short `password=a` becomes a longer marker; batches are packed by the filtered bytes.
+    const expanding = seed('privacy-expand', 120);
+    for (const record of expanding.records) record.content = 'password=a '.repeat(5_000);
+    rewrite(expanding);
+    start = requests.length;
+    for (let attempt = 0; attempt < 8 && !(fs.existsSync(expanding.checkpointFile) && expanding.checkpoint().days[today]); attempt += 1) {
+      await capture.processHook(expanding.input);
+    }
+    assert(expanding.checkpoint().days[today], 'every message is eventually sent and acknowledged');
+    const expanded = requests.slice(start);
+    assert(expanded.length > 1 && expanded.every((request) => request.bytes <= 3 * 1024 * 1024));
+    assert.deepStrictEqual(expanded.flatMap((request) => request.body.messages.map((message) => message.event_id)),
+      expanding.records.map((record) => record.event_id));
+    assert(expanded.every((request) => !request.body.messages.some((message) => message.content.includes('password=a'))));
+    assert.strictEqual(expanding.checkpoint().days[today], digest(capture.payloadFromRecords(expanding.records, expanding.input)));
   } finally {
     await new Promise((resolve) => server.close(resolve));
     for (const [key, value] of Object.entries(oldEnv)) {
@@ -1262,6 +1367,204 @@ function configBomTest() {
   }
 }
 
+// All credentials below are synthetic and assembled at runtime.
+const FENCE = '```';
+const SYNTH = {
+  github: `ghp_${'a1'.repeat(18)}`,
+  githubPat: `github_pat_${'B2'.repeat(15)}`,
+  awsId: `AKIA${'Q7'.repeat(8)}`,
+  awsSecret: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYsynthetic',
+  anthropic: `sk-ant-${'z9'.repeat(14)}`,
+  slack: `xoxb-${'1234567890-'.repeat(2)}abcdef`,
+  pem: ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7', 'Zx3Qk9v1w8y2t5r7u0i4o6p8a1s3d5f7g9h1j3k5l7m9n1b3v5c7x9z1'],
+};
+const pemBlock = (eol, lines = SYNTH.pem, footer = true) => [
+  '-----BEGIN PRIVATE KEY-----', ...lines, ...(footer ? ['-----END PRIVATE KEY-----'] : []),
+].join(eol);
+
+function privacyFilterTest() {
+  const clean = capture.cleanText;
+  const redacted = [
+    ['{"password": "correct horse battery", "user": "bob"}', ['horse', 'battery'], ['"user": "bob"']],
+    [`export AWS_SECRET_ACCESS_KEY=${SYNTH.awsSecret}\r\nregion=ap-northeast-2`, [SYNTH.awsSecret], ['\r\nregion=ap-northeast-2']],
+    [`{"AWS_SECRET_ACCESS_KEY":"${SYNTH.awsSecret}","AWS_ACCESS_KEY_ID":"${SYNTH.awsId}"}`, [SYNTH.awsSecret, SYNTH.awsId], []],
+    ["db_password='p@ss word here' next", ['p@ss', 'word here'], [' next']],
+    ['client_secret: "two words" end', ['two words'], [' end']],
+    ['password="unterminated value with spaces', ['unterminated', 'spaces'], []],
+    ['git clone https://deploy:s3cr3tvalue@git.example.com/repo.git now', ['s3cr3tvalue'], ['git.example.com/repo.git now']],
+    ['GET /v1/x?access_token=abc123xyz&page=2', ['abc123xyz'], ['&page=2']],
+    ['curl -H "Authorization: Bearer abc.def.ghi-1234" https://x.example', ['abc.def.ghi-1234'], ['https://x.example']],
+    ['Authorization: Basic dXNlcjpwYXNzd29yZA==\nnext line', ['dXNlcjpwYXNzd29yZA'], ['next line']],
+    ['{"Authorization": "Bearer abcdef123456"}', ['abcdef123456'], []],
+    ['mysql --password hunter2 --host db', ['hunter2'], ['--host db']],
+    [`${SYNTH.github} ${SYNTH.githubPat} ${SYNTH.anthropic} ${SYNTH.slack}`, [SYNTH.github, SYNTH.githubPat, SYNTH.anthropic, SYNTH.slack], []],
+    [`id ${SYNTH.awsId} done`, [SYNTH.awsId], ['done']],
+    [`before\n${pemBlock('\n')}\nafter text`, SYNTH.pem, ['before\n[REDACTED PRIVATE KEY]\nafter text']],
+    [`before\r\n${pemBlock('\r\n')}\r\nafter text`, SYNTH.pem, ['after text']],
+    [`Then I pasted:\n${pemBlock('\n', SYNTH.pem, false)}\nThanks, that is all.`, SYNTH.pem, ['Thanks, that is all.']],
+    [`key "-----BEGIN PRIVATE KEY-----\\n${SYNTH.pem[0]}\\n-----END PRIVATE KEY-----\\n" end`, [SYNTH.pem[0]], [' end']],
+    ['🚀 password="한글 비밀 🚀" 끝', ['한글 비밀'], ['🚀 password="[REDACTED]" 끝']],
+    [`password=${'Z'.repeat(600)} tail`, ['ZZ'], ['password=[REDACTED] tail']],
+    [`password="${'Z y'.repeat(2_000)}" tail`, ['ZZ', 'Z y'], ['password="[REDACTED]" tail']],
+    [`password="${'Z y'.repeat(2_000)}`, ['Z y'], ['password="[REDACTED]']],
+    ['command --password "synthetic private credential" --next', ['synthetic', 'private credential'], ['--next']],
+    ["command --token 'two words here", ['two words'], []],
+    [`k\n-----BEGIN PRIVATE KEY-----\n${SYNTH.pem[0]}\nabcd\n-----END PRIVATE KEY-----\nafter`, ['abcd', SYNTH.pem[0]], ['k\n[REDACTED PRIVATE KEY]\nafter']],
+    [`k\r\n${pemBlock('\r\n', [SYNTH.pem[0], 'abcd'])}\r\nafter`, ['abcd'], ['k\r\n[REDACTED PRIVATE KEY]\r\nafter']],
+    [`"-----BEGIN PRIVATE KEY-----\\n${SYNTH.pem[0]}\\nabcd\\n-----END PRIVATE KEY-----\\n" end`, ['abcd'], [' end']],
+    [`Pasted:\n${pemBlock('\n', [SYNTH.pem[0], SYNTH.pem[1], 'abcd'], false)}\nWhy does this fail?`, [SYNTH.pem[1]], ['Why does this fail?']],
+    [`https://user:${'Z'.repeat(300)}@example.invalid/p?x=1`, ['ZZZZZZ'], ['https://[REDACTED]@example.invalid/p?x=1']],
+    ['The password: swordfish must not be shared.', ['swordfish'], ['The password: [REDACTED]']],
+    ['Use secret: huntertwo only locally.', ['huntertwo'], ['Use secret: [REDACTED]']],
+    ['Then token: huntertwo is mine.', ['huntertwo'], ['token: [REDACTED]']],
+    ['Set db_password: swordfish here', ['swordfish'], []],
+    [`${pemBlock('\n', [`  ${'Q'.repeat(64)}`, '  abcd'])}\nafter`, ['QQQQ', 'abcd'], ['[REDACTED PRIVATE KEY]\nafter']],
+    [pemBlock('\n', ['Comment here', 'Q'.repeat(64)]), ['QQQQ', 'Comment'], ['[REDACTED PRIVATE KEY]']],
+    [`${pemBlock('\r\n', ['Comment here', `  ${'Q'.repeat(64)}`, '  abcd'])}\r\nafter`, ['QQQQ', 'abcd'], ['[REDACTED PRIVATE KEY]\r\nafter']],
+    [`${pemBlock('\n', ['Q'.repeat(64)], false)}\nThanks, done.`, ['QQQQ'], ['Thanks, done.']],
+  ];
+  for (const [input, forbidden, required] of redacted) {
+    const output = clean(input);
+    for (const secret of forbidden) assert(!output.includes(secret), `leaked ${secret} in ${JSON.stringify(output)}`);
+    for (const text of required) assert(output.includes(text), `lost ${JSON.stringify(text)} in ${JSON.stringify(output)}`);
+    assert.strictEqual(clean(output), output, `idempotent: ${JSON.stringify(input)}`);
+  }
+
+  const preserved = [
+    'Please rotate the token: use an env var, and never print the password in logs.',
+    'Error ERR_TOKEN_EXPIRED came from auth_token_refresh() in api.ts, not from max_tokens: 4096.',
+    "No, don't commit .env. I said keep API_KEY out of the repo and say which TOKEN you read.",
+    '다음부터는 토큰 값을 로그에 남기지 말고, 비밀번호는 환경 변수로만 읽어줘. 틀린 부분은 고쳐줘.',
+    '- Keep answers short\n- Never delete files\n- 한국어로 요약해줘\n- Ask before running migrations',
+    `${FENCE}markdown\n# Rules\n- Keep answers short\n- Never delete files\n${FENCE}`,
+    `${FENCE}text\nstep one\nstep two\nstep three\nstep four\n${FENCE}`,
+    `${FENCE}\nFirst do A.\nThen do B.\nFinally report back in Korean.\n${FENCE}`,
+    'Run `npm test` (inline code) then compare A=1 with B=2.',
+  ];
+  for (const text of preserved) assert.strictEqual(clean(text), text);
+
+  const omitted = [
+    [`${FENCE}bash\nnpm test\nnpm run lint\n${FENCE}`, '[omitted bash block, 2 lines]', 'npm run lint'],
+    [`Run:\n${FENCE}sh\nrm -rf build\n${FENCE}\nthen retry.`, 'Run:\n[omitted sh block, 1 line]\nthen retry.', 'rm -rf'],
+    [`Fix:\n${FENCE}js\nconst internalSecretFn = () => 1;\nconst b = 2;\nconsole.log(b);\n${FENCE}\nDone.`, 'Fix:\n[omitted js block, 3 lines]\nDone.', 'internalSecretFn'],
+    [`${FENCE}json\n{\n  "name": "svc-internal",\n  "port": 1\n}\n${FENCE}`, '[omitted json block, 4 lines]', 'svc-internal'],
+    [`${FENCE}yaml\nservices:\n  web-internal:\n    image: x\n${FENCE}`, '[omitted yaml block, 3 lines]', 'web-internal'],
+    [`~~~env\nFOO_URL=x\nBAR_URL=y\nBAZ_URL=z\n~~~`, '[omitted env block, 3 lines]', 'FOO_URL'],
+    [`${FENCE}\nFOO_URL=x\nBAR_URL=y\nBAZ_URL=z\n${FENCE}`, '[omitted env block, 3 lines]', 'FOO_URL'],
+    [`${FENCE}\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-oldline\n+newline\n${FENCE}`, '[omitted diff block, 5 lines]', 'newline'],
+    [`${FENCE}\n${Array.from({ length: 8 }, (_, i) => `2026-01-01 10:00:0${i} INFO request ${i} ok`).join('\n')}\n${FENCE}`, '[omitted log block, 8 lines]', 'request 3'],
+    [`${FENCE}\n${Array.from({ length: 6 }, (_, i) => `const v${i} = call${i}();`).join('\n')}\n${FENCE}`, '[omitted code block, 6 lines]', 'call3'],
+    [`Before\n${FENCE}python\nprint(1)\nprint(2)\nprint(3)\nprint(4)`, 'Before\n[omitted python block, 4 lines]', 'print(3)'],
+    [`See the patch:\ndiff --git a/x b/x\nindex 111..222 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-oldline\n+newline\n\nThat is why.`, 'See the patch:\n[omitted diff block, 7 lines]\n\nThat is why.', 'newline'],
+    ['Env was:\nAPI_URL=x\nDB_HOST=y\nCACHE_DIR=z\nAnd then it failed.', 'Env was:\n[omitted env block, 3 lines]\nAnd then it failed.', 'DB_HOST'],
+    [`Log:\n${Array.from({ length: 9 }, (_, i) => `[ERROR] worker ${i} crashed`).join('\n')}\nWhy?`, 'Log:\n[omitted log block, 9 lines]\nWhy?', 'worker 4'],
+  ];
+  for (const [input, expected, hidden] of omitted) {
+    const output = clean(input);
+    assert(output.includes(expected), `${JSON.stringify(output)} lacks ${JSON.stringify(expected)}`);
+    if (hidden) assert(!output.includes(hidden), `${hidden} survived in ${JSON.stringify(output)}`);
+    assert.strictEqual(clean(output), output);
+    assert.strictEqual(clean(input), output, 'markers are stable');
+  }
+  // Fewer than the log threshold stays: an error excerpt is evidence, not a dump.
+  const excerpt = 'Failed:\n[ERROR] a\n[ERROR] b\n[ERROR] c';
+  assert.strictEqual(clean(excerpt), excerpt);
+  // CRLF text keeps its line endings outside omitted blocks.
+  assert.strictEqual(clean(`a\r\n${FENCE}js\r\n1\r\n2\r\n3\r\n${FENCE}\r\nb`), 'a\r\n[omitted js block, 3 lines]\r\nb');
+
+  // Bounded size: markers never push a message over the cap.
+  const long = clean(`${'x'.repeat(63_990)}\n${FENCE}js\na\nb\nc\n${FENCE}\n${'y'.repeat(100)}`);
+  assert(long.length <= 64_000 && long.endsWith('[truncated by PersonaVault hook]'));
+
+  // No quadratic/catastrophic behaviour on adversarial input.
+  const started = Date.now();
+  for (const hostile of [
+    'token'.repeat(13_000), 'token: '.repeat(9_000), 'password=x '.repeat(6_000), 'password="'.repeat(6_000),
+    '-----BEGIN PRIVATE KEY-----\n'.repeat(3_000), 'Authorization: Bearer '.repeat(3_000), 'https://a:b'.repeat(8_000),
+    `${FENCE}\n`.repeat(20_000), ' '.repeat(64_000) + 'password', 'A'.repeat(64_000),
+  ]) clean(hostile);
+  assert(Date.now() - started < 2_000, 'privacy filters must stay linear-time');
+
+  // The shared diagnostic masking uses the same redaction.
+  assert(!pvgClient.redactSecrets(`failed password=${SYNTH.awsSecret}`).includes(SYNTH.awsSecret));
+}
+
+function privacyCaptureRecordsTest() {
+  const password = 'hunter2-synthetic';
+  const prompt = `Deploy with password=${password} from /Users/alice/work/app\n${FENCE}py\nprint(1)\nprint(2)\nprint(3)\n${FENCE}\nPlease keep going.`;
+  const stamp = '2026-02-03T04:05:06+09:00';
+  for (const client of ['claude', 'codex']) {
+    const events = [];
+    const user = capture.recordForInput({
+      hook_event_name: 'UserPromptSubmit', session_id: 'privacy', turn_id: 't1', prompt, cwd: '/Users/alice/work/app',
+    }, events, client, stamp);
+    events.push(user);
+    const plain = capture.recordForInput({
+      hook_event_name: 'UserPromptSubmit', session_id: 'privacy', turn_id: 't1', prompt: 'x',
+    }, [], client, stamp);
+    assert.strictEqual(user.event_id, plain.event_id, 'event identity does not depend on filtered text');
+    assert.deepStrictEqual([user.role, user.kind, user.timestamp, user.turn_id], ['user', 'main_request', stamp, 't1']);
+    assert.strictEqual(user.content, 'Deploy with password=[REDACTED] from /Users/alice/work/app\n[omitted py block, 3 lines]\nPlease keep going.');
+    assert.strictEqual(user.cwd, 'app');
+    // New records never keep a path or a token-shaped directory name.
+    const tokenDir = `pvg_${'A'.repeat(43)}`;
+    const tokenRecord = capture.recordForInput({
+      hook_event_name: 'UserPromptSubmit', session_id: 'privacy-cwd', turn_id: 't1', prompt: 'hi', cwd: `/work/${tokenDir}`,
+    }, [], client, stamp);
+    assert(!JSON.stringify(tokenRecord).includes(tokenDir) && !tokenRecord.cwd.includes('/'));
+    const fallback = capture.recordForInput({
+      hook_event_name: 'Stop', session_id: 'privacy-cwd', last_assistant_message: 'ok',
+    }, [{ ...tokenRecord, cwd: `/Users/alice/${tokenDir}`, kind: 'main_request', turn_id: 'legacy' }], client, stamp);
+    assert.strictEqual(fallback.cwd, '[REDACTED PVG TOKEN]');
+    const answer = capture.recordForInput({
+      hook_event_name: 'Stop', session_id: 'privacy', turn_id: 't1', cwd: 'C:\\Users\\alice\\proj',
+      last_assistant_message: `I will not use ${password}. token=${SYNTH.github}\n${FENCE}sh\nls\nls\nls\n${FENCE}`,
+    }, events, client, stamp);
+    assert.deepStrictEqual([answer.role, answer.kind], ['assistant', 'main_response']);
+    assert.strictEqual(answer.cwd, 'proj');
+
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pvg-privacy-'));
+    try {
+      const transcript = path.join(temp, 'agent.jsonl');
+      fs.writeFileSync(transcript, `${JSON.stringify({
+        type: 'user', uuid: 'r1', message: { role: 'user', content: `Audit it, secret: "two words ${password}"\n${FENCE}json\n{\n"a": 1\n}\n${FENCE}` },
+      })}\n${JSON.stringify({
+        type: 'assistant', uuid: 'h1', message: { role: 'assistant', content: [
+          { type: 'tool_use', name: 'SubagentHandback', input: { message: `Found Authorization: Bearer ${SYNTH.github.slice(0, 20)}abcdef in config.` } },
+        ] },
+      })}\n`);
+      const agent = capture.recordForInput({
+        hook_event_name: 'SubagentStop', session_id: 'privacy', agent_id: 'sub-1', agent_type: `token=${password}`,
+        agent_transcript_path: transcript, last_assistant_message: 'Done.', cwd: '/Users/alice/work/app',
+      }, [], client, stamp);
+      assert.deepStrictEqual([agent.role, agent.kind], ['subagent', 'subagent_result']);
+      assert.strictEqual(agent.cwd, 'app');
+      assert.strictEqual(agent.request, 'Audit it, secret: "[REDACTED]"\n[omitted json block, 3 lines]');
+      assert(agent.content.includes('Authorization: Bearer [REDACTED]'));
+      assert.strictEqual(agent.agent_type, 'token=[REDACTED]');
+      // A delegated agent's own prompt is still not human speech.
+      assert.strictEqual(capture.recordForInput({ session_id: 'privacy', agent_id: 'sub-1', hook_event_name: 'UserPromptSubmit', prompt }, [], client), null);
+      events.push(agent);
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+    const everything = JSON.stringify(events) + JSON.stringify(capture.payloadFromRecords(events, { session_id: 'privacy', cwd: '/Users/alice/work/app' }));
+    for (const leak of [password, SYNTH.github, 'print(2)', 'two words']) assert(!everything.includes(leak), leak);
+    assert(!JSON.stringify(events).includes('Users/alice/work/app"'), 'records keep no absolute cwd');
+  }
+
+  // A filter failure stores nothing and carries no text.
+  const original = pvgClient.minimizeText;
+  pvgClient.minimizeText = () => { throw new Error(`boom ${password}`); };
+  try {
+    assert.throws(() => capture.recordForInput({
+      hook_event_name: 'UserPromptSubmit', session_id: 'privacy', turn_id: 't9', prompt,
+    }, [], 'codex', stamp));
+  } finally {
+    pvgClient.minimizeText = original;
+  }
+}
+
 async function gatewayDiagnosticsTest() {
   const token = 'pvg_diagnostic_token_value';
   const server = http.createServer((request, response) => {
@@ -1420,6 +1723,8 @@ async function main() {
   subagentTranscriptTest();
   sharedHostBehaviorTest();
   explicitTurnAndHandbackTest();
+  privacyFilterTest();
+  privacyCaptureRecordsTest();
   configBomTest();
   await gatewayDiagnosticsTest();
   captureNoticeTest();
