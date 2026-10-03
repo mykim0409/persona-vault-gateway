@@ -16,6 +16,8 @@ privacy: normal
 protocol_version: 22
 ---
 
+**English** | [한국어](https://github.com/mykim0409/persona-vault-gateway/blob/main/docs/CURATOR.ko.md)
+
 # PersonaVault Curator Protocol
 
 The goal is to consolidate raw records into knowledge and to reduce active Markdown. Audit documents, plan

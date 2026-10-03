@@ -1,37 +1,41 @@
-# 평가 오류 장부
+# Evaluation error book
 
-이 장부는 PersonaVault 검색·사용 benchmark가 기대 동작을 어긴 사례를 재현하고 회귀를 막기 위한 기록입니다. 성공 실행은 집계 지표로 관리하고, 실패만 한 행씩 남깁니다.
+**English** | [한국어](evaluation-error-book.ko.md)
 
-## 기록 템플릿
+This book records cases where a PersonaVault search/usage benchmark violated the expected behavior, so that they can be reproduced and regressions prevented. Successful runs are tracked as aggregate metrics; only failures are recorded, one row each.
+
+## Record template
 
 | run_id | scenario_id | bundle | category | sanitized_query | expected | actual | evidence_ref | cause_or_hypothesis | next_action | status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `20260716-01` | `cross-agent-01` | `experiences` | `retrieval_miss` | `재색인 실패 복구 방법` | `ep_qdrant_rebuild` 반환 | 관련 episode 없음 | `benchmark/runs/20260716-01` | error signature 불일치 | alias/signature 정규화 후 재실행 | `open` |
+| `20260716-01` | `cross-agent-01` | `experiences` | `retrieval_miss` | `재색인 실패 복구 방법` | returns `ep_qdrant_rebuild` | no related episode | `benchmark/runs/20260716-01` | error signature mismatch | normalize alias/signature, then rerun | `open` |
 
-`status`는 `open`, `fixed`, `accepted` 중 하나를 사용합니다. 원인을 아직 모르면 추측을 사실처럼 쓰지 말고 `cause_or_hypothesis`에 가설임을 표시합니다.
+The sample query is Korean on purpose: it is a multilingual fixture (it means "how to recover from a reindex failure"), so keep it as is.
 
-## 실패 분류
+`status` is one of `open`, `fixed`, or `accepted`. If the cause is not yet known, do not state a guess as fact; mark it as a hypothesis in `cause_or_hypothesis`.
 
-| category | 기준 |
+## Failure categories
+
+| category | Criterion |
 | --- | --- |
-| `retrieval_miss` | 필요한 문서가 허용 순위 안에 없음 |
-| `authority_leak` | agent·raw·derived 자료가 canonical처럼 제시됨 |
-| `stale_current` | superseded 또는 오래된 주장이 현재 사실처럼 반환됨 |
-| `negative_transfer` | 다른 환경·repository의 해결책을 적용 가능성 확인 없이 사용함 |
-| `conflict_hidden` | 상충하는 근거가 누락되거나 근거 없이 한쪽이 선택됨 |
-| `provenance_error` | 같은 source의 반복을 독립 검증으로 세거나 fallback provenance를 명시값처럼 표시함 |
-| `unsupported_answer` | 근거가 부족한데 답을 단정하여 abstention에 실패함 |
-| `duplicate_subject` | 같은 subject가 동등한 최상위 답으로 중복됨 |
-| `cross_scope_miss` | alias, error signature, 다국어 또는 cross-project 연결을 놓침 |
-| `metadata_error` | metadata 파싱·정규화·source hash 판정이 잘못됨 |
-| `harness_error` | 제품 동작이 아니라 benchmark fixture, index 준비, runner가 실패함 |
+| `retrieval_miss` | A required document is not within the allowed rank |
+| `authority_leak` | Agent, raw, or derived material is presented as canonical |
+| `stale_current` | A superseded or outdated claim is returned as a current fact |
+| `negative_transfer` | A solution from another environment or repository is used without checking that it applies |
+| `conflict_hidden` | Conflicting evidence is omitted, or one side is chosen without evidence |
+| `provenance_error` | Repetition of the same source is counted as independent verification, or fallback provenance is shown as an explicit value |
+| `unsupported_answer` | An answer is asserted despite insufficient evidence, failing to abstain |
+| `duplicate_subject` | The same subject is duplicated as equivalent top answers |
+| `cross_scope_miss` | An alias, error signature, multilingual, or cross-project link is missed |
+| `metadata_error` | Metadata parsing, normalization, or source-hash judgment is wrong |
+| `harness_error` | The benchmark fixture, index preparation, or runner failed, not the product behavior |
 
-## 운영 규칙
+## Operating rules
 
-1. 기대값, 실제값, 근거를 재현 가능한 ID와 repository 상대 경로로 기록합니다.
-2. 한 행에는 주된 실패 분류 하나를 쓰고, 연쇄 증상은 `actual`에 적습니다.
-3. query와 출력은 최소한으로 발췌하고 token, credential, 개인 host, 사용자명, 로컬 절대 경로를 제거합니다.
-4. 원본 transcript나 전체 tool log를 복사하지 말고 접근 통제된 benchmark artifact의 참조만 남깁니다.
-5. 수정 후 같은 scenario를 다시 실행하고 새 run을 추가한 뒤 기존 행을 `fixed`로 바꿉니다. 과거 실패 내용은 지우지 않습니다.
-6. 일시적인 help 출력, smoke-test 출력, 설치 확인, 단발성 네트워크 오류는 Vault에 저장하지 않습니다. 필요하면 Vault 밖의 CI artifact나 benchmark run log에 둡니다.
-7. 실패가 다른 작업에도 재사용할 만하고 실제 관찰·적용 조건·근거가 갖춰졌을 때만 별도의 `episode`로 기록합니다. benchmark 장부 자체를 canonical 또는 candidate로 승격하지 않습니다.
+1. Record the expected value, the actual value, and the evidence using reproducible IDs and repository-relative paths.
+2. Write one primary failure category per row, and put cascading symptoms in `actual`.
+3. Excerpt queries and outputs minimally, and remove tokens, credentials, personal hosts, usernames, and local absolute paths.
+4. Do not copy the original transcript or the full tool log; leave only a reference to an access-controlled benchmark artifact.
+5. After a fix, rerun the same scenario, add a new run, and then change the existing row to `fixed`. Do not erase the past failure content.
+6. Do not store transient help output, smoke-test output, installation checks, or one-off network errors in the Vault. If needed, keep them in a CI artifact or benchmark run log outside the Vault.
+7. Record a failure as a separate `episode` only when it is reusable for other work and has real observation, applicability conditions, and evidence. Do not promote the benchmark book itself to canonical or candidate.

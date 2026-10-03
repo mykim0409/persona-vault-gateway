@@ -1,22 +1,24 @@
 # Contributing
 
-개인용 self-hosted 베타 프로젝트입니다. 이 문서가 개발·테스트의 단일 안내입니다.
-최초 설치는 [docs/setup.md](docs/setup.md), 호스팅은 [docs/hosting.md](docs/hosting.md), 운영은
-[docs/operations.md](docs/operations.md), 취약점은
-[SECURITY.md](SECURITY.md)를 보세요.
+**English** | [한국어](CONTRIBUTING.ko.md)
 
-## 환경
+This is a personal, self-hosted beta project. This document is the single guide for development and testing.
+For the first install see [docs/setup.md](docs/setup.md), for hosting [docs/hosting.md](docs/hosting.md), for operations
+[docs/operations.md](docs/operations.md), and for vulnerabilities
+[SECURITY.md](SECURITY.md).
 
-- Python 3.13, Node 22, uv `0.12.17` (CI와 Docker가 같은 버전을 고정)
-- 의존성은 `uv.lock` 그대로 설치합니다: `uv sync --frozen`
-- 빌드 backend는 setuptools(>=77)이고 license는 [MIT](LICENSE)입니다.
-- Compose 이미지(Qdrant, Gateway base `python:3.13-slim`)는 multi-arch index digest로
-  고정합니다. digest 갱신은 의도적인 변경이며, apt 패키지와 build backend는 고정되지 않아 build가
-  bit 단위로 같다고 보장하지 않습니다.
+## Environment
 
-## 테스트
+- Python 3.13, Node 22, uv `0.12.17` (CI and Docker pin the same version)
+- Install dependencies exactly as locked in `uv.lock`: `uv sync --frozen`
+- The build backend is setuptools (>=77) and the license is [MIT](LICENSE).
+- Compose images (Qdrant, the Gateway base `python:3.13-slim`) are pinned by multi-arch index digest.
+  Updating a digest is an intentional change, and apt packages and the build backend are not pinned, so builds
+  are not guaranteed to be bit-for-bit identical.
 
-CI(`.github/workflows/ci.yml`)와 같은 명령입니다. 모두 실제 API·서비스 없이 동작합니다.
+## Tests
+
+These are the same commands as CI (`.github/workflows/ci.yml`). All of them run without real APIs or services.
 
 ```bash
 uv sync --frozen
@@ -34,65 +36,64 @@ node tests/test_hook.js
 uv run --frozen python tests/test_capture_integration.py
 ```
 
-| 영역 | 파일 |
+| Area | File |
 | --- | --- |
-| 핵심·auth·path 정책 | `test_core.py` |
-| admin 화면·login limiter | `test_admin.py` |
-| Compose smoke 보조 로직(skip 규칙, backup·restore, 테스트 전용 transport)과 네이티브 `gateway.server` 첫 사용 흐름 | `test_sync.py` |
-| RAG 검색 | `test_rag_benchmark.py` |
-| wiki·compaction | `test_wiki.py`, `test_compaction.py` |
-| SSH deploy key·known_hosts 보조 함수(`gateway.bootstrap`) | `test_bootstrap.py` |
-| 릴리스 설치 bundle | `test_release_bundle.py` |
-| hook·capture | `test_hook.js`, `test_capture_integration.py` |
-| 브라우저 설정(`/setup` claim, deploy key, 합성 clone, Gateway 내장 Git sync, readiness) | `test_onboarding.py` |
-| 배포 표면 정적 검사(`compose.yml`, `render.yaml`, `.railway/railway.ts`) | `test_deployment_surfaces.py` |
+| Core, auth, and path policy | `test_core.py` |
+| Admin screens and login limiter | `test_admin.py` |
+| Compose smoke helper logic (skip rules, backup and restore, test-only transport) and the native `gateway.server` first-use flow | `test_sync.py` |
+| RAG search | `test_rag_benchmark.py` |
+| Wiki and compaction | `test_wiki.py`, `test_compaction.py` |
+| SSH deploy key and known_hosts helpers (`gateway.bootstrap`) | `test_bootstrap.py` |
+| Release install bundle (including localized doc pairs) | `test_release_bundle.py` |
+| Hook and capture | `test_hook.js`, `test_capture_integration.py` |
+| Browser setup (`/setup` claim, deploy key, synthetic clone, the Gateway's built-in Git sync, readiness) | `test_onboarding.py` |
+| Static checks of the deployment surfaces (`compose.yml`, `render.yaml`, `.railway/railway.ts`) | `test_deployment_surfaces.py` |
 
-위 Python 테스트는 임시 디렉토리와 합성 데이터만 쓰고 Docker daemon·네트워크·실제 Git host·registry·클라우드 계정이
-필요 없습니다(SSH transport는 로컬 bare repository로 대체). 모두 CI에서 실행됩니다.
+The Python tests above use only temporary directories and synthetic data and need no Docker daemon, network, real Git host, registry, or
+cloud account (the SSH transport is replaced by a local bare repository). All of them run in CI.
 
-- `node tests/test_client_windows.js`는 네이티브 Windows(CI `windows-latest`)용입니다. 그 외 환경에서
-  실행하지 못했다면 **skip이지 pass가 아닙니다.**
-- 개인 Vault, 실제 token, `.env`, 설치된 agent 설정에 대해 테스트를 실행하지 마세요. 실제 Cloudflare
-  API를 호출하는 테스트도 두지 않습니다.
+- `node tests/test_client_windows.js` is for native Windows (CI `windows-latest`). If you could not
+  run it on another environment, that is a **skip, not a pass.**
+- Do not run tests against a personal Vault, real tokens, `.env`, or installed agent configuration. There are also no tests that call the real Cloudflare
+  API.
 
-## Compose smoke (Docker 필요)
+## Compose smoke (needs Docker)
 
-위 목록과 별개이며 Docker CLI, Compose v2 plugin(`docker compose`), 실행 중인 Docker daemon, 이미지
-pull·build용 네트워크가 필요합니다. 실제 Docker 검증은 CI의 `compose-smoke` job(ubuntu)이 같은 명령으로 합니다.
+This is separate from the list above and needs the Docker CLI, the Compose v2 plugin (`docker compose`), a running Docker daemon, and a network for image
+pull and build. Real Docker verification is done by the `compose-smoke` job in CI (ubuntu) with the same command.
 
 ```bash
 python tests/test_compose_smoke.py
 ```
 
-실제 `compose.yml`과 `compose.build.yml`(소스 build)에 최소 override를 얹어 고유한 `pvg-smoke-*` project로
-실행합니다. 컨테이너 이름, Gateway image tag, volume은 모두 project 전용이고 port는 loopback ephemeral입니다.
-Gateway는 첫 설치처럼 claim 전 상태로 시작하며 개인 `.env`나 실제 secret은 읽지 않습니다. 테스트 전용으로 mount한
-`sitecustomize.py`가 SSH transport를 합성 bare repository로 대체하고, 운영 코드에는 그런 스위치가 없습니다.
-종료 시 자기 project의 container·volume·image tag·임시 파일만 지웁니다. 두 project를 차례로 실행합니다.
+It layers a minimal override on the real `compose.yml` and `compose.build.yml` (source build) and runs under a unique `pvg-smoke-*` project.
+Container names, the Gateway image tag, and volumes are all project-specific, and ports are loopback ephemeral.
+The Gateway starts unclaimed like a first install and does not read a personal `.env` or any real secret. A test-only mounted
+`sitecustomize.py` replaces the SSH transport with a synthetic bare repository, and production code has no such switch.
+On exit it removes only its own project's containers, volumes, image tag, and temporary files. It runs two projects in turn.
 
-- `keyword`: 기본 배포(`EMBEDDING_PROVIDER=none`, Cloudflare 값 없음, Qdrant 없음). pending(`/healthz` 200, `/readyz` 503) →
-  claim(잘못된 code 거부) → 합성 clone → search·capture → push·pull → 컨테이너 재생성 후 로그인·token·Vault 유지(`/setup`은
-  닫힘) → 중지한 `/data` volume을 새 volume으로 복사해 backup 복원 확인.
-- `semantic`: `semantic` profile과 실제 고정 Qdrant, `hash` provider. 색인 전 `rag_indexed`가 true가 아님, 색인 후
-  `/readyz` 200, 인증된 search·capture.
+- `keyword`: the default deployment (`EMBEDDING_PROVIDER=none`, no Cloudflare values, no Qdrant). pending (`/healthz` 200, `/readyz` 503) →
+  claim (a wrong code is rejected) → synthetic clone → search and capture → push and pull → after recreating the container, login, tokens, and the Vault persist (`/setup` is
+  closed) → copy the stopped `/data` volume to a new volume and verify the backup restores.
+- `semantic`: the `semantic` profile with the real pinned Qdrant and the `hash` provider. Before indexing `rag_indexed` is not true, after indexing
+  `/readyz` is 200, and authenticated search and capture work.
 
-- 아래 중 하나라도 해당하면 exit 2(`SKIPPED`)이며 **skip이지 pass가 아닙니다.** Docker CLI가 없음,
-  `docker compose version`이 실패함(Compose v2 plugin 없음), 전체 실행에서 `docker info`가 실패함(daemon
-  없음). `--prepare-only`도 Docker CLI와 Compose v2가 필요하며(`docker compose config`를 실행), daemon
-  없이 임시 파일 생성과 그 검사까지만 합니다.
-- Railway·Render 설정은 정적 검사만 합니다(`test_deployment_surfaces.py`와 CI의 Railway typecheck: `.railway`에서
-  `npm ci --ignore-scripts && npm run typecheck`). 실제 계정에서 배포하거나 유료 플랫폼에서 테스트하지 마세요. 도구가 없어
-  typecheck를 못 돌렸다면 skip이지 pass가 아닙니다.
-- 이 skip 조건은 `test_sync.py`가 mock으로 검증하며 실제 Docker는 호출하지 않습니다.
-- 한계: 실제 SSH·GitHub deploy key 경로, Cloudflare embedding, 의미 검색 품질, 호스팅 플랫폼 동작은 검증하지 않습니다.
-  CI는 amd64 한 환경이라 arm64 실행은 확인하지 않으며 Git sync의 원자성도 검증하지 않습니다.
+- If any of the following applies, it exits 2 (`SKIPPED`), which is a **skip, not a pass.** No Docker CLI,
+  `docker compose version` fails (no Compose v2 plugin), or `docker info` fails in a full run (no
+  daemon). `--prepare-only` also needs the Docker CLI and Compose v2 (it runs `docker compose config`), and it goes only as far as creating the
+  temporary files and checking them, without a daemon.
+- Railway and Render configs get only static checks (`test_deployment_surfaces.py` and the Railway typecheck in CI: `npm ci --ignore-scripts && npm run typecheck`
+  in `.railway`). Do not deploy on a real account or test on a paid platform. If you could not run the typecheck for lack of tooling, that is a skip, not a pass.
+- `test_sync.py` verifies these skip conditions with mocks and never calls real Docker.
+- Limits: the real SSH and GitHub deploy key path, Cloudflare embedding, semantic search quality, and hosting platform behavior are not verified.
+  CI is a single amd64 environment, so arm64 execution is not confirmed, and the atomicity of Git sync is not verified either.
 
-## 로컬 실행 (격리·합성 데이터)
+## Running locally (isolated, synthetic data)
 
-개인 설정이나 API 없이 임시 합성 경로로만 띄웁니다. `hash` provider는 테스트용이라 실제 의미 검색
-품질을 약속하지 않으며, 이 데모 API로 검색 품질을 판단하지 마세요. 프로젝트에 기본 `.env`를 만들지 않습니다.
-직접 실행하는 Python 런타임(`uvicorn gateway.app:app`)은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본이고(기존 연동 호환),
-`gateway.server`와 Compose 기본값 `none`과 다릅니다. 그래서 아래처럼 항상 명시합니다.
+Start it only with temporary synthetic paths, without personal settings or APIs. The `hash` provider is for tests and does not promise real semantic search
+quality, so do not judge search quality with this demo API. Do not create a default `.env` in the project.
+The directly run Python runtime (`uvicorn gateway.app:app`) defaults to `cloudflare` when `EMBEDDING_PROVIDER` is unset (for compatibility with existing integrations),
+which differs from `gateway.server` and the Compose default `none`. So always set it explicitly, as below.
 
 ```bash
 tmp="$(mktemp -d)" && mkdir "$tmp/vault"
@@ -100,62 +101,66 @@ VAULT_DIR="$tmp/vault" DB_PATH="$tmp/gateway.db" ADMIN_PASSWORD="$(openssl rand 
   EMBEDDING_PROVIDER=hash uv run --frozen uvicorn gateway.app:app --host 127.0.0.1 --port 8000
 ```
 
-`curl http://127.0.0.1:8000/healthz`로 확인하고, 끝나면 `$tmp`를 지웁니다.
+Check with `curl http://127.0.0.1:8000/healthz`, and delete `$tmp` when you are done.
 
-## 릴리스 전 secret 점검 (선택)
+## Pre-release secret scan (optional)
 
-[gitleaks](https://github.com/gitleaks/gitleaks)를 설치한 뒤 저장소 루트의 `.gitleaks.toml`
-(기본 규칙 + 커스텀 pvg 규칙)로 Git 이력 전체를 검사합니다.
+Install [gitleaks](https://github.com/gitleaks/gitleaks), then scan the whole Git history with the `.gitleaks.toml` at the repository root
+(default rules plus custom pvg rules).
 
 ```bash
 gitleaks git . --log-opts="--branches --remotes --tags --full-history" --redact=100 --ignore-gitleaks-allow
 ```
 
-- 작업 디렉토리 검사(`dir .`)는 쓰지 마세요. 로컬 `.env` 등 비밀 파일이 포함됩니다.
-- 결과에 실제 credential 값을 출력하거나 issue·PR에 붙이지 말고, 실제 credential을
-  allowlist에 넣지 마세요. 노출된 credential은 먼저 폐기(revoke)합니다.
+- Do not use a working-directory scan (`dir .`). It includes secret files such as a local `.env`.
+- Do not print real credential values in the output or paste them into issues or PRs, and do not put real credentials
+  in the allowlist. Revoke an exposed credential first.
 
-## Plugin 구조 원칙
+## Plugin structure principles
 
-하나의 공유 Node client(`pvg-client.js`)와 하나의 `persona-vault` skill을 Codex·Claude가 함께 씁니다.
-host manifest와 OS별 launcher만 표면 차이를 가집니다. 명령 이름·flag는 모든 OS에서 같게 유지하세요.
+One shared Node client (`pvg-client.js`) and one `persona-vault` skill are used by both Codex and Claude.
+Only the host manifests and the per-OS launchers differ by surface. Keep command names and flags the same on every OS.
 
 Language: skills and references, agent-facing templates, source comments and docstrings, and user-facing UI/CLI text are authored in English. This does not require Vault content to be in English, and it does not replace the localized README/docs or multilingual test fixtures.
 
-## 브랜치와 commit
+## Branches and commits
 
-- `develop`에서 feature branch를 만들어 PR합니다. `main`에 직접 commit하지 않습니다.
-- commit은 하나의 일관된 변경 단위로 나눕니다.
+- Create a feature branch from `develop` and open a PR. Do not commit directly to `main`.
+- Split commits into one coherent unit of change each.
 
-## 버전
+## Versions
 
-Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.3`
-(Codex는 build suffix 포함), API `v3`입니다. 일반 변경에서 버전을 올리지 않습니다.
+The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.3`
+(the Codex one includes a build suffix), and the API is `v3`. Do not bump versions in ordinary changes.
 
-## 문서와 알려진 한계
+## Docs and known limitations
 
-- 설치는 `docs/setup.md`, 호스팅은 `docs/hosting.md`, 운영은 `docs/operations.md`, Wiki 정리 protocol은 `docs/CURATOR.md`입니다.
-  `docs/operations.md`는 릴리스 bundle에 포함되어야 합니다(`scripts/build_release_bundle.py` ALLOWLIST).
-- 기본 배포는 keyword 검색입니다. semantic 검색은 명시적으로 켠 경우(`EMBEDDING_PROVIDER=cloudflare` +
-  `COMPOSE_PROFILES=semantic`)에만 쓰이며 API `v3`는 의미 검색 정확도를 보장하는 계약이 아닙니다.
-- 알려진 QA 공백: Windows launcher는 CI에서 PowerShell 5.1/7 회귀 검증을 통과했지만, 실제 데스크톱·agent host 통합과 공개 전 전체 QA는 모두 끝나지 않았고 보안 점검도 끝나지 않았습니다.
-- Docker daemon이 없는 환경에서는 Compose smoke를 실행할 수 없으며 그 결과는 통과가 아니라 skip입니다. 네이티브 Windows와 arm64 실행은 해당 환경에서 직접 돌리기 전에는 확인했다고 주장하지 않습니다.
-- 의존성을 바꾸면 `uv.lock`도 함께 갱신하고 `uv lock --check`와 `uv sync --frozen`을 확인하세요.
+- Installation is `docs/setup.md`, hosting is `docs/hosting.md`, operations is `docs/operations.md`, and the Wiki curation protocol is `docs/CURATOR.md`.
+  `docs/operations.md` must be included in the release bundle (`scripts/build_release_bundle.py` ALLOWLIST).
+- Docs are paired in English (the default `.md`) and Korean (`.ko.md`). Update paired documents together in the same change. A document that
+  ships in the release bundle must also have its `.ko.md` in the ALLOWLIST. Agent-facing templates (`docs/CURATOR.md`, `docs/WORKING_AGREEMENT.md`, and so on) remain
+  canonical in English, and the Korean document is a translation for human readers. Paths the runtime reads, template download URLs, and the canonical `CURATOR.md`
+  filename stay in English.
+- The default deployment uses keyword search. Semantic search is used only when you turn it on explicitly (`EMBEDDING_PROVIDER=cloudflare` +
+  `COMPOSE_PROFILES=semantic`), and API `v3` is not a contract that guarantees semantic search accuracy.
+- Known QA gaps: the Windows launcher passed PowerShell 5.1/7 regression checks in CI, but real desktop and agent host integration and the full pre-release QA are not all finished, and the security review is not finished either.
+- Without a Docker daemon the Compose smoke cannot run, and that result is a skip, not a pass. Do not claim native Windows or arm64 execution is confirmed until you have run it in that environment yourself.
+- When you change dependencies, update `uv.lock` too and check `uv lock --check` and `uv sync --frozen`.
 
-## 릴리스 (maintainer)
+## Release (maintainer)
 
-- 수동 `Release` workflow(`workflow_dispatch`)를 기본 branch에서 기존 tag `gateway-vX.Y.Z`로 실행합니다.
-  tag 버전은 `pyproject.toml`의 Gateway package 버전과 같아야 합니다.
-- 전체 CI(테스트, Compose smoke, Windows client)가 통과해야 이미지를 GHCR에 build하고 설치 bundle
-  `persona-vault-gateway-X.Y.Z-install.tar.gz`, 단독 `compose.yml`, 각 `.sha256`을 **draft** release로 만듭니다.
-  bundle과 `compose.yml`, `render.yaml`, `.railway/railway.ts`의 image 참조는 exact digest로 바뀝니다.
-- draft를 publish하기 전에 GHCR 패키지를 public으로 바꾸고 익명 pull을 확인합니다. 전역 Docker 로그인은
-  그대로 두고 임시 설정 디렉토리를 씁니다.
+- Run the manual `Release` workflow (`workflow_dispatch`) on the default branch with an existing tag `gateway-vX.Y.Z`.
+  The tag version must equal the Gateway package version in `pyproject.toml`.
+- Only when the full CI (tests, Compose smoke, Windows client) passes does it build the image to GHCR and create the install bundle
+  `persona-vault-gateway-X.Y.Z-install.tar.gz`, the standalone `compose.yml`, and each `.sha256` as a **draft** release.
+  The image references in the bundle and in `compose.yml`, `render.yaml`, and `.railway/railway.ts` are replaced with the exact digest.
+- Before you publish the draft, make the GHCR package public and verify an anonymous pull. Leave the global Docker login
+  alone and use a temporary config directory.
 
   ```bash
   DOCKER_CONFIG="$(mktemp -d)" docker pull ghcr.io/OWNER/REPO@sha256:<digest>
   ```
 
-- 이미지 digest는 draft의 release notes에 있습니다.
-- 공개 Release와 public GHCR 게시는 위 QA(CI, 익명 pull 확인)가 끝난 뒤에만 합니다. Render·Railway 설정은 배포하지 않은
-  상태로 유지합니다.
+- The image digest is in the draft's release notes.
+- Publish the public Release and the public GHCR package only after the QA above (CI, anonymous pull check) is done. Keep the Render and Railway configs
+  undeployed.

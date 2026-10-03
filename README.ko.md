@@ -18,7 +18,7 @@ Obsidian, VS Code 등 Markdown 편집기는 자유롭게 선택할 수 있습니
 ![PersonaVault 컨셉 일러스트: "Agents come and go. Your knowledge settles." 에이전트·기기·도구가 남긴 원시 증거 알갱이가 "you review" 선 위에 머물고, 그 아래에는 사용자가 남기기로 한 지식(decisions, context, preferences, lessons)이 따뜻한 색의 퇴적층 돌 케언으로 쌓여 있습니다. 이 지식은 평범한 Markdown과 Git에 보관되며 연결된 에이전트가 불러올 수 있습니다. 그림 속 문구는 영어입니다.](docs/assets/persona-vault-overview.svg)
 
 > **Self-hosted 베타.** 개인 self-hosting용입니다. 보안 점검과 공개 전 QA가 끝나지 않았으니
-> 먼저 [데이터와 통제](#데이터와-통제)와 [SECURITY.md](SECURITY.md)를 읽으세요.
+> 먼저 [데이터와 통제](#데이터와-통제)와 [SECURITY.ko.md](SECURITY.ko.md)를 읽으세요.
 
 ## 왜 PersonaVault인가
 
@@ -45,12 +45,11 @@ Obsidian, VS Code 등 Markdown 편집기는 자유롭게 선택할 수 있습니
 
 ### 1. Gateway를 서버에 한 번 실행
 
-Docker Compose(또는 [docs/hosting.md](docs/hosting.md)의 플랫폼)와 commit이 하나 이상 있는 GitHub private
+Docker Compose(또는 [docs/hosting.ko.md](docs/hosting.ko.md)의 플랫폼)와 commit이 하나 이상 있는 GitHub private
 Vault 저장소가 필요합니다. 기본 배포는 keyword 검색입니다. 소스에서 빌드하려면
 `docker compose -f compose.yml -f compose.build.yml up -d --build`를 실행하세요.
 
 새 설치는 전용 영구 디렉토리에서 하세요(Compose project와 volume 식별이 디렉토리에 달려 있어 업그레이드 때도 유지합니다).
-기존 설치는 아래 명령을 실행하기 전에 [업그레이드 안내](docs/operations.md#업그레이드)를 먼저 읽으세요.
 
 ```bash
 curl -fsSLO https://github.com/mykim0409/persona-vault-gateway/releases/latest/download/compose.yml
@@ -64,9 +63,9 @@ docker compose logs                        # 일회용 setup code
 입력하고, 화면의 **public** deploy key를 Vault 저장소에 쓰기 권한으로 등록합니다. 그다음 연결(필요하면
 재시도)하고 agent token을 발급합니다. 설정이 끝나기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과
 capture는 꺼져 있습니다. 연결 단계는 쓰기 권한을 증명하지 못합니다.
-단계별 안내는 [docs/setup.md](docs/setup.md)입니다. Docker, Railway, Render 모두 같은 방식으로 설치하며 Railway·Render
-설정은 준비만 되었고 실제 계정에서 검증하지 않았습니다([docs/hosting.md](docs/hosting.md)). 업그레이드(이전 설치 안전
-메모 포함)·백업·semantic 검색은 [docs/operations.md](docs/operations.md)입니다.
+단계별 안내는 [docs/setup.ko.md](docs/setup.ko.md)입니다. Docker, Railway, Render 모두 같은 방식으로 설치하며 Railway·Render
+설정은 준비만 되었고 실제 계정에서 검증하지 않았습니다([docs/hosting.ko.md](docs/hosting.ko.md)). 업그레이드·백업·
+semantic 검색은 [docs/operations.ko.md](docs/operations.ko.md)입니다.
 
 Compose는 기본적으로 포트를 `127.0.0.1`에만 게시합니다. 네이티브 서버는 `0.0.0.0`에서 듣고 호스팅 서비스는 공개
 HTTPS이므로 둘 다 loopback이 아닙니다. 다른 PC에서는 암호화된 사설 경로나 TLS endpoint로만 접근하세요.
@@ -75,7 +74,7 @@ HTTPS이므로 둘 다 loopback이 아닙니다. 다른 PC에서는 암호화된
 ### 2. Plugin 설치 (각 PC)
 
 현재 지원하는 에이전트 플랫폼은 Codex와 Claude Code이며, 아래 공용 plugin으로 연결합니다.
-[Custom GPT Actions](docs/gpt-actions.md)는 대체 경로입니다. 그 밖의 client는 Gateway API와의 연동을
+[Custom GPT Actions](docs/gpt-actions.ko.md)는 대체 경로입니다. 그 밖의 client는 Gateway API와의 연동을
 직접 구현해야 하며, 자동 수집은 현재 제공되는 plugin에서만 됩니다.
 
 hook과 token helper에는 Node.js가 필요합니다.
@@ -94,7 +93,7 @@ codex plugin add persona-vault --marketplace persona-vault-gateway
 ```
 
 hook 명령을 확인한 뒤에 신뢰하세요(`/hooks`). 그다음 token helper를 설치하고 Gateway URL과 token을
-[docs/setup.md](docs/setup.md) 3절대로 입력합니다. Windows PowerShell 방법도 거기에 있습니다.
+[docs/setup.ko.md](docs/setup.ko.md) 3절대로 입력합니다. Windows PowerShell 방법도 거기에 있습니다.
 token을 에이전트 대화에 붙여 넣지 마세요.
 
 ### 3. 사용해 보기
@@ -134,7 +133,7 @@ Gateway는 기본이 keyword 전용 검색(`EMBEDDING_PROVIDER=none`)이며 embe
 
 Cloudflare Workers AI는 현재 유일한 production embedding 경로입니다. REST로 직접 호출하므로 별도
 Cloudflare Worker를 개발·배포할 필요가 없습니다. 다른 provider는 아직 구현되지 않았고, 코드의 hash
-embedding은 테스트 전용입니다. [docs/operations.md](docs/operations.md)를 보세요.
+embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.ko.md)를 보세요.
 
 ## 데이터와 통제
 
@@ -163,21 +162,21 @@ embedding은 테스트 전용입니다. [docs/operations.md](docs/operations.md)
   프로세스 간에 공유되지 않습니다. forwarded 헤더는 정확히 신뢰하도록 설정한 proxy에서만 반영되고(wildcard
   금지) CSRF 보호는 그대로입니다. 암호화된 경로나 TLS와 접근 제어 뒤에서 비공개로 운영하세요.
 - **정리에는 사람이 필요합니다.** 모든 plan은 사람이 승인하며 raw 삭제의 원자성은 보장되지
-  않습니다. [Curator protocol](docs/CURATOR.md)을 보세요.
+  않습니다. [Curator protocol](docs/CURATOR.ko.md)을 보세요.
 
-이 베타는 보안 점검을 마치지 않았습니다. [SECURITY.md](SECURITY.md)를 보세요.
+이 베타는 보안 점검을 마치지 않았습니다. [SECURITY.ko.md](SECURITY.ko.md)를 보세요.
 
 ## 문서
 
 | 문서 | 내용 |
 | --- | --- |
-| [docs/setup.md](docs/setup.md) | 최초 설치, plugin, token helper |
-| [docs/hosting.md](docs/hosting.md) | 호스팅 선택지: Compose, Railway, Render, 기타 |
-| [docs/operations.md](docs/operations.md) | Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업 |
+| [docs/setup.ko.md](docs/setup.ko.md) | 최초 설치, plugin, token helper |
+| [docs/hosting.ko.md](docs/hosting.ko.md) | 호스팅 선택지: Compose, Railway, Render, 기타 |
+| [docs/operations.ko.md](docs/operations.ko.md) | Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업 |
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
-| [docs/gpt-actions.md](docs/gpt-actions.md) | plugin 대신 쓰는 Custom GPT Actions |
-| [docs/metadata.md](docs/metadata.md) | Markdown metadata 계약 |
-| [docs/CURATOR.md](docs/CURATOR.md) | Curator protocol |
-| [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) | 개발과 보안 정책 |
+| [docs/gpt-actions.ko.md](docs/gpt-actions.ko.md) | plugin 대신 쓰는 Custom GPT Actions |
+| [docs/metadata.ko.md](docs/metadata.ko.md) | Markdown metadata 계약 |
+| [docs/CURATOR.ko.md](docs/CURATOR.ko.md) | Curator protocol |
+| [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md), [SECURITY.ko.md](SECURITY.ko.md) | 개발과 보안 정책 |
 
 [MIT License](LICENSE)로 배포됩니다.
