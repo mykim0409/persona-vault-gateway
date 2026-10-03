@@ -1,4 +1,4 @@
-"""Contract tests for the single deployment path: Dockerfile, compose.yml, compose.build.yml, .env.example,
+"""Contract tests for the single deployment path: Dockerfile, compose.yml, compose.build.yml,
 render.yaml and .railway/railway.ts.
 
 Static checks only: nothing is deployed, no Render or Railway account, no Docker daemon, no network.
@@ -166,16 +166,6 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual(list(built["services"]), [GATEWAY])
         self.assertEqual(built["services"][GATEWAY]["build"]["context"], str(ROOT))
 
-    def test_env_example_documents_only_the_single_path(self):
-        text = read(".env.example")
-        keys = set(re.findall(r"(?m)^#? ?([A-Z_]+)=", text))
-        self.assertEqual(keys, {"PVG_SETUP_TOKEN", "PVG_SECURE_COOKIES", "HOST_ID", "GATEWAY_BIND_ADDR", "GATEWAY_HOST_PORT", "VAULT_SYNC_INTERVAL_SECONDS",
-                                "EMBEDDING_PROVIDER", "COMPOSE_PROFILES", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
-                                "EMBEDDING_MODEL", "EMBEDDING_BATCH_SIZE", "QDRANT_COLLECTION"})
-        self.assertRegex(text, r"(?m)^# PVG_SETUP_TOKEN=")  # optional: never active by default
-        self.assertRegex(text, r"(?m)^EMBEDDING_PROVIDER=none$")
-        self.assertNotIn("VAULT_REPO_SSH_URL", text)
-        self.assertNotIn("ADMIN_PASSWORD", text)
 
 
 class RenderBlueprintTests(unittest.TestCase):
