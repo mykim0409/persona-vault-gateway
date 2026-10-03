@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
 import sys
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -175,7 +179,7 @@ def group_for(result: dict[str, Any], key: str) -> dict[str, Any]:
     return next(group for group in result["groups"] if group.get("key") == key)
 
 
-def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Settings) -> None:
+def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Settings, semantic: bool = True) -> None:
     scenario_id = scenario["id"]
     found = ids(result)
     expected = scenario["expected"]
@@ -219,7 +223,7 @@ def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Setting
     elif scenario_id == "auto-tier-order":
         assert found[:3] == expected["ordered_ids"], (scenario_id, found)
     elif scenario_id == "multi-chunk-document-dedupe":
-        assert found.count("kn_long_dedupe") == 1 and result["index"]["chunks"] > result["index"]["files"]
+        assert found.count("kn_long_dedupe") == 1 and (not semantic or result["index"]["chunks"] > result["index"]["files"])
     elif scenario_id == "forged-authority-clamp":
         item = next(item for item in result["results"] if item["document_id"] == "cand_forged")
         for field in ("memory_type", "review_state", "temporal_state", "retrieval_tier"):
@@ -257,6 +261,52 @@ def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Setting
         raise AssertionError(f"unvalidated benchmark scenario: {scenario_id}")
 
 
+@contextlib.contextmanager
+def no_network():
+    """Poison every Qdrant/embedding/socket entry point; any call is recorded and fails the run."""
+    calls: list[str] = []
+
+    def blocked(name: str):
+        def fail(*args: Any, **kwargs: Any) -> None:
+            calls.append(name)
+            raise AssertionError(f"{name} must not run when EMBEDDING_PROVIDER=none")
+
+        return fail
+
+    targets = (
+        (core, "qdrant_json"), (core, "cloudflare_embedding_request"), (core, "cloudflare_embeddings"),
+        (core, "embed_documents"), (core, "embed_query"), (urllib.request, "urlopen"),
+        (socket, "create_connection"), (socket.socket, "connect"),
+    )
+    with contextlib.ExitStack() as stack:
+        for owner, name in targets:
+            stack.enter_context(patch.object(owner, name, blocked(f"{getattr(owner, '__name__', 'socket.socket')}.{name}")))
+        yield calls
+    assert not calls, calls
+
+
+def run_keyword_only(scenarios: list[dict[str, Any]]) -> None:
+    """The same scenarios with EMBEDDING_PROVIDER=none: lexical results and safety gates hold with zero network."""
+    with TemporaryDirectory() as temporary, no_network():
+        root = Path(temporary)
+        settings = Settings(root / "vault", root / "gateway.db", "benchmark-none", embedding_provider="none")
+        init_db(settings.db_path)
+        seed_vault(settings.vault_dir)
+        for index, scenario in enumerate(scenarios):
+            result = search_vault(
+                settings,
+                AGENT,
+                scenario["query"],
+                scenario.get("limit", 20),
+                refresh=index == 0,
+                bundle=scenario["bundle"],
+                context=scenario.get("context") or {},
+            )
+            assert result["index"]["fallback_reason"] == "semantic_disabled" and result["index"]["search_mode"] == "keyword"
+            assert all(item["match"] != "semantic" for item in result["results"]), scenario["id"]
+            validate(scenario, result, settings, semantic=False)
+
+
 def main() -> None:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     scenarios = fixture["scenarios"]
@@ -283,7 +333,8 @@ def main() -> None:
                 validate(scenario, result, settings)
         finally:
             core.qdrant_json = original
-    print(json.dumps({"scenarios": len(scenarios), "passed": len(scenarios), "safety_failures": 0}))
+    run_keyword_only(scenarios)
+    print(json.dumps({"scenarios": len(scenarios), "passed": len(scenarios), "safety_failures": 0, "keyword_only_passed": len(scenarios)}))
 
 
 if __name__ == "__main__":

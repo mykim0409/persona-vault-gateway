@@ -2,21 +2,50 @@
 
 from __future__ import annotations
 
+import contextlib
 from copy import deepcopy
 from argparse import Namespace
+from dataclasses import replace
 import json
+import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import urllib.request
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gateway import cli, core
-from gateway.compaction import concurrent_raw_captures, review_binding, staging_path
+from gateway.compaction import concurrent_raw_captures, finish_search, review_binding, staging_path
 from gateway.core import Settings, document_metadata, rag_answer_state, vault_documents
 from gateway.wiki import build_compaction_plan, check_compaction
+
+
+@contextlib.contextmanager
+def no_network():
+    """Poison every Qdrant/embedding/socket entry point; any call is recorded and fails the test."""
+    calls: list[str] = []
+
+    def blocked(name: str):
+        def fail(*args: object, **kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"{name} must not run when EMBEDDING_PROVIDER=none")
+
+        return fail
+
+    targets = (
+        (core, "qdrant_json"), (core, "cloudflare_embedding_request"), (core, "cloudflare_embeddings"),
+        (core, "embed_documents"), (core, "embed_query"), (urllib.request, "urlopen"),
+        (socket, "create_connection"), (socket.socket, "connect"),
+    )
+    with contextlib.ExitStack() as stack:
+        for owner, name in targets:
+            stack.enter_context(patch.object(owner, name, blocked(f"{getattr(owner, '__name__', 'socket.socket')}.{name}")))
+        yield calls
+    assert not calls, calls
 
 
 def efficiency_checks() -> None:
@@ -296,6 +325,128 @@ def workflow_checks() -> None:
                 (root / sources[0]).unlink()
             assert git("status", "--porcelain=v1") == applied_status
             assert settings.db_path.read_bytes() == b"", "mock workflow touched the database"
+
+            # Explicit keyword-only mode: the same validated probes run against the unchanged vault with no
+            # index, Qdrant or embedding call, and previously stored vector/index metadata is never touched.
+            note(staging / "target-0.md", "kn_0", "Consolidated scoped knowledge.", "canonical")
+            (root / targets[0]).write_bytes((staging / "target-0.md").read_bytes())
+            assert command("compact-review", "--record")["status"] == "ok"
+            legacy_db = root / "legacy-index.db"
+            core.init_db(legacy_db)
+            core.set_rag_index_meta(replace(settings, db_path=legacy_db), {
+                "rebuild_state": "ready", "provider": "cloudflare", "chunks": "42",
+                "embedding_blocked_until": "2020-01-01T00:00:00+00:00",
+            })
+            legacy_bytes = legacy_db.read_bytes()
+            keyword_only = replace(settings, db_path=legacy_db, embedding_provider="none")
+            real_search = core.search_vault
+            unchecked = plan_path.read_bytes()
+            assert "finish_checkpoint" not in json.loads(unchecked)
+
+            def finish_as(mode: Settings) -> dict:
+                with patch.object(cli, "settings_for", return_value=mode):
+                    return command("compact-finish")
+
+            def stored_binding() -> str:
+                return json.loads(plan_path.read_text())["finish_checkpoint"]["binding"]
+
+            with no_network(), patch.object(core, "search_vault", wraps=real_search) as searching:
+                first = finish_as(keyword_only)
+                assert first["status"] == "ok" and first["index_verification"] == "passed", first
+                assert first["search"]["reused"] is False and first["search"]["semantic"] == "disabled", first
+                assert [(c["query"], c["passed"], c["answer_state"]) for c in first["search"]["probes"]] == [
+                    ("Scoped knowledge", True, "supported"), ("Nonexistent claim", True, "abstain"),
+                    ("Historical knowledge", True, "evidence"),
+                ], first
+                assert searching.call_count == 3 and all(c.kwargs["refresh"] is False for c in searching.call_args_list)
+                keyword_binding = stored_binding()
+                # Repeating the unchanged finish reuses the bound checkpoint without searching again.
+                again = finish_as(keyword_only)
+                assert again["status"] == "ok" and again["search"]["reused"] is True, again
+                assert searching.call_count == 3 and stored_binding() == keyword_binding
+                # Same Markdown, new mtime: the fingerprint is stale, so the checkpoint is not reused.
+                stat = (root / targets[0]).stat()
+                os.utime(root / targets[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+                touched = finish_as(keyword_only)
+                assert touched["status"] == "ok" and touched["search"]["reused"] is False, touched
+                assert searching.call_count == 6 and stored_binding() != keyword_binding
+                keyword_binding = stored_binding()
+
+                # Mode change invalidates the checkpoint in both directions; semantic mode keeps its own checks.
+                with patch.object(core, "qdrant_index_current", return_value=True), patch.object(
+                    core, "qdrant_json", return_value={"result": {"count": 0}}
+                ), patch.object(core, "search_vault", side_effect=search) as semantic_search:
+                    semantic = finish_as(settings)
+                    assert semantic["status"] == "ok" and semantic["search"]["reused"] is False, semantic
+                    assert "semantic" not in semantic["search"] and semantic_search.call_count == 3
+                assert stored_binding() != keyword_binding
+                back = finish_as(keyword_only)
+                assert back["status"] == "ok" and back["search"]["reused"] is False, back
+                assert searching.call_count == 9 and stored_binding() == keyword_binding
+
+                # Failures stay failures: failed probe, any non-disabled fallback, and source mutation mid-probe.
+                def degraded(change: str):
+                    def search_with(*args: object, **kwargs: object) -> dict:
+                        response = real_search(*args, **kwargs)
+                        if change == "probe":
+                            response["answer_state"]["state"] = "review_required"
+                        elif change == "fallback":
+                            response["index"]["fallback_reason"] = "embedding_limit"
+                        elif change == "stale":
+                            response["index"]["stale"] = True
+                        elif change == "mode":
+                            response["index"]["search_mode"] = "hybrid"
+                        elif change == "forbidden":
+                            response["results"].append({**vault_documents(keyword_only)[0], "path": sources[0], "match": "keyword"})
+                        else:
+                            current = (root / targets[0]).stat()
+                            os.utime(root / targets[0], ns=(current.st_atime_ns, current.st_mtime_ns + 10**9))
+                        return response
+
+                    return search_with
+
+                for change in ("probe", "fallback", "stale", "mode", "forbidden", "mutation"):
+                    plan_path.write_bytes(unchecked)
+                    with patch.object(core, "search_vault", side_effect=degraded(change)):
+                        failed = finish_as(keyword_only)
+                    assert failed["status"] == "blocked", (change, failed)
+                    assert (failed["reason"] == "search_probe_failed") == (change in {"probe", "forbidden"}), (change, failed)
+                    assert plan_path.read_bytes() == unchecked, change
+
+                # A retired source still in the vault and the cloudflare/hash fail-closed path are not relaxed.
+                plan_value = json.loads(unchecked)
+                try:
+                    finish_search(keyword_only, plan_value, [*vault_documents(keyword_only), {"path": sources[0], "document_hash": "a" * 64}])
+                except RuntimeError as exc:
+                    assert "retired sources remain in the vault" in str(exc), exc
+                else:
+                    raise AssertionError("retired source accepted")
+            for provider in ("cloudflare", "hash"):
+                strict = replace(settings, db_path=legacy_db, embedding_provider=provider)
+                with patch.object(core, "qdrant_json", side_effect=RuntimeError("Qdrant down")), patch.object(
+                    core, "search_vault", side_effect=AssertionError("semantic modes must not degrade to keyword")
+                ):
+                    failed = finish_as(strict)
+                assert failed["status"] == "blocked" and "compatible existing index" in failed["reason"], failed
+                assert plan_path.read_bytes() == unchecked
+            assert legacy_db.read_bytes() == legacy_bytes, "keyword-only finish changed stored index metadata"
+            assert core.rag_index_meta(replace(settings, db_path=legacy_db))["chunks"] == "42"
+
+            # The real CLI entry point, configured only through the environment.
+            absent_db = root / "absent.db"
+            plan_path.write_bytes(unchecked)
+            before_cli = git("status", "--porcelain=v1")
+            process = subprocess.run(
+                [sys.executable, "-m", "gateway.cli", "--vault", str(root), "compact-finish", str(plan_path)],
+                capture_output=True, text=True, env={
+                    **os.environ, "EMBEDDING_PROVIDER": "none", "DB_PATH": str(absent_db), "VAULT_DIR": str(root),
+                    "QDRANT_URL": "http://127.0.0.1:1", "CLOUDFLARE_API_TOKEN": "", "CLOUDFLARE_ACCOUNT_ID": "",
+                },
+            )
+            output = json.loads(process.stdout)
+            assert process.returncode == 0 and output["status"] == "ok" and output["search"]["semantic"] == "disabled", (process.stderr, output)
+            assert not absent_db.exists() and git("status", "--porcelain=v1") == before_cli
+            assert settings.db_path.read_bytes() == b""
         try:
             staging_path(root, root / "outside.json")
         except ValueError:
@@ -423,6 +574,10 @@ Two claims remain unresolved after their raw sources were consolidated.
             assert json.loads(plan_path.read_text(encoding="utf-8")) == plan
             assert cli.run(["--vault", str(root), "compact-plan", "--output", str(root / "other.json")])["status"] == "blocked"
             assert cli.run(["--vault", str(root), "compact-plan", "--max-characters", "0"])["status"] == "blocked"
+        # Keyword-only mode plans from the vault alone: the neighbor lookup reports itself disabled, no network.
+        with patch.dict(os.environ, {"EMBEDDING_PROVIDER": "none"}), no_network():
+            keyword_only_plan = cli.run(["--vault", str(root), "compact-plan", "--before", "2026-01-02"])
+        assert keyword_only_plan["selected"]["semantic"] == {"status": "unavailable", "reason": "semantic_disabled"}, keyword_only_plan["selected"]
         items = {node["id"]: node["path"] for node in plan["selected"]["graph"]["nodes"] if node["type"] == "raw_item"}
         for entry in plan["review"]["items"]:
             entry.update(
