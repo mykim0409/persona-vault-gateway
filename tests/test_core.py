@@ -198,6 +198,166 @@ def start_fake_qdrant(collection: str) -> tuple[ThreadingHTTPServer, dict] | Non
     return server, state
 
 
+@contextlib.contextmanager
+def no_network():
+    """Poison every Qdrant/embedding/socket entry point; any call is recorded and fails the test."""
+    calls: list[str] = []
+
+    def blocked(name: str):
+        def fail(*args: object, **kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"{name} must not run when EMBEDDING_PROVIDER=none")
+
+        return fail
+
+    targets = (
+        (core, "qdrant_json"), (core, "cloudflare_embedding_request"), (core, "cloudflare_embeddings"),
+        (core, "embed_documents"), (core, "embed_query"), (urllib.request, "urlopen"),
+        (socket, "create_connection"), (socket.socket, "connect"),
+    )
+    with contextlib.ExitStack() as stack:
+        for owner, name in targets:
+            stack.enter_context(patch.object(owner, name, blocked(f"{getattr(owner, '__name__', 'socket.socket')}.{name}")))
+        yield calls
+    assert not calls, calls
+
+
+def run_semantic_disabled_checks() -> None:
+    # Python defaults stay cloudflare for existing installs; only an explicit "none" is keyword-only.
+    assert Settings(Path("vault"), Path("gateway.db"), "host").embedding_provider == "cloudflare"
+    with patch.dict(os.environ, {"EMBEDDING_PROVIDER": ""}):
+        os.environ.pop("EMBEDDING_PROVIDER")
+        assert Settings.from_env().embedding_provider == "cloudflare"
+    with patch.dict(os.environ, {"EMBEDDING_PROVIDER": "None"}):
+        assert Settings.from_env().embedding_provider == "none"
+
+    with TemporaryDirectory() as tmp, no_network() as calls:
+        root = Path(tmp)
+        settings = Settings(root / "vault", root / "gateway.db", "semantic-disabled", embedding_provider="none")
+        init_db(settings.db_path)
+        vault = settings.vault_dir
+        reader = {"agent_id": "reader", "scopes": ["vault-rag"], "allowed_roots": []}
+        writer = {"agent_id": "writer-a", "scopes": ["conversation-log", "agent-memo"], "allowed_roots": ["30_Conversations/raw"]}
+
+        def note(rel: str, body: str, **metadata: object) -> None:
+            front = "\n".join(f"{key}: {json.dumps(value)}" for key, value in {"pv_schema": 1, **metadata}.items())
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text(f"---\n{front}\n---\n\n# {metadata['id']}\n\n{body}\n", encoding="utf-8")
+
+        canonical = {"memory_type": "canonical", "review_state": "human_accepted", "provenance_mode": "human_asserted"}
+        note("50_Knowledge/new.md", "ZETA4471 replacement rule.", id="kn_new", subject_id="rule", temporal_state="current",
+             retrieval_tier="primary", relations={"supersedes": ["kn_old"]}, effective_from="2026-01-01", **canonical)
+        note("50_Knowledge/old.md", "ZETA4471 old rule.", id="kn_old", subject_id="rule", temporal_state="superseded",
+             retrieval_tier="history", effective_from="2025-01-01", **canonical)
+        note("90_Private/hidden.md", "ZETA4471 never indexed.", id="hidden", rag_index=False)
+
+        # State left behind by a previous cloudflare/hash install must survive every disabled-mode operation.
+        legacy = {
+            "rebuild_state": "ready", "schema": core.RAG_INDEX_SCHEMA, "provider": "cloudflare",
+            "model": core.CLOUDFLARE_EMBEDDING_MODEL, "dimension": "1024", "files": "9", "chunks": "42",
+            "fingerprint": "old", "embedding_blocked_until": "2020-01-01T00:00:00+00:00",
+        }
+        core.set_rag_index_meta(settings, legacy)
+
+        # Readiness: semantic disabled is healthy-but-unindexed, and DB validation still runs.
+        ready = rag_readiness(settings)
+        assert ready == {
+            "status": "ok", "db": "ok", "qdrant": "disabled", "semantic": "disabled",
+            "rag_indexed": False, "chunks": 0, "provider": "none",
+        }, ready
+        newer = root / "newer.db"
+        with contextlib.closing(sqlite3.connect(newer)) as con, con:
+            con.execute(f"PRAGMA user_version = {core.DB_SCHEMA_VERSION + 1}")
+        try:
+            rag_readiness(Settings(vault, newer, "h", embedding_provider="none"))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("readiness must keep validating the database")
+        with patch.dict(os.environ, {
+            "EMBEDDING_PROVIDER": "none", "VAULT_DIR": str(vault), "DB_PATH": str(settings.db_path),
+        }):
+            response = app_module.readyz()
+            assert response.status_code == 200 and json.loads(response.body)["semantic"] == "disabled"
+
+        # Capture writes only to the vault.
+        saved = save_conversation(settings, writer, {
+            "session_id": "disabled-1", "title": "Disabled mode", "project": "PersonaVault",
+            "started_at": "2026-07-30T10:00:00+09:00",
+            "messages": [{"role": "assistant", "event_id": "e1", "timestamp": "2026-07-30T10:00:00+09:00",
+                          "content": "ZETA4471 captured note"}],
+        })
+        memo = save_agent_note(settings, writer, {"title": "Disabled memo", "body": "ZETA4471 memo body"})
+        assert (vault / saved["path"]).is_file() and memo["path"]
+
+        # Search, with and without refresh, honours bundles, views, answer_state and attribution.
+        for refresh in (False, True):
+            current = search_vault(settings, reader, "ZETA4471", 10, refresh, "current")
+            found = {item["document_id"] for item in current["results"]}
+            assert "kn_new" in found and "kn_old" not in found and "hidden" not in found, found
+            assert current["answer_state"]["state"] == "supported", current["answer_state"]
+            history = search_vault(settings, reader, "ZETA4471", 10, refresh, "history")
+            assert {"kn_new", "kn_old"} <= {item["document_id"] for item in history["results"]}
+            evidence = search_vault(settings, reader, "ZETA4471", 10, refresh, "evidence")
+            captured = [item for item in evidence["results"] if item["path"] == saved["path"]]
+            assert captured and captured[0]["agent_id"] == "writer-a" and captured[0]["match"] == "keyword", evidence
+            for result in (current, history, evidence):
+                assert result["embedding_model"] == "none"
+                assert result["index"] == {
+                    "files": 0, "chunks": 0, "updated": 0, "provider": "none", "model": "none", "dimension": 0,
+                    "store": "none", "stale": False, "search_mode": "keyword", "fallback_reason": "semantic_disabled",
+                }, result["index"]
+        public = app_module.search_response(current, "current")
+        assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results"}
+        assert search_vault(settings, reader, "no-such-token-anywhere", 5, True)["answer_state"]["state"] == "abstain"
+
+        # Index stats/commands and wiki health are explicit no-ops.
+        disabled = core.disabled_index_stats()
+        assert core.index_vault(settings) == disabled and core.rag_index_stats(settings) == disabled
+        assert core.wiki_health(settings, reader)["index"] == disabled
+        assert core.qdrant_index_current(settings) is False and core.qdrant_index_current(settings, allow_stale=True) is False
+        documents = core.vault_documents(settings)
+        assert core.qdrant_compaction_neighbors(settings, documents) == {
+            "status": "unavailable", "reason": "semantic_disabled", "edges": [],
+        }
+        for call in (core.selected_embedding_model, core.embedding_size):
+            try:
+                call(settings)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("root helper must fail closed for provider none")
+
+        # Scheduler: startup spawns nothing and a due retry is a no-op that keeps the stored marker.
+        assert core.retry_due_embeddings(settings, datetime(2030, 1, 1, tzinfo=timezone.utc)) is False
+        started: list[object] = []
+        with patch.dict(os.environ, {
+            "EMBEDDING_PROVIDER": "none", "VAULT_DIR": str(vault), "DB_PATH": str(settings.db_path),
+        }), patch.object(app_module, "Thread", side_effect=lambda *a, **k: started.append(k) or None), \
+                patch.object(app_module, "embedding_retry_thread", None):
+            app_module.startup()
+        assert not started, started
+        results: list[bool] = []
+
+        def counting_retry(value: Settings) -> bool:
+            results.append(core.retry_due_embeddings(value, datetime(2030, 1, 1, tzinfo=timezone.utc)))
+            return results[-1]
+
+        loop_stop = threading.Event()
+        with patch.object(app_module, "embedding_retry_stop", loop_stop), \
+                patch.object(app_module, "EMBEDDING_RETRY_POLL_SECONDS", 0.01), \
+                patch.object(app_module, "retry_due_embeddings", counting_retry):
+            loop = threading.Thread(target=app_module.embedding_retry_loop, args=(settings,), daemon=True)
+            loop.start()
+            time.sleep(0.2)
+            loop_stop.set()
+            loop.join(timeout=5)
+        assert results and not any(results) and not loop.is_alive(), results
+
+        # Nothing was deleted, rewritten or cleared by switching modes.
+        assert core.rag_index_meta(settings) == legacy
+
+
 def run_connect_lifetime_checks() -> None:
     with TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "nested" / "lifetime.db"
@@ -2458,6 +2618,7 @@ conflict-policy-marker
                 os.environ["DB_PATH"] = old_db_path
 
     run_connect_lifetime_checks()
+    run_semantic_disabled_checks()
     run_fake_qdrant_smoke()
     run_search_regression_checks()
     run_conversation_merge_checks()

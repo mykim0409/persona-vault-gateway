@@ -1,9 +1,13 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import re
+import shutil
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -227,15 +231,67 @@ class ComposeContractTest(unittest.TestCase):
     def test_gateway_waits_for_healthy_sync_whose_probe_is_the_marker(self):
         gateway, sync = service_block("persona-vault-gateway"), service_block("persona-vault-sync")
         self.assertRegex(gateway, r"persona-vault-sync:\n\s+condition: service_healthy")
-        self.assertRegex(gateway, r"qdrant:\n\s+condition: service_started")
         self.assertIn(f'test: ["CMD", "test", "-f", "{MARKER}"]', sync)
         self.assertIn("start_period:", sync)
 
+    def test_qdrant_is_optional_and_gateway_does_not_depend_on_it(self):
+        gateway, qdrant = service_block("persona-vault-gateway"), service_block("qdrant")
+        self.assertNotRegex(gateway, r"qdrant:\n\s+condition:")  # the active service must not wait for inactive Qdrant
+        self.assertIn("profiles: [semantic]", qdrant)
+        self.assertIn('EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-none}"', gateway)
+        for optional in ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"):
+            self.assertIn(f'{optional}: "${{{optional}:-}}"', gateway)
+
+    def test_forwarded_allow_ips_defaults_to_loopback_and_accepts_an_explicit_value(self):
+        gateway = service_block("persona-vault-gateway")
+        self.assertIn('FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"', gateway)
+        self.assertNotIn('FORWARDED_ALLOW_IPS: "*"', gateway)
+        if not shutil.which("docker") or subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
+            self.skipTest("Docker Compose v2 not available: config check SKIPPED, not passed")
+        with tempfile.TemporaryDirectory() as d:
+            empty = Path(d) / "empty.env"
+            empty.write_text("")
+            for given, wanted in ((None, "127.0.0.1"), ("192.0.2.10,192.0.2.11", "192.0.2.10,192.0.2.11")):
+                env = {k: v for k, v in os.environ.items() if not k.startswith(("COMPOSE_", "FORWARDED_"))}
+                if given:
+                    env["FORWARDED_ALLOW_IPS"] = given
+                r = subprocess.run(["docker", "compose", "-f", str(ROOT / "compose.yml"), "--env-file", str(empty),
+                                    "config", "--format", "json"], env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                gw = json.loads(r.stdout)["services"]["persona-vault-gateway"]
+                self.assertEqual(gw["environment"]["FORWARDED_ALLOW_IPS"], wanted)
+
+    def test_base_compose_has_no_build_and_no_parse_time_requirements(self):
+        text = (ROOT / "compose.yml").read_text()
+        self.assertNotRegex(text, r"(?m)^\s+build:")  # release users never build from source
+        # Compose-time `${VAR:?}` would break init before .env exists; `$${VAR:?}` is the sync container's own shell.
+        self.assertNotRegex(text, r"(?<!\$)\$\{[^}]*:\?")
+        self.assertIn("$${VAULT_REPO_SSH_URL:?set VAULT_REPO_SSH_URL}", text)  # validated at startup instead
+        self.assertNotIn("docker.sock", text)
+        self.assertEqual(text.count('image: "${PVG_IMAGE:-persona-vault-gateway:local}"'), 2)  # gateway + init
+        build = (ROOT / "compose.build.yml").read_text()
+        for name in ("persona-vault-gateway", "persona-vault-init"):
+            self.assertRegex(build, rf"  {name}:\n    build: \.")
+
+    def test_init_service_runs_bootstrap_in_the_same_image_under_the_tools_profile(self):
+        init = service_block("persona-vault-init")
+        self.assertIn("profiles: [tools]", init)
+        self.assertIn("entrypoint: [python, -m, gateway.bootstrap]", init)
+        self.assertIn("stdin_open: true", init)
+        self.assertIn("tty: true", init)
+        self.assertIn("- .:/setup", init)
+        self.assertNotIn("depends_on", init)
+
+    def test_dockerfile_installs_ssh_client_for_bootstrap(self):
+        self.assertRegex((ROOT / "Dockerfile").read_text(), r"install -y --no-install-recommends git openssh-client")
+
     def test_images_are_pinned_by_digest(self):
         refs = re.findall(r"^\s+image: (\S+)$", (ROOT / "compose.yml").read_text(), re.M)
-        refs.remove("persona-vault-gateway:local")  # locally built, not pulled
+        local = '"${PVG_IMAGE:-persona-vault-gateway:local}"'  # operator-chosen Gateway image, not pinned here
+        self.assertEqual(refs.count(local), 2)
+        refs = [r for r in refs if r != local]
         refs.append(re.search(r"^FROM (\S+)$", (ROOT / "Dockerfile").read_text(), re.M).group(1))
-        self.assertEqual(len(refs), 3)
+        self.assertEqual(len(refs), 3)  # qdrant, alpine/git, python base
         for ref in refs:
             self.assertRegex(ref, r"@sha256:[0-9a-f]{64}$")
 
@@ -284,8 +340,98 @@ class ComposeSmokePreflightTest(unittest.TestCase):
         code, out, calls, smoke_cls = self.main(["--prepare-only"], info_rc=1)
         self.assertEqual(code, 0)
         self.assertEqual(calls, [["compose", "version"]])  # `docker info` never consulted
-        smoke_cls.return_value.prepare.assert_called_once()
+        self.assertEqual([c.args for c in smoke_cls.call_args_list], [("keyword",), ("semantic",)])  # both modes
+        self.assertEqual(smoke_cls.return_value.prepare.call_count, 2)
         smoke_cls.return_value.scenario.assert_not_called()
+
+
+class ComposeSmokeHelpersTest(unittest.TestCase):
+    """Logic of the daemon-only smoke steps, exercised on temp files so a broken assertion is caught without Docker."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("compose_smoke", ROOT / "tests/test_compose_smoke.py")
+        self.smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.smoke)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.t = Path(self.tmp.name)
+
+    def initialized(self):
+        from gateway import bootstrap
+        deploy = self.t / "deploy"
+        deploy.mkdir()
+        (deploy / "compose.yml").write_text("services: {}\n")
+        password, out = "Synthetic$Pass-0123456789", io.StringIO()
+        code = bootstrap.main(["--setup-dir", str(deploy)], input_fn=lambda _: self.smoke.INIT_URL,
+                              getpass_fn=lambda _: password, out=out, err=io.StringIO())
+        self.assertEqual(code, 0)
+        return deploy, out.getvalue(), password
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed: SKIPPED, not passed")
+    def test_verify_init_accepts_a_real_first_run_and_rejects_deviations(self):
+        sys.path.insert(0, str(ROOT))
+        deploy, out, password = self.initialized()
+        self.smoke.verify_init(deploy, out, self.smoke.INIT_URL, password)
+        before = self.smoke.tree(deploy)
+        for name, damage in {
+            "env mode": lambda: os.chmod(deploy / ".env", 0o644),
+            "key mode": lambda: os.chmod(deploy / "secrets/persona_vault_sync", 0o644),
+            "secrets mode": lambda: os.chmod(deploy / "secrets", 0o755),
+            "known_hosts": lambda: (deploy / "secrets/github_known_hosts").write_text("github.com ssh-ed25519 AAAA\n"),
+            "extra file": lambda: (deploy / "stray").write_text("x"),
+            "symlink": lambda: (deploy / "secrets/pub2").symlink_to(deploy / ".env"),
+        }.items():
+            with self.subTest(name):
+                damage()
+                with self.assertRaises(AssertionError):
+                    self.smoke.verify_init(deploy, out, self.smoke.INIT_URL, password)
+                shutil.rmtree(deploy)
+                deploy.mkdir()
+                for rel, (data, mode) in before.items():
+                    path = deploy / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    os.chmod(path, mode)
+                os.chmod(deploy / "secrets", 0o700)
+        with self.assertRaises(AssertionError):  # the password must never be printed
+            self.smoke.verify_init(deploy, out + password, self.smoke.INIT_URL, password)
+
+    def test_backup_scripts_round_trip_and_compare_detects_damage(self):
+        src, bak, dst = self.t / "src", self.t / "bak", self.t / "dst"
+        for d in (src, bak, dst):
+            d.mkdir()
+        (src / "30_Conversations").mkdir()
+        (src / "30_Conversations/note.md").write_text("synthetic\n")
+        con = sqlite3.connect(src / "gateway.db")
+        con.execute("CREATE TABLE agents (name TEXT)")
+        con.execute("INSERT INTO agents VALUES ('pvg-smoke')")
+        con.commit()
+        con.close()
+
+        def py(code, *argv, swap=()):
+            for old, new in swap:
+                code = code.replace(old, new)
+            return subprocess.run([sys.executable, "-c", code, *argv], capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(py(self.smoke.TAR_PY, "v.tar", swap=[("/src", str(src)), ("/bak/", f"{bak}/")]).returncode, 0)
+        self.assertEqual(py(self.smoke.UNTAR_PY, "v.tar", swap=[("/dst", str(dst)), ("/bak/", f"{bak}/")]).returncode, 0)
+        ok = py(self.smoke.COMPARE_PY, str(src), str(dst), "gateway.db")
+        self.assertEqual((ok.returncode, ok.stdout.strip()), (0, "equal 2"), ok.stderr)
+        (dst / "30_Conversations/note.md").write_text("tampered\n")
+        self.assertNotEqual(py(self.smoke.COMPARE_PY, str(src), str(dst)).returncode, 0)
+        (dst / "30_Conversations/note.md").write_text("synthetic\n")
+        (dst / "extra.md").write_text("x")
+        self.assertNotEqual(py(self.smoke.COMPARE_PY, str(src), str(dst)).returncode, 0)
+        (dst / "extra.md").unlink()
+        (src / "gateway.db").write_bytes(b"not sqlite")
+        (dst / "gateway.db").write_bytes(b"not sqlite")
+        self.assertNotEqual(py(self.smoke.COMPARE_PY, str(src), str(dst), "gateway.db").returncode, 0)  # integrity
+
+    def test_smoke_never_mounts_a_docker_socket_or_the_repository_into_init(self):
+        source = (ROOT / "tests/test_compose_smoke.py").read_text()
+        self.assertNotIn("/var/run", source)
+        self.assertIn('"--network", "none"', source)  # volume copies run without a network
+        self.assertIn('str(self.deploy / "compose.yml")', source)  # init uses the copied compose, not ROOT
 
 
 if __name__ == "__main__":

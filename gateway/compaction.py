@@ -207,33 +207,46 @@ def review_binding(plan: dict, before: list[dict], after: list[dict]) -> dict:
 
 
 def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) -> dict:
-    """Reuse the existing index checkpoint; batch completion has no separate database."""
+    """Reuse the existing index checkpoint; batch completion has no separate database.
+
+    With an explicit EMBEDDING_PROVIDER=none the same probes run keyword-only against the unchanged vault:
+    no index, Qdrant or embedding is used and no index metadata is written. cloudflare/hash stay fail-closed.
+    """
     probes = validated_probes(plan)
-    if not settings.db_path.is_file():
+    keyword_only = settings.embedding_provider == "none"
+    if not keyword_only and not settings.db_path.is_file():
         raise ValueError("compact-finish requires the existing Gateway database and Qdrant settings")
+    fingerprint = core.vault_fingerprint(settings.vault_dir)
     binding = digest({
         "plan": {key: value for key, value in plan.items() if key != "finish_checkpoint"},
         "documents": {doc["path"]: doc["document_hash"] for doc in documents},
-        "index": [settings.qdrant_url, settings.qdrant_collection, settings.embedding_provider,
-                  core.selected_embedding_model(settings), core.RAG_INDEX_SCHEMA],
-        "fingerprint": core.vault_fingerprint(settings.vault_dir),
+        # The selected mode is part of the binding, so a checkpoint never carries over between modes.
+        "index": ["none"] if keyword_only else [
+            settings.qdrant_url, settings.qdrant_collection, settings.embedding_provider,
+            core.selected_embedding_model(settings), core.RAG_INDEX_SCHEMA],
+        "fingerprint": fingerprint,
     })
     checkpoint = plan.get("finish_checkpoint", {})
     if not isinstance(checkpoint, dict):
         raise ValueError("finish_checkpoint must be an object")
-    indexed = core.qdrant_index_current(settings)
-    if not indexed:
-        if not core.qdrant_index_current(settings, allow_stale=True):
-            raise RuntimeError("finalization requires a healthy, compatible existing index; repair/rebuild it separately")
-        core.index_vault(settings)
-    if not core.qdrant_index_current(settings):
-        raise RuntimeError("final index is not current; retry after indexing is available")
-    count = core.qdrant_json(
-        settings, "POST", f"/collections/{settings.qdrant_collection}/points/count",
-        {"exact": True, "filter": {"must": [{"key": "path", "match": {"any": plan["review"]["delete_paths"]}}]}},
-    )["result"]["count"]
-    if type(count) is not int or count != 0:
-        raise RuntimeError("retired sources remain in Qdrant")
+    if keyword_only:
+        indexed = True  # There is no index to refresh; checkpoint reuse depends on the binding alone.
+        if {doc["path"] for doc in documents} & set(plan["review"]["delete_paths"]):
+            raise RuntimeError("retired sources remain in the vault")
+    else:
+        indexed = core.qdrant_index_current(settings)
+        if not indexed:
+            if not core.qdrant_index_current(settings, allow_stale=True):
+                raise RuntimeError("finalization requires a healthy, compatible existing index; repair/rebuild it separately")
+            core.index_vault(settings)
+        if not core.qdrant_index_current(settings):
+            raise RuntimeError("final index is not current; retry after indexing is available")
+        count = core.qdrant_json(
+            settings, "POST", f"/collections/{settings.qdrant_collection}/points/count",
+            {"exact": True, "filter": {"must": [{"key": "path", "match": {"any": plan["review"]["delete_paths"]}}]}},
+        )["result"]["count"]
+        if type(count) is not int or count != 0:
+            raise RuntimeError("retired sources remain in Qdrant")
     expected_checks = [{"query": probe["query"], "passed": True, "answer_state": probe["answer_state"]} for probe in probes]
     if indexed and checkpoint.get("binding") == binding and checkpoint.get("probes") == expected_checks:
         return {**checkpoint, "reused": True}
@@ -244,7 +257,15 @@ def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) ->
         )
         index = response["index"]
         paths = {item["path"] for item in response["results"]}
-        if index.get("stale") or index.get("fallback_reason"):
+        if keyword_only:
+            # Only the explicit disabled-mode marker is acceptable; any other degradation is still a failure.
+            degraded = (
+                index.get("stale") or index.get("search_mode") != "keyword"
+                or index.get("fallback_reason") != "semantic_disabled"
+            )
+        else:
+            degraded = index.get("stale") or index.get("fallback_reason")
+        if degraded:
             raise RuntimeError("search used a stale/fallback index; retry after embedding/index recovery")
         passed = (
             set(probe.get("expect_paths", [])) <= paths
@@ -254,6 +275,12 @@ def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) ->
         checks.append({"query": probe["query"], "passed": passed, "answer_state": response["answer_state"]["state"]})
     if not all(check["passed"] for check in checks):
         return {"status": "blocked", "reason": "search_probe_failed", "probes": checks}
-    if not core.qdrant_index_current(settings):
+    if keyword_only:
+        hashes = {doc["path"]: doc["document_hash"] for doc in core.vault_documents(settings)}
+        if core.vault_fingerprint(settings.vault_dir) != fingerprint or hashes != {
+            doc["path"]: doc["document_hash"] for doc in documents
+        }:
+            raise RuntimeError("vault changed during final search checks")
+    elif not core.qdrant_index_current(settings):
         raise RuntimeError("index changed during final search checks")
-    return {"binding": binding, "probes": checks, "reused": False}
+    return {"binding": binding, "probes": checks, "reused": False, **({"semantic": "disabled"} if keyword_only else {})}

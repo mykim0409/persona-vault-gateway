@@ -907,51 +907,66 @@ def search_vault(
         }
 
     max_results = max(1, min(limit, 20))
-    refreshed = index_vault(settings) if refresh else None
-    model = selected_embedding_model(settings)
-    meta = rag_index_meta(settings)
-    fingerprint = vault_fingerprint(settings.vault_dir)
-    index = refreshed or {
-        "files": int_meta(meta.get("files")),
-        "chunks": int_meta(meta.get("chunks")),
-        "updated": 0,
-        "provider": meta.get("provider") or settings.embedding_provider,
-        "model": model,
-        "dimension": embedding_size(settings),
-        "store": "qdrant",
-        "stale": meta.get("fingerprint") != fingerprint,
-    }
-    reason = ""
-    try:
-        exists = qdrant_json(
-            settings, "GET", f"/collections/{settings.qdrant_collection}/exists", timeout=QDRANT_SEARCH_TIMEOUT_SECONDS
-        )["result"]["exists"]
-        if exists:
-            index["chunks"] = int(qdrant_json(
-                settings,
-                "POST",
-                f"/collections/{settings.qdrant_collection}/points/count",
-                {"exact": True},
-                timeout=QDRANT_SEARCH_TIMEOUT_SECONDS,
-            )["result"]["count"])
-        else:
-            index["chunks"] = 0
-        if RAG_INDEX_LOCK.locked() or meta.get("rebuild_state") == "building":
-            reason = "index_building"
-        elif not exists:
-            reason = "missing_index"
-        elif meta.get("rebuild_state") != "ready" or int_meta(meta.get("chunks"), -1) != index["chunks"]:
-            reason = "incomplete_index"
-        elif (
-            meta.get("schema") != RAG_INDEX_SCHEMA
-            or meta.get("provider") != settings.embedding_provider
-            or meta.get("model") != model
-            or int_meta(meta.get("dimension"), -1) != embedding_size(settings)
-        ):
-            reason = "incompatible_index"
-    except (RuntimeError, OSError, ValueError, KeyError, TypeError):
-        reason = "qdrant_unavailable"
-        index["chunks"] = None
+    if settings.embedding_provider == "none":
+        # Keyword-only mode: neither refresh nor search may touch Qdrant or an embedding provider.
+        model = "none"
+        reason = "semantic_disabled"
+        index = {
+            "files": 0,
+            "chunks": 0,
+            "updated": 0,
+            "provider": "none",
+            "model": "none",
+            "dimension": 0,
+            "store": "none",
+            "stale": False,
+        }
+    else:
+        refreshed = index_vault(settings) if refresh else None
+        model = selected_embedding_model(settings)
+        meta = rag_index_meta(settings)
+        fingerprint = vault_fingerprint(settings.vault_dir)
+        index = refreshed or {
+            "files": int_meta(meta.get("files")),
+            "chunks": int_meta(meta.get("chunks")),
+            "updated": 0,
+            "provider": meta.get("provider") or settings.embedding_provider,
+            "model": model,
+            "dimension": embedding_size(settings),
+            "store": "qdrant",
+            "stale": meta.get("fingerprint") != fingerprint,
+        }
+        reason = ""
+        try:
+            exists = qdrant_json(
+                settings, "GET", f"/collections/{settings.qdrant_collection}/exists", timeout=QDRANT_SEARCH_TIMEOUT_SECONDS
+            )["result"]["exists"]
+            if exists:
+                index["chunks"] = int(qdrant_json(
+                    settings,
+                    "POST",
+                    f"/collections/{settings.qdrant_collection}/points/count",
+                    {"exact": True},
+                    timeout=QDRANT_SEARCH_TIMEOUT_SECONDS,
+                )["result"]["count"])
+            else:
+                index["chunks"] = 0
+            if RAG_INDEX_LOCK.locked() or meta.get("rebuild_state") == "building":
+                reason = "index_building"
+            elif not exists:
+                reason = "missing_index"
+            elif meta.get("rebuild_state") != "ready" or int_meta(meta.get("chunks"), -1) != index["chunks"]:
+                reason = "incomplete_index"
+            elif (
+                meta.get("schema") != RAG_INDEX_SCHEMA
+                or meta.get("provider") != settings.embedding_provider
+                or meta.get("model") != model
+                or int_meta(meta.get("dimension"), -1) != embedding_size(settings)
+            ):
+                reason = "incompatible_index"
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError):
+            reason = "qdrant_unavailable"
+            index["chunks"] = None
     query_vector = None
     if not reason:
         try:
@@ -1553,7 +1568,8 @@ def wiki_health(settings: Settings, agent: dict[str, Any]) -> dict[str, Any]:
     from .wiki import analyze_documents, health_report
 
     report = health_report(analyze_documents(vault_documents(settings)))
-    report["index"] = rag_index_stats(settings) if qdrant_collection_exists(settings) else {
+    semantic_disabled = settings.embedding_provider == "none"
+    report["index"] = rag_index_stats(settings) if semantic_disabled or qdrant_collection_exists(settings) else {
         "files": 0,
         "chunks": 0,
         "updated": 0,
@@ -1636,6 +1652,9 @@ def keyword_matches(
 
 
 def index_vault(settings: Settings) -> dict[str, int | str | bool]:
+    if settings.embedding_provider == "none":
+        # Explicit no-op: existing vectors and index metadata are left untouched.
+        return disabled_index_stats()
     if not RAG_INDEX_LOCK.acquire(blocking=False):
         raise RuntimeError("RAG indexing is already in progress")
     try:
@@ -1822,7 +1841,25 @@ def _index_vault(settings: Settings) -> dict[str, int | str | bool]:
     }
 
 
+def disabled_index_stats() -> dict[str, int | str | bool]:
+    return {
+        "files": 0,
+        "chunks": 0,
+        "updated": 0,
+        "payload_updated": 0,
+        "deleted": 0,
+        "provider": "none",
+        "model": "none",
+        "dimension": 0,
+        "store": "none",
+        "stale": False,
+        "semantic": "disabled",
+    }
+
+
 def rag_index_stats(settings: Settings) -> dict[str, int | str | bool]:
+    if settings.embedding_provider == "none":
+        return disabled_index_stats()
     meta = rag_index_meta(settings)
     model = selected_embedding_model(settings)
     return {
@@ -1839,6 +1876,16 @@ def rag_index_stats(settings: Settings) -> dict[str, int | str | bool]:
 
 def rag_readiness(settings: Settings) -> dict[str, Any]:
     init_db(settings.db_path)
+    if settings.embedding_provider == "none":
+        return {
+            "status": "ok",
+            "db": "ok",
+            "qdrant": "disabled",
+            "semantic": "disabled",
+            "rag_indexed": False,
+            "chunks": 0,
+            "provider": "none",
+        }
     try:
         exists_result = qdrant_json(settings, "GET", f"/collections/{settings.qdrant_collection}/exists")
         exists = bool(exists_result.get("result", {}).get("exists"))
@@ -1913,6 +1960,8 @@ def qdrant_json(
     *,
     timeout: float = QDRANT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    if settings.embedding_provider == "none":
+        raise RuntimeError("Qdrant is disabled when EMBEDDING_PROVIDER=none")
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(
         f"{settings.qdrant_url}{path}",
@@ -1944,7 +1993,7 @@ def qdrant_collection_exists(settings: Settings) -> bool:
 
 
 def qdrant_index_current(settings: Settings, *, allow_stale: bool = False) -> bool:
-    if not qdrant_collection_exists(settings):
+    if settings.embedding_provider == "none" or not qdrant_collection_exists(settings):
         return False
     meta = rag_index_meta(settings)
     if int_meta(meta.get("chunks"), -1) != qdrant_count(settings):
@@ -2070,6 +2119,8 @@ def qdrant_compaction_neighbors(
     """Find semantic neighbors from stored vectors without embedding new text."""
     if not source_documents:
         return {"status": "empty", "edges": []}
+    if settings.embedding_provider == "none":
+        return {"status": "unavailable", "reason": "semantic_disabled", "edges": []}
     if not settings.db_path.is_file():
         return {"status": "unavailable", "reason": "missing_index_metadata", "edges": []}
     try:
@@ -2223,7 +2274,10 @@ def selected_embedding_model(settings: Settings) -> str:
         return settings.embedding_model
     if provider == "hash":
         return HASH_EMBEDDING_MODEL
-    raise ValueError("EMBEDDING_PROVIDER must be cloudflare or hash")
+    if provider == "none":
+        # Fail closed: a caller that forgot the keyword-only guard must not fall through to Qdrant.
+        raise ValueError("semantic search is disabled (EMBEDDING_PROVIDER=none)")
+    raise ValueError("EMBEDDING_PROVIDER must be cloudflare, hash, or none")
 
 
 def embed_documents(settings: Settings, texts: list[str]) -> list[list[float]]:
@@ -2395,6 +2449,9 @@ def cloudflare_embedding_blocked_until(settings: Settings) -> datetime | None:
 
 
 def retry_due_embeddings(settings: Settings, now: datetime | None = None) -> bool:
+    if settings.embedding_provider == "none":
+        # Keep any stored limit marker so switching back to a provider resumes it.
+        return False
     blocked_until = cloudflare_embedding_blocked_timestamp(settings)
     retry_at = blocked_until + timedelta(seconds=EMBEDDING_RETRY_GRACE_SECONDS) if blocked_until else None
     if not retry_at or retry_at > (now or datetime.now(timezone.utc)):
