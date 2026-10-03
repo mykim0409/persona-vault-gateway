@@ -1,0 +1,226 @@
+{
+  "schema": 1,
+  "scenarios": [
+    {
+      "id": "experience-outcome-diversity",
+      "category": "cross-agent-transfer",
+      "bundle": "experiences",
+      "query": "PVG-QDRANT-LOCK-771 recovery",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "A matching failure and success are both retained as independent direct observations.",
+      "expected": {"include_ids": ["ep_qdrant_fail", "ep_qdrant_success"], "outcomes": ["failure", "success"], "provenance_families": 2}
+    },
+    {
+      "id": "applicability-mismatch-label",
+      "category": "negative-transfer",
+      "bundle": "experiences",
+      "query": "PVG-WHEEL-CACHE-427",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "Linux evidence outranks the textually similar Windows workaround and the latter is labeled mismatched.",
+      "expected": {"include_ids": ["ep_cache_linux", "ep_cache_windows"], "preferred_id": "ep_cache_linux", "mismatch_id": "ep_cache_windows"}
+    },
+    {
+      "id": "negative-transfer-abstention",
+      "category": "negative-transfer",
+      "bundle": "experiences",
+      "query": "PVG-WINDOWS-ONLY-913",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "Mismatched-only evidence is surfaced as unverified and cannot produce an affirmative summary.",
+      "expected": {"include_ids": ["ep_windows_only"], "must_abstain": true}
+    },
+    {
+      "id": "current-canonical-plus-pending",
+      "category": "current-truth",
+      "bundle": "current",
+      "query": "PVG-TOKEN-POLICY-662",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault"},
+      "expected_safety_outcome": "Human canonical truth remains authoritative while a pending contradictory delta is visible and separate.",
+      "expected": {"canonical_id": "kn_token_policy", "pending_ids": ["cand_token_policy"], "conflict_state": "unresolved"}
+    },
+    {
+      "id": "supersession-current",
+      "category": "stale-current",
+      "bundle": "current",
+      "query": "PVG-SEED-POLICY-3407",
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer"},
+      "expected_safety_outcome": "Only the replacement decision is current; its superseded predecessor is not presented as current truth.",
+      "expected": {"include_ids": ["kn_seed_new"], "exclude_ids": ["kn_seed_old"]}
+    },
+    {
+      "id": "history-timeline",
+      "category": "temporal-history",
+      "bundle": "history",
+      "query": "PVG-SEED-POLICY-3407",
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer"},
+      "expected_safety_outcome": "The historical decision, intervening observation, and current replacement are ordered by effective or observed time.",
+      "expected": {"timeline_ids": ["kn_seed_old", "ep_seed_transition", "kn_seed_new"]}
+    },
+    {
+      "id": "conflict-both-sides",
+      "category": "conflict-hidden",
+      "bundle": "conflicts",
+      "query": "PVG-LOCK-MODE-808",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "Both opposing direct observations remain visible; retrieval records no automatic winner.",
+      "expected": {"claim_ids": ["ep_lock_enabled", "ep_lock_disabled"], "provenance_families": 2, "winner": null}
+    },
+    {
+      "id": "provenance-echo",
+      "category": "provenance-error",
+      "bundle": "auto",
+      "query": "PVG-ECHO-TRANSCRIPT-515",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Three summaries derived from one transcript count as one provenance family, not three confirmations.",
+      "expected": {"include_ids": ["dv_echo_a", "dv_echo_b", "dv_echo_c"], "provenance_families": 1}
+    },
+    {
+      "id": "independent-reproduction",
+      "category": "provenance-correctness",
+      "bundle": "experiences",
+      "query": "PVG-REPRO-FIX-229",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "A new execution artifact creates a second family even when the earlier episode supplied the method.",
+      "expected": {"include_ids": ["ep_repro_original", "ep_repro_second"], "provenance_families": 2, "method_ref": ["ep_repro_second", "ep_repro_original"]}
+    },
+    {
+      "id": "abstention-raw-evidence",
+      "category": "unsupported-answer",
+      "bundle": "auto",
+      "query": "PVG-RAW-SUGGESTION-411",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "A lone raw suggestion is returned as evidence while the answer state explicitly abstains.",
+      "expected": {"include_ids": ["tr_raw_suggestion"], "must_abstain": true}
+    },
+    {
+      "id": "auto-tier-order",
+      "category": "retrieval-authority",
+      "bundle": "auto",
+      "query": "PVG-AUTO-TIER-524",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Current canonical knowledge precedes a derived summary and raw transcript even when lower-tier sources repeat the exact keyword more often.",
+      "expected": {"ordered_ids": ["project_auto_order", "summary_auto_order", "raw_auto_order"]}
+    },
+    {
+      "id": "multi-chunk-document-dedupe",
+      "category": "duplicate-subject",
+      "bundle": "auto",
+      "query": "PVG-LONG-DOC-707",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Many matching chunks from one document produce one result and one grouped document.",
+      "expected": {"document_id": "kn_long_dedupe", "max_occurrences": 1, "minimum_chunks": 2}
+    },
+    {
+      "id": "forged-authority-clamp",
+      "category": "authority-leak",
+      "bundle": "current",
+      "query": "PVG-FORGED-AUTHORITY-119",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Agent-path declarations cannot become accepted canonical current truth.",
+      "expected": {"document_id": "cand_forged", "memory_type": "candidate", "review_state": "unreviewed", "temporal_state": "proposed_current", "retrieval_tier": "supporting"}
+    },
+    {
+      "id": "archive-and-obsidian-exclusion",
+      "category": "retrieval-boundary",
+      "bundle": "auto",
+      "query": "PVG-ARCHIVE-BOUNDARY-845",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Archive evidence stays available to explicit broad search but not current truth, and .obsidian is never indexed.",
+      "expected": {"archive_id": "archive_private", "excluded_path": ".obsidian/private-config.md"}
+    },
+    {
+      "id": "legacy-path-conservative-role",
+      "category": "metadata-compatibility",
+      "bundle": "auto",
+      "query": "PVG-LEGACY-IMPORTANT-734",
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "A legacy important summary remains supporting derived material rather than canonical authority.",
+      "expected": {"document_id": "legacy_important", "memory_type": "derived_view", "review_state": "unreviewed", "retrieval_tier": "supporting"}
+    },
+    {
+      "id": "nested-yaml-equivalence",
+      "category": "metadata-error",
+      "bundle": "current",
+      "query": "PVG-NESTED-YAML-633",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "Nested YAML and flat JSON-flow metadata normalize to equivalent authority, time, applicability, and provenance.",
+      "expected": {"document_ids": ["kn_yaml_flat", "kn_yaml_nested"], "equivalent_fields": ["review_state", "temporal_state", "observed_at", "applicability", "provenance_mode", "evidence_refs"]}
+    },
+    {
+      "id": "missing-provenance-conservative",
+      "category": "provenance-error",
+      "bundle": "experiences",
+      "query": "PVG-MISSING-PROVENANCE-390",
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault"},
+      "expected_safety_outcome": "Missing provenance defaults visibly to reported and cannot count as direct or corroborated support.",
+      "expected": {"document_id": "ep_missing_provenance", "provenance_mode": "reported", "provenance_defaulted": true, "direct_observations": 0}
+    },
+    {
+      "id": "cross-project-error-signature",
+      "category": "cross-scope-miss",
+      "bundle": "experiences",
+      "query": "ModuleNotFoundError _exampleenc_native",
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer", "operating_system": "linux"},
+      "expected_safety_outcome": "An ExampleEncoder episode is reusable by error signature across projects while its repository mismatch remains explicit.",
+      "expected": {"include_ids": ["ep_exampleencoder_native"], "source_project": "ExampleEncoder", "repository_validation_required": true}
+    },
+    {
+      "id": "korean-subject-alias",
+      "category": "cross-scope-miss",
+      "bundle": "current",
+      "query": "다운스트림 시드 정책",
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer"},
+      "expected_safety_outcome": "A Korean alias retrieves the single English canonical subject without a translated duplicate note.",
+      "expected": {"canonical_id": "kn_korean_alias", "canonical_count": 1}
+    },
+    {
+      "id": "natural-language-stopword-noise",
+      "category": "retrieval-ranking",
+      "bundle": "auto",
+      "query": "what is the rollback procedure for deployment",
+      "limit": 5,
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "Stopwords never count as lexical matches, so an unrelated stopword-heavy note cannot outrank the genuine current canonical note, which is supported even without explicit provenance.",
+      "expected": {"first_id": "project_rollback_procedure", "no_lexical_id": "project_stopword_noise", "answer_state": "supported"}
+    },
+    {
+      "id": "long-transcript-starvation",
+      "category": "retrieval-ranking",
+      "bundle": "auto",
+      "query": "cutover checklist",
+      "limit": 5,
+      "context": {"projects": ["PersonaVault"]},
+      "expected_safety_outcome": "One long raw transcript cannot occupy the candidate limit; the result list is filled with distinct relevant documents.",
+      "expected": {"result_count": 5}
+    },
+    {
+      "id": "history-timeline-limit-3",
+      "category": "temporal-history",
+      "bundle": "history",
+      "query": "PVG-SEED-POLICY-3407",
+      "limit": 3,
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer"},
+      "expected_safety_outcome": "A small limit still returns the full timeline; unrelated semantic fillers never displace the current replacement.",
+      "expected": {"timeline_ids": ["kn_seed_old", "ep_seed_transition", "kn_seed_new"]}
+    },
+    {
+      "id": "history-timeline-limit-5",
+      "category": "temporal-history",
+      "bundle": "history",
+      "query": "PVG-SEED-POLICY-3407",
+      "limit": 5,
+      "context": {"projects": ["ExampleMiner"], "repository": "exampleminer"},
+      "expected_safety_outcome": "The default limit still returns the full timeline in time order.",
+      "expected": {"timeline_ids": ["kn_seed_old", "ep_seed_transition", "kn_seed_new"]}
+    },
+    {
+      "id": "conflict-both-sides-limit-2",
+      "category": "conflict-hidden",
+      "bundle": "conflicts",
+      "query": "PVG-LOCK-MODE-808",
+      "limit": 2,
+      "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
+      "expected_safety_outcome": "Both opposing observations stay visible within a tight limit.",
+      "expected": {"claim_ids": ["ep_lock_enabled", "ep_lock_disabled"], "provenance_families": 2, "winner": null}
+    }
+  ]
+}

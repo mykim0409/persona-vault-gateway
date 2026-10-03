@@ -1,0 +1,14 @@
+{
+  "name": "persona-vault-gateway",
+  "owner": {
+    "name": "mykim0409"
+  },
+  "plugins": [
+    {
+      "name": "persona-vault",
+      "source": "./plugins/persona-vault",
+      "description": "Capture agent sessions and record durable knowledge through PersonaVault Gateway.",
+      "category": "Productivity"
+    }
+  ]
+}

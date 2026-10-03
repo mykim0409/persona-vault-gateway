@@ -1,0 +1,27 @@
+{
+  "name": "persona-vault",
+  "version": "0.7.3+codex.20260921123406",
+  "description": "Load approved user rules, capture raw evidence, search PersonaVault, and submit requested notes.",
+  "author": {
+    "name": "mykim0409"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "Persona Vault",
+    "shortDescription": "Capture sessions and search durable knowledge",
+    "longDescription": "Loads the approved working agreement, captures completed turns as temporary raw evidence, and searches compacted knowledge through PersonaVault Gateway. Explicit notes are submitted only on user request. Secrets stay in local config, not in the plugin.",
+    "developerName": "mykim0409",
+    "category": "Productivity",
+    "capabilities": [
+      "Instructions",
+      "Hooks",
+      "Search",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Search PersonaVault for prior project context.",
+      "Save this note as PersonaVault evidence."
+    ]
+  }
+}

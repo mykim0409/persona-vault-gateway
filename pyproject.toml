@@ -1,0 +1,21 @@
+[project]
+name = "persona-vault-gateway"
+version = "0.1.0"
+description = "FastAPI gateway for writing agent memory into a PersonaVault Obsidian vault"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+[project.scripts]
+pvg-wiki = "gateway.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["gateway*"]
