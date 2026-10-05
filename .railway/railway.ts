@@ -33,6 +33,7 @@ export default defineRailway(() => {
       DB_PATH: "/data/gateway.db",
       EMBEDDING_PROVIDER: "none",
       PVG_SECURE_COOKIES: "true",
+      PVG_TRUSTED_PROXY_HOPS: "1",
     },
     volumeMounts: { "/data": data },
   });

@@ -21,6 +21,10 @@ with no per-platform runtime fork. The setup procedure is in [setup.md](setup.md
 - The platform terminates HTTPS and does not know its front-end address, so the Railway and Render configs set `PVG_SECURE_COOKIES=true` (it does not trust
   forwarded headers and only forces Secure cookies, so you can log in only over HTTPS). Compose defaults to `false`.
   See [operations.md](operations.md#remote-access).
+- Behind the platform proxy every visitor shares one connection address, so the Railway and Render configs also set `PVG_TRUSTED_PROXY_HOPS=1`: the admin
+  login and setup limiter is then keyed on the client address the proxy appended to `X-Forwarded-For`, and one visitor's failed attempts cannot lock the
+  operator out. Use `1` for Render and Railway and `0` (the default) for Compose and loopback. It affects only that limiter keying, not cookies or
+  `FORWARDED_ALLOW_IPS`. See [operations.md](operations.md#remote-access).
 - TLS and access control are the platform's or the operator's responsibility. This repository does not provide a proxy, certificates, or DDNS.
 
 ## Comparison

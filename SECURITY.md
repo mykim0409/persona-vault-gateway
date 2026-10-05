@@ -68,6 +68,9 @@ It does not claim to have completed a security audit and offers no security guar
   image digests). The Railway and Render configs have not been deployed or verified on a live account.
 - On platforms that do not know the HTTPS front-end address, `PVG_SECURE_COOKIES=true` only forces Secure cookies.
   Trust forwarded headers (`FORWARDED_ALLOW_IPS`) only by exact IP and do not use `*`.
+- Behind a platform proxy (Render, Railway), `PVG_TRUSTED_PROXY_HOPS=1` keys the login and setup limiter on the client
+  address that proxy appended to `X-Forwarded-For`; without it everyone shares one bucket. Set it to the real number of
+  proxies and no higher, otherwise a client-supplied entry can pick its own bucket. It affects only that limiter.
 
 ## Reporting a vulnerability
 

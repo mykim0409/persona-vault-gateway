@@ -408,6 +408,47 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(self.asgi_login("wrong", client=None).status_code, 401)
         self.assertIn("unknown", app_module.admin_login_attempts)
 
+    def test_trusted_proxy_hops_key_the_limiter_on_the_forwarded_client(self) -> None:
+        proxy, limit = ("10.0.0.1", 4000), app_module.ADMIN_LOGIN_MAX_ATTEMPTS
+        with patch.dict(os.environ, {"PVG_TRUSTED_PROXY_HOPS": "1"}):
+            for _ in range(limit):
+                self.assertEqual(self.asgi_login("wrong", client=proxy, forwarded="203.0.113.1").status_code, 401)
+            # Whatever the client prepends, the entry the proxy appended picks the bucket: still blocked.
+            for forwarded in ("203.0.113.1", "198.51.100.7, 203.0.113.1", "::1,198.51.100.8,203.0.113.1"):
+                self.assertEqual(self.asgi_login(PASSWORD, client=proxy, forwarded=forwarded).status_code, 429, forwarded)
+            # Another visitor behind the same proxy has its own bucket, and a prefix naming the first one does not poison it.
+            self.assertEqual(self.asgi_login(PASSWORD, client=proxy, forwarded="203.0.113.1, 203.0.113.2").status_code, 303)
+            self.assertEqual(set(app_module.admin_login_attempts), {"203.0.113.1"})
+            # Missing, empty or non-IP entries fall back to the connection address, never to a client-chosen bucket.
+            app_module.admin_login_attempts.clear()
+            for forwarded in (None, "", "not-an-address", "203.0.113.1, not-an-address", "203.0.113.1,"):
+                self.assertEqual(self.asgi_login("wrong", client=proxy, forwarded=forwarded).status_code, 401, forwarded)
+            self.assertEqual(set(app_module.admin_login_attempts), {"10.0.0.1"})
+            # IPv6 clients are keyed on their /64, so rotating inside one prefix keeps the same attempts.
+            app_module.admin_login_attempts.clear()
+            for forwarded in ("2001:DB8:0::1", "2001:db8::dead:beef", "2001:db8:0:0:ffff:ffff:ffff:ffff"):
+                self.asgi_login("wrong", client=proxy, forwarded=forwarded)
+            self.assertEqual({k: len(v) for k, v in app_module.admin_login_attempts.items()}, {"2001:db8::/64": 3})
+            for _ in range(limit - 3):
+                self.asgi_login("wrong", client=proxy, forwarded="2001:db8::7")
+            self.assertEqual(self.asgi_login(PASSWORD, client=proxy, forwarded="2001:db8::8").status_code, 429)
+            self.assertEqual(self.asgi_login(PASSWORD, client=proxy, forwarded="2001:db8:0:1::1").status_code, 303)
+            # IPv4-mapped addresses are IPv4 clients, not one shared ::/64 bucket.
+            app_module.admin_login_attempts.clear()
+            self.asgi_login("wrong", client=proxy, forwarded="::ffff:203.0.113.5")
+            self.assertEqual(set(app_module.admin_login_attempts), {"203.0.113.5"})
+        with patch.dict(os.environ, {"PVG_TRUSTED_PROXY_HOPS": "2"}):
+            app_module.admin_login_attempts.clear()
+            self.asgi_login("wrong", client=proxy, forwarded="198.51.100.9, 203.0.113.1, 10.1.1.1")
+            self.asgi_login("wrong", client=proxy, forwarded="203.0.113.1")  # fewer entries than hops
+            self.assertEqual(set(app_module.admin_login_attempts), {"203.0.113.1", "10.0.0.1"})
+        # Unset, 0 and unusable values keep the plain behaviour: the header is ignored.
+        for hops in ("", "0", "-1", "one", "1.5", "١"):
+            with self.subTest(hops=hops), patch.dict(os.environ, {"PVG_TRUSTED_PROXY_HOPS": hops}):
+                app_module.admin_login_attempts.clear()
+                self.asgi_login("wrong", client=proxy, forwarded="203.0.113.1")
+                self.assertEqual(set(app_module.admin_login_attempts), {"10.0.0.1"})
+
     def test_login_window_expiry_and_sliding_boundaries(self) -> None:
         attempt, window, limit = app_module.admin_login_attempt, app_module.ADMIN_LOGIN_WINDOW_SECONDS, app_module.ADMIN_LOGIN_MAX_ATTEMPTS
         for index in range(limit):

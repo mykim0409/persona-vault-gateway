@@ -56,6 +56,9 @@ PersonaVault Gateway는 개인이 직접 운영하는 self-hosted 베타 소프�
 - SQLite와 deploy key가 같은 volume에 있어 volume 접근이 곧 Vault 쓰기 권한입니다.
 - Release asset과 image의 서명·provenance 검증은 제공하지 않습니다(SHA-256 checksum과 image digest만). Railway·Render 설정은 배포하거나 실제 계정에서 검증하지 않았습니다.
 - HTTPS 앞단 주소를 모르는 플랫폼에서는 `PVG_SECURE_COOKIES=true`가 Secure cookie만 강제합니다. forwarded 헤더(`FORWARDED_ALLOW_IPS`)는 정확한 IP로만 신뢰하고 `*`는 쓰지 마세요.
+- 플랫폼 proxy(Render, Railway) 뒤에서는 `PVG_TRUSTED_PROXY_HOPS=1`이 그 proxy가 `X-Forwarded-For`에 덧붙인 client 주소로 login·setup 제한을 집계합니다.
+  이 값이 없으면 모두가 한 bucket을 공유합니다. 실제 proxy 개수와 같게만 두고 더 크게 두지 마세요. 크게 두면 client가 보낸 항목이 자기 bucket을 고를 수 있습니다.
+  이 값은 해당 제한의 집계에만 영향을 줍니다.
 
 ## 취약점 신고 (Reporting)
 
