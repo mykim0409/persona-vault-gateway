@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import html
+import ipaddress
 import logging
 import math
 import os
@@ -276,10 +277,28 @@ def admin_cookie_attributes(request: Request) -> dict[str, Any]:
     return {"httponly": True, "samesite": "lax", "secure": forced or request.url.scheme == "https"}
 
 
+def limiter_key(address: str) -> str:
+    """The limiter bucket of an IP: a client owns its whole IPv6 /64, so rotating inside it must not earn new attempts."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return ""
+    ip = getattr(ip, "ipv4_mapped", None) or ip  # dual-stack sockets report IPv4 clients as ::ffff:a.b.c.d
+    return f"{ipaddress.IPv6Address(int(ip) >> 64 << 64)}/64" if ip.version == 6 else str(ip)
+
+
 def admin_login_client(request: Request) -> str:
-    # Only the address the ASGI server resolved: uvicorn rewrites it from X-Forwarded-For solely for trusted
-    # proxies, so a raw header sent by a client never selects (or escapes) its own bucket here.
-    return request.client.host if request.client else "unknown"
+    # By default only the address the ASGI server resolved: uvicorn rewrites it from X-Forwarded-For solely for
+    # trusted proxies, so a raw header sent by a client never selects (or escapes) its own bucket here.
+    # PVG_TRUSTED_PROXY_HOPS=n (Render, Railway: 1) instead takes the entry n from the right of X-Forwarded-For:
+    # the proxies append the address they saw last, so a prefix the client sends cannot influence it.
+    # A missing, too short or non-IP entry falls back to the connection address. This only keys the limiter.
+    host = request.client.host if request.client else "unknown"
+    raw = os.getenv("PVG_TRUSTED_PROXY_HOPS", "").strip()
+    hops = int(raw) if raw.isascii() and raw.isdigit() else 0
+    entries = ",".join(request.headers.getlist("x-forwarded-for")).split(",")
+    forwarded = entries[-hops].strip() if 0 < hops <= len(entries) else ""
+    return limiter_key(forwarded) or limiter_key(host) or host
 
 
 def admin_login_attempt(client: str, now: float | None = None) -> int:

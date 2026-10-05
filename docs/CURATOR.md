@@ -13,15 +13,13 @@ provenance_mode: human_asserted
 relations: {"supports":[],"contradicts":[],"supersedes":[]}
 retrieval_tier: primary
 privacy: normal
-protocol_version: 22
+protocol_version: 23
 ---
-
-**English** | [한국어](https://github.com/mykim0409/persona-vault-gateway/blob/main/docs/CURATOR.ko.md)
 
 # PersonaVault Curator Protocol
 
-The goal is to consolidate raw records into knowledge and to reduce active Markdown. Audit documents, plan
-descriptions, and the number of sessions processed are not results. Place this file in the Vault root as `CURATOR.md`.
+The goal is to consolidate raw records into knowledge, to reduce active Markdown, and to keep each project's situation readable at a glance in `BRIEF.md`.
+Audit documents, plan descriptions, and the number of sessions processed are not results. Place this file in the Vault root as `CURATOR.md`.
 
 ```text
 active_markdown_characters_after < active_markdown_characters_before
@@ -53,13 +51,16 @@ Do not skip the semantic preservation, approval, or deletion gates because of de
 | --- | --- |
 | `30_Conversations/raw/` | Whole-file retirement target, by date. Do not edit lines, abbreviate, or move. |
 | `40_Agents/` | Existing evidence. Do not create new files; consolidate under the same coverage and approval gates. |
-| `10_User/` | Updatable understanding of the user and explicitly approved collaboration rules. |
-| `20_Projects/` | Editable current project state, decisions, constraints, and scoped history where needed. |
+| `10_User/` | Explicitly approved collaboration rules (`WORKING_AGREEMENT.md`), the user brief `PROFILE.md` (kind `user_profile`) and the observation ledger `OBSERVATIONS.md` (kind `user_ledger`). Other documents here are human-maintained records; they are not Curator targets unless the user asks. |
+| `20_Projects/<Project>/BRIEF.md` | Status board, rewritten every curation. Body at most 8,000 characters (`--brief-cap`), markers not counted. |
+| `20_Projects/<Project>/DECISIONS.md` | Decision ledger: one table, stable ids `D-###`, append-mostly. |
+| `20_Projects/<Project>/<topic>.md` | Second priority. Touch only for reusable procedure or knowledge. |
 | `50_Knowledge/` | Knowledge that can be reused across projects. |
 | `30_Conversations/summaries/` | Use only when the order of the conversation and the rejected alternatives themselves are needed. |
 | `90_Private/` | Modify only within the scope approved by the user. |
 
-Update existing owning documents first. Create a new document only when no suitable document exists and it has independent search value.
+Update `DECISIONS.md` and rewrite `BRIEF.md` first; touch topic documents only for reusable procedure or knowledge. Create a new topic document only when no suitable document exists and it has independent search value.
+When the plan lists a target with `create: true` (or `adopt: true`, an existing file of another kind), start the draft from the template path in the plan (`docs/templates/<NAME>.md` of the PersonaVault checkout; do not link it). Keep its frontmatter and headings exactly, replace only `<Project>` and `<project-slug>`, and carry the valid content of an adopted file into the template headings.
 Do not automatically generate monthly or per-session summaries, index stubs, personality scores, or curation explanation documents.
 Do not recreate or maintain past receipts in `60_Curation/` as an active lifecycle.
 Do not widen the scope of edits or deletions to tidy existing documents unrelated to this task.
@@ -74,6 +75,9 @@ Do not widen the scope of edits or deletions to tidy existing documents unrelate
 ```bash
 uv run pvg-wiki --vault . compact-plan --output .tmp/curating/plan.json
 ```
+
+The preview lists `selected.ledgers` (path, `create`/`adopt`, current characters or rows, and for ledgers the `next_id` to use), `selected.create_targets` and `selected.subagent_items`, the count of raw items whose `event_role` is `subagent`. Each `raw_item` node carries its `event_role`.
+`--brief-cap N` (default 8000) is accepted by `compact-plan`, `compact-review`, `compact-check` and `compact-finish`.
 
 `--output` only creates a new JSON file under the Vault's `.tmp/curating/` and does not overwrite an existing plan.
 Use a different file name for the next run. If the option is omitted, no file is created.
@@ -124,14 +128,18 @@ subagent results, and supplied material. Do not turn a whole session into a sing
 
 | Disposition | Meaning |
 | --- | --- |
-| `merge` | Consolidate the needed content into existing knowledge. |
-| `replace` | Correct an outdated or wrong description. |
+| `decision`, `deferral`, `supersession`, `goal_change`, `question` | A project decision, a deferral, a decision replaced by another, a changed goal, or an open question. Targets: `DECISIONS.md` and/or `BRIEF.md`. |
+| `knowledge` | Reusable across projects. Target: `50_Knowledge/` or a topic document. |
+| `user_preference`, `user_constraint`, `user_feedback`, `user_context`, `user_retraction` | Evidence about the person. Targets: `OBSERVATIONS.md` and the `PROFILE.md` rewrite. |
 | `already-covered` | Current knowledge already preserves the same meaning and conditions sufficiently. |
 | `discard` | No lasting value, such as progress narration, repetition, temporary errors, help/smoke output, or plain copies. |
 | `hold` | Attribution, meaning, or scope of application cannot be judged safely. |
 
+`merge` and `replace` are still accepted in protocol 23 with a warning and are removed in 24; they cannot target `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` or `OBSERVATIONS.md`.
+
 Items with the same judgment, target, and evidence can be recorded as one entry in `review.items`.
 Use either a single `id` or a list of `ids`. Each ID must be included exactly once across the whole review.
+The typed dispositions (everything except `already-covered`, `discard`, `hold`, and the deprecated `merge`/`replace`) take one `id` each; do not group them.
 Do not fill coverage with a default judgment, a wildcard, or "discard the rest". Do not copy the gist repeatedly into the inventory, summary, or report.
 Use the IDs, hashes, and character counts produced by the tool; the agent must not regenerate them or list them by hand.
 Select the ID list for an identical judgment programmatically from the plan as well, but decide which items to group by reviewing the source.
@@ -140,7 +148,24 @@ Select the ID list for an identical judgment programmatically from the plan as w
 {"ids":["item:...","item:..."],"disposition":"already-covered","targets":["20_Projects/Project/current.md"],"reason":"The same conclusion under the same conditions is preserved in that document"}
 ```
 
-`merge/replace/already-covered` specify an actual target. Do not blur items with different judgments, or with different negations, retractions, or conditions,
+A typed item (every disposition above except `already-covered`, `discard` and `hold`) adds these fields:
+
+- `quote`: a short exact span of the raw item, 4 to 200 characters. The tool checks it as a whitespace-normalised substring of that item.
+- `entry`: for a ledger row, the proposed row, free-form, such as `{"id":"D-014","type":"결정","status":"유효"}`. Take the id from `selected.ledgers[].next_id`; never invent a placeholder such as `D-new`. The tool does not read `entry`, but changing it invalidates the review.
+- `anchors`: target path -> a quote, or a list of quotes, taken from the DRAFT line where the claim landed. Anchor a ledger row by its first two cells, such as `| D-014 | 2026-10-05 |`, because the bare id also appears in the 후속 cell of other rows. One item can mark several rows.
+- `reason`.
+
+`compact-annotate` (section 5) writes the `<!-- pvg-src: item:... -->` marker at the end of each anchored line, inside the last cell of a table row. It holds only item IDs, which are one-way hashes of path and locator.
+Never type or edit a marker or an ID by hand. The one exception is the `doc:` source of the migration in section 8.
+
+```jsonl
+{"id":"item:...","disposition":"decision","targets":["20_Projects/Project/DECISIONS.md","20_Projects/Project/BRIEF.md"],"quote":"retries stop after 3 attempts","entry":{"id":"D-014","type":"결정","status":"유효"},"anchors":{"20_Projects/Project/DECISIONS.md":"| D-014 | 2026-10-05 |","20_Projects/Project/BRIEF.md":"| D-014 | 2026-10-05 |"},"reason":"The user fixed the retry limit"}
+{"id":"item:...","disposition":"user_preference","targets":["10_User/OBSERVATIONS.md","10_User/PROFILE.md"],"quote":"keep answers short","entry":{"id":"U-007","type":"선호(명시)","status":"확인"},"anchors":{"10_User/OBSERVATIONS.md":"| U-007 | 2026-10-05 |","10_User/PROFILE.md":"U-007 Keeps answers short"},"reason":"The user stated this preference for all projects"}
+```
+
+A raw item whose `event_role` is `subagent` may only be `knowledge`, `already-covered`, `discard` or `hold`. A subagent's words are written by the agent, never a user decision.
+
+`already-covered` and the typed dispositions specify an actual target. Do not blur items with different judgments, or with different negations, retractions, or conditions,
 into one reason. A plain copy of supplied material can be discarded, but decisions made using that material and new results are judged separately.
 Preserve important numbers, dates, and versions; reusable successes, failures, and causes; user constraints; results that change the next action; and unresolved questions.
 
@@ -161,10 +186,24 @@ Do not stop at appending raw after an existing project document; rewrite the cur
 - Do not decide truth just because something is newer or because it is written in the existing canonical. If opposing evidence of the same scope remains, preserve it as a conflict.
 - Review the existing meaning of the target together with the new evidence, and get approval for an exact patch that includes sentence merging, replacement, and removal. Do not reuse the existing approval state as approval of the new patch.
 - `delete_paths` in this CLI is for raw/legacy sources. Deleting or renaming a canonical file itself is not automatically allowed.
+- `DECISIONS.md` and `OBSERVATIONS.md` are never rewritten. Rows are appended. Only 상태 and 후속 (decision ledger) or 상태 and 독립 세션 (observation ledger) change. 날짜, 유형, 내용 and 이유/근거 are frozen; a human fixes typos in Obsidian between curations.
+- `BRIEF.md` and `PROFILE.md` are fully rewritten from the current ledger each curation. The tool blocks them above the body cap.
 
 Example: if new evidence corrects an existing "always use A" to "B is needed under condition X",
 do not leave the existing sentence immutable and accumulate annotations; rewrite it as "A under general conditions, B under condition X".
 Keep valid exceptions for other situations and the remaining uncertainty.
+
+### Ledgers and briefs
+
+The templates fix the ledger headers and the `##` headings; do not rename or reorder them. Extra `##` headings are allowed.
+`BRIEF.md` has `현재 목표`, `유효한 결정`, `미뤄진 것`, `대체된 것`, `열린 질문`, `최근 변화`. `PROFILE.md` has `역할·맥락`, `확인된 선호`, `가설`, `제약`, `에이전트에 준 피드백`, `반례·철회`, `최근 변화`.
+
+- A new ledger row takes the id from `selected.ledgers[].next_id`. Ids only grow and are never reused.
+- `DECISIONS.md` has 7 columns: id, 날짜, 유형, 상태, 내용, 이유·근거, 후속. 유형: `결정`, `미룸`, `대체`, `목표변경`, `질문`. 상태: `유효`, `대체됨`, `보류`, `종결`.
+  후속 is `-` or the id of the row that replaced this one, and is required when 상태 is `대체됨`.
+- `OBSERVATIONS.md` has 7 columns: id, 날짜, 유형, 상태, 내용, 근거, 독립 세션. The last cell is written by the tool.
+- 날짜 is `YYYY-MM-DD`, or `-` when unknown.
+- `유효한 결정` lists only rows whose 상태 is `유효`, and `확인된 선호` only rows whose 상태 is `확인`. Start each such row or bullet with its ledger id.
 
 ### Writing style
 
@@ -194,10 +233,16 @@ profile every time or require a change. If there is no new meaning, leave only `
 
 - Look not only at complaints but also at the alternative chosen, explicit satisfaction, and approval. Do not infer emotion or personality from strong language; look for conditions that prevent recurrence.
 - Distinguish direct statements, conditional observations, and inferred hypotheses. Silence, "go ahead", and an agent's declaration of success are not approval of a lasting preference.
-- An explicit lasting preference can be reviewed from a single piece of evidence. An inferred global preference needs a pattern across three or more independent sessions. Resending, quotation, or agent repetition is not independent evidence, and this threshold does not mean confirmation or approval either.
-- Narrow, correct, or retract the existing understanding based on new evidence or counterexamples. Briefly record the current description, the conditions, the gist of representative evidence and counterexamples, and the time of review.
-- Update the relevant existing documents, and start with `10_User/PROFILE.md` only when needed. The profile is a description to be searched, not an instruction for behavior.
-- Put only explicitly approved global rules in `10_User/WORKING_AGREEMENT.md`, at 8,000 characters or fewer. Project rules go in the relevant project.
+- Evidence goes to `OBSERVATIONS.md` as rows `U-###`. 유형: `선호(명시)`, `선호(추론)`, `제약`, `피드백`, `맥락`, `철회`. 상태: `확인`, `가설`, `철회됨`.
+  Narrow, correct, or retract by adding a row and changing the earlier row's 상태. Briefly record the conditions and the gist of representative evidence and counterexamples.
+- The three-session threshold is computed. The tool writes 독립 세션: the number of distinct session ids behind the row. The count accumulates across curations through the `sess:` tokens of the marker, and different agents in one session count once. An agent memo (`pvg_memo`) names no session, because its stored session id is a fresh note id; it adds none.
+  A `선호(추론)` row may be `확인` only with at least 3 independent sessions. Every other 유형 may be `확인` with one source. Otherwise write `가설`; the tool blocks an unsupported `확인` and never rewrites 상태 for you.
+  Resending, quotation, or agent repetition is not independent evidence, and `확인` is not approval of a global rule.
+- Content the user directed an agent to write about themselves is explicit, human_asserted material: 유형 `맥락`, never `가설`. A document or quotation the user pasted or supplied is not the user's claim; that judgment stays with the semantic review.
+- An item from a subagent event can never support a user row.
+- `PROFILE.md` is a description to be searched, not an instruction for behavior. Rewrite it from the ledger each curation: `확인된 선호` lists the `확인` rows, `가설` the hypotheses, `반례·철회` the counterexamples and retractions.
+  In `역할·맥락`, link detailed existing `10_User/` documents by relative path. Those documents are not converted and are not targets.
+- Put only explicitly approved global rules in `10_User/WORKING_AGREEMENT.md`, at 8,000 characters or fewer. It keeps its separate explicit approval. Project rules go in the relevant project.
 - Keep profile edits and agreement changes distinct even within the same plan. Approval of a profile does not turn a hypothesis into fact or approve a global instruction.
 - Apply the same retirement gate to user knowledge after meaning is preserved. Do not accumulate repeated raw text or live references to deleted sources.
 
@@ -242,11 +287,30 @@ Write probes to fit the actual source and questions. `expect_paths` are paths th
 `forbid_paths` are paths that must not be returned. State the `bundle` and the expected `answer_state` explicitly (at most 20).
 
 ```bash
+# Write pvg-src markers for the anchored lines into the drafts only; re-run after any draft or anchor edit
+uv run pvg-wiki --vault . compact-annotate .tmp/curating/plan.json
 # Before approval: leave tracked files untouched and check only the mechanical checks of the drafts and the IDs to re-review
+# (this and compact-check/compact-finish also take --brief-cap N, default 8000)
 uv run pvg-wiki --vault . compact-review .tmp/curating/plan.json
 # Record only after the independent semantic review has actually finished
 uv run pvg-wiki --vault . compact-review .tmp/curating/plan.json --record
 ```
+
+`compact-annotate` edits only the drafts in `review.drafts`, never their frontmatter, and running it again leaves the bytes unchanged.
+It puts each marker inside the last cell of a table row. For `OBSERVATIONS.md` it also adds one `sess:` token per item (a hash of the session id of the item's source; a source without a session id, or an agent memo, adds none) and rewrites the 독립 세션 cell to the number of `sess:` tokens in the marker.
+It blocks without changing any draft if a quote matches no line or several lines, matches a heading, names an ID that is not in the plan, or belongs to an item without a marked disposition (a typed one, `merge` or `replace`).
+
+`compact-review`, `compact-check` and `compact-finish` run these mechanical checks. Each failure is an error unless marked as a warning.
+
+- `quote` is a span of its raw item, and a subagent item has only `knowledge`, `already-covered`, `discard` or `hold`.
+- Claim coverage: the item's ID is in a marker of each of its targets. A missing marker is an error for `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` and `OBSERVATIONS.md`. For other targets it counts in `provenance.unmarked_items` (not an error yet); it will become an error after `compact-annotate` has been used on one real batch.
+- A new marker that no review of that target backs is an error.
+- Ledgers: unique ids; 유형 and 상태 from the vocabularies; `대체됨` has an existing 후속; no row deleted; the frozen columns of an existing row unchanged; marker tokens only grow; new ids above the base maximum; every new row has an `item:` or `doc:` marker; a user row's 독립 세션 equals its `sess:` count; a `선호(추론)` row that is new as `확인` or changes to `확인` needs 3 sessions.
+- `BRIEF.md` and `PROFILE.md`: the fixed headings once each and in order; the body within the cap, markers not counted; every id under `유효한 결정` or `확인된 선호` is a row of the sibling ledger (`DECISIONS.md` in the same folder, `OBSERVATIONS.md` in `10_User/`) with the matching 상태, also when only the ledger changed. Warning: an id under `현재 목표` or `열린 질문` that is unknown or not `유효`.
+
+The summary reports `curation.brief_chars`, `curation.ledger_rows` and `curation.superseded_rows` per path and lists the `warnings`.
+A marker shows only that the reviewed plan says the item landed on that line, so it does not replace the semantic review.
+Markers are Markdown body text. They count toward the active characters and are indexed, so keep a marker with its claim when you rewrite the line. Only the `BRIEF.md` and `PROFILE.md` cap excludes them.
 
 Only `--record` updates the `review_checkpoint` of the local plan. It is not a command that performs an LLM review or generates approval.
 The CLI compares the source/target before/after hashes, judgments, and probes, and reuses items that have not changed.
@@ -302,6 +366,9 @@ Source/target paths and SHA-256: <plan JSON>
 Plan scope SHA-256 / target diff binding: <scope_sha256> / <patch_sha256>
 Delete exactly: <paths and SHA-256>
 Active Markdown characters: <before> -> <after> (<delta>, <ratio>)
+Unmarked claim items: <provenance.unmarked_items>
+Curator documents: <ledger_rows> rows (<superseded_rows> superseded), brief <brief_chars>/<brief_cap>
+Warnings: <warnings>
 Validation probes: <passed>/<total>
 Requested external actions: <none|commit|push>
 ```
@@ -310,7 +377,7 @@ If the source/target hashes, base, paths, patch, or external actions change, the
 Do not treat "continue" or "clean it up" as new approval for deletion, commit, or push.
 
 Every raw/legacy source to retire must satisfy all of the following.
-- It is committed, the raw is not of the current date, and all whole-file items are judged as merge/replace/already-covered/discard.
+- It is committed, the raw is not of the current date, and every whole-file item has a final disposition other than `hold`.
 - A file with even one hold is kept, and its durable meaning is verified in the approved target together with source support.
 - The active Codex and Claude clients support per-date payload checkpoints, and the transmission of the corresponding fragment succeeded. If this cannot be confirmed, keep the file because of the risk of retransmission.
 - The exact deletion path and hash match, there is no live inbound reference, and the active Markdown character count decreases.
@@ -346,3 +413,13 @@ Stop applying if there is dirty tracked Markdown, base/upstream drift, an approv
 or an out-of-scope change is needed. Before approval, do not modify tracked files;
 if a failure occurs after applying, do not commit or push, and do recovery only within the approved scope.
 An individual uninterpretable source can be deferred, but removing it from an already approved patch or moving it to another batch requires new approval.
+
+## 8. Migration from topic documents
+
+This is a one-time pass for a project that already has topic documents.
+
+1. Read the existing `20_Projects/<Project>/*.md`. Extract the decisions, deferrals, supersessions, goal changes and open questions into `DECISIONS.md` rows, with the best known date or `-`. Write `BRIEF.md` from them.
+2. Type the source by hand at the end of each row, inside the last cell: `<!-- pvg-src: doc:20_Projects/Project/topic.md#Heading%20Text -->`. Percent-encode spaces. The path must be a topic or user document at the Git base (not a brief or a ledger), and the heading must exist in that file; the tool checks both. This is the only marker you type; `item:` markers are still never typed.
+3. Later curations may shrink the topic documents.
+
+Existing `10_User/` documents are not migrated. Link them from `PROFILE.md`.

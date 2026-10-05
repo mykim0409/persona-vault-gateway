@@ -86,12 +86,18 @@ async function workingAgreementIntegrationTest() {
     assert(context.includes('Keep PersonaVault context main-agent owned'));
     assert(context.includes('only when the user explicitly asks'));
     assert(context.includes('pvg-rag-search --view current'));
+    assert(context.includes('pvg_search` and `pvg_memo` MCP tools are listed, use them; otherwise use the helper commands below'));
     assert(!context.includes('--bundle'));
     assert(!/\b(?:episode|candidate)\b/.test(context));
     assert(!context.includes('PERSONAVAULT SETUP NEEDED'));
     for (const platform of ['win32', 'darwin', 'linux']) {
       const ready = sessionStart.buildContext(true, agreement, platform);
       const missing = sessionStart.buildContext(false, null, platform);
+      const hinted = sessionStart.buildContext(true, null, platform, '', ['pvg-agent-memo']);
+      assert(ready.split('\n')[1].includes('MCP tools are listed, use them'), 'MCP guidance comes first');
+      assert(!ready.includes('Helper commands not found') && !ready.includes('SETUP NEEDED'));
+      assert(hinted.includes('Helper commands not found: pvg-agent-memo') && !hinted.includes('PERSONAVAULT SETUP NEEDED'));
+      assert(sessionStart.buildContext(false, null, platform, '', []).includes('PERSONAVAULT SETUP NEEDED'));
       if (platform === 'win32') {
         assert(ready.includes('& "$HOME\\.local\\bin\\pvg-rag-search.ps1" --view current'));
         assert(ready.includes('pvg-agent-memo.ps1" --help'));
@@ -1619,6 +1625,55 @@ function captureNoticeTest() {
   }
 }
 
+// Readiness gates on the Gateway config only; missing helpers are a hint because the MCP tools need none.
+function sessionStartReadinessTest() {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pvg-ready-'));
+  try {
+    const root = path.join(temp, 'config');
+    const configFile = path.join(root, 'persona-vault-gateway', 'env.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    // A refused port: the working-agreement fetch fails fast and the hook still answers.
+    fs.writeFileSync(configFile, JSON.stringify({ PERSONA_VAULT_GATEWAY_URL: 'http://127.0.0.1:9', PERSONA_VAULT_TOKEN: 'pvg_test_token' }));
+    const run = (extra = {}) => {
+      const env = { ...process.env, APPDATA: root, XDG_CONFIG_HOME: root, HOME: temp, USERPROFILE: temp, PATH: '', ...extra };
+      if (!extra.PLUGIN_DATA) delete env.PLUGIN_DATA;
+      delete env.CLAUDE_PLUGIN_DATA;
+      return childProcess.spawnSync(
+        process.execPath,
+        [path.join(__dirname, '../plugins/persona-vault/hooks/persona-vault-session-start.js')],
+        { encoding: 'utf8', env, input: '{}' },
+      ).stdout;
+    };
+    const hint = 'Helper commands not found: pvg-agent-memo, pvg-rag-search';
+
+    const claude = run();
+    assert(claude.startsWith('PERSONAVAULT:') && claude.includes('MCP tools are listed, use them'));
+    assert(claude.includes(hint) && !claude.includes('SETUP NEEDED'));
+
+    const codex = JSON.parse(run({ PLUGIN_DATA: path.join(temp, 'plugin-data') }));
+    assert.strictEqual(codex.systemMessage, 'PERSONAVAULT');
+    assert.strictEqual(codex.hookSpecificOutput.hookEventName, 'SessionStart');
+    const { additionalContext } = codex.hookSpecificOutput;
+    assert(additionalContext.includes('MCP tools are listed, use them') && additionalContext.includes(hint));
+    assert(!additionalContext.includes('SETUP NEEDED'));
+
+    const bin = path.join(temp, '.local', 'bin');
+    const extension = process.platform === 'win32' ? '.ps1' : '';
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, `pvg-agent-memo${extension}`), '');
+    const partial = run();
+    assert(partial.includes('Helper commands not found: pvg-rag-search') && !partial.includes('not found: pvg-agent-memo'));
+    fs.writeFileSync(path.join(bin, `pvg-rag-search${extension}`), '');
+    const installed = run();
+    assert(!installed.includes('Helper commands not found') && !installed.includes('SETUP NEEDED'));
+
+    fs.unlinkSync(configFile);
+    assert(run().includes('PERSONAVAULT SETUP NEEDED'));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   assert.match(capture.localTimestamp(), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
 
@@ -1728,6 +1783,7 @@ async function main() {
   configBomTest();
   await gatewayDiagnosticsTest();
   captureNoticeTest();
+  sessionStartReadinessTest();
   await workingAgreementIntegrationTest();
   await captureIntegrationTest();
   await concurrentCaptureIntegrationTest();

@@ -4,6 +4,7 @@ Use PowerShell. From a cmd.exe-only tool, invoke PowerShell explicitly for these
 do not install or probe Bash/WSL just to run the plugin. The `.ps1` launchers are thin wrappers that run
 the same shared Node helper as the POSIX launchers, with the same `--long-flags`; old PowerShell spellings
 such as `-View` and `-SessionId` are still accepted as aliases.
+The launchers are the fallback when the `pvg_search` and `pvg_memo` MCP tools are not listed; the installer is still how the token config is created.
 
 ## Locate Once, Then Invoke
 

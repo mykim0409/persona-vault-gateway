@@ -250,6 +250,8 @@ def run_semantic_disabled_checks() -> None:
         note("50_Knowledge/old.md", "ZETA4471 old rule.", id="kn_old", subject_id="rule", temporal_state="superseded",
              retrieval_tier="history", effective_from="2025-01-01", **canonical)
         note("90_Private/hidden.md", "ZETA4471 never indexed.", id="hidden", rag_index=False)
+        marker = "<!-- pvg-src: item:0123456789abcdef sess:01234567 doc:20_Projects/Demo/a.md#Heading -->"
+        note("50_Knowledge/marked.md", f"MARKTOK9021 claim line {marker}", id="kn_marked", subject_id="marked", **canonical)
 
         # State left behind by a previous cloudflare/hash install must survive every disabled-mode operation.
         legacy = {
@@ -307,6 +309,14 @@ def run_semantic_disabled_checks() -> None:
                     "files": 0, "chunks": 0, "updated": 0, "provider": "none", "model": "none", "dimension": 0,
                     "store": "none", "stale": False, "search_mode": "keyword", "fallback_reason": "semantic_disabled",
                 }, result["index"]
+        # pvg-src provenance markers stay in the file but never reach chunks, scoring, snippets or search results.
+        assert marker in (vault / "50_Knowledge/marked.md").read_text(encoding="utf-8")
+        marked_hit = search_vault(settings, reader, "MARKTOK9021", 10, False, "current")
+        assert [item["document_id"] for item in marked_hit["results"]] == ["kn_marked"], marked_hit
+        assert "claim line" in marked_hit["results"][0]["snippet"] and "pvg-src" not in json.dumps(marked_hit)
+        assert search_vault(settings, reader, "0123456789abcdef", 10, False, "current")["results"] == []
+        assert core.chunk_text(f"A {marker} B\n\n{marker}") == ["A  B"] and core.chunk_text(marker) == []
+        assert "pvg-src" not in core.searchable_text({"subject_id": "s"}, core.chunk_text(f"x {marker}")[0])
         public = app_module.search_response(current, "current")
         assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results"}
         assert search_vault(settings, reader, "no-such-token-anywhere", 5, True)["answer_state"]["state"] == "abstain"

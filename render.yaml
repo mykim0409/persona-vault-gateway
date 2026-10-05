@@ -32,5 +32,7 @@ services:
         value: none
       - key: PVG_SECURE_COOKIES
         value: "true"
+      - key: PVG_TRUSTED_PROXY_HOPS
+        value: "1"
       - key: PVG_SETUP_TOKEN
         generateValue: true

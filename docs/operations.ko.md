@@ -16,13 +16,13 @@
 ## Vault 구조
 
 Vault는 Markdown 파일의 Git 저장소입니다. 형식은 [metadata.ko.md](metadata.ko.md), 정리 절차는
-[CURATOR.ko.md](CURATOR.ko.md)를 따릅니다.
+[CURATOR.md](CURATOR.md)(영문)를 따릅니다.
 
 | 디렉토리 | 용도 | 수정 주체 |
 | --- | --- | --- |
 | `00_Inbox/` | 미분류 메모 | 사람 |
-| `10_User/` | 협업 규칙(`WORKING_AGREEMENT.md`), 사용자 기록 | 사람, 승인된 Curator |
-| `20_Projects/` | 프로젝트 목표·결정 | 사람, 승인된 Curator |
+| `10_User/` | 협업 규칙(`WORKING_AGREEMENT.md`), 사용자 브리프와 장부(`PROFILE.md`, `OBSERVATIONS.md`), 사용자 기록 | 사람, 승인된 Curator |
+| `20_Projects/` | 프로젝트 현황(`BRIEF.md`), 결정 장부(`DECISIONS.md`), 주제 문서 | 사람, 승인된 Curator |
 | `30_Conversations/raw/` | agent 원본 대화(날짜별) | agent (Gateway가 쓰는 유일한 경로) |
 | `30_Conversations/summaries/` | 대화 요약 | 사람, Curator |
 | `50_Knowledge/` | 검증된 재사용 지식 | 사람, Curator |
@@ -88,8 +88,13 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
   `*`는 쓰지 않습니다. 신뢰 목록에 없는 주소의 `X-Forwarded-*`는 무시되며, 이때 Secure cookie 판단과
   login 제한은 연결 주소 기준입니다. 앞단을 거치는 모든 사용자는 앞단 주소 하나로 집계됩니다.
 - 앞단 주소를 신뢰할 수 없거나 모르는 플랫폼(Railway, Render 등)에서 HTTPS로만 접속한다면 `PVG_SECURE_COOKIES=true`로 admin
-  cookie에 Secure를 강제합니다. forwarded 헤더를 신뢰하지 않으므로 login 제한은 연결 주소 기준입니다. 평문 HTTP로 접속하면
+  cookie에 Secure를 강제합니다. forwarded 헤더는 신뢰하지 않습니다. 평문 HTTP로 접속하면
   Secure cookie는 전송되지 않아 로그인할 수 없으니 HTTPS 전용일 때만 쓰세요.
+- `PVG_TRUSTED_PROXY_HOPS`(기본 `0`)는 Gateway 앞에서 `X-Forwarded-For`에 client 주소를 덧붙이는 proxy의 개수입니다. `0`이면 login 제한이 연결 주소 기준이라
+  한 proxy 뒤의 모든 사용자가 한 bucket을 공유하고, 그러면 운영자가 잠길 수 있습니다. `1`(Render·Railway 설정이 지정)이면 오른쪽에서 한 칸째 항목, 즉 플랫폼
+  proxy가 본 주소 기준으로 집계되어 client가 앞에 덧붙인 값으로는 bucket을 고를 수 없습니다. 항목이 없거나 부족하거나 IP가 아니면 연결 주소로 되돌아갑니다.
+  Render와 Railway는 `1`, Compose와 loopback은 `0`을 쓰고, 실제 proxy 개수보다 크게 두지 마세요(앞에 CDN이 있으면 하나 더합니다). 이 값은 admin login과 setup
+  제한의 집계 기준에만 영향을 주며 Secure cookie 판단이나 `FORWARDED_ALLOW_IPS`에는 영향이 없습니다.
 - Admin login은 client 주소당 5분에 5회까지입니다. 초과하면 `429`와 `Retry-After`를 반환합니다.
   프로세스 메모리에서만 동작하며 재시작하면 초기화되고 공유되지 않으므로 네트워크 접근 제어를 대체하지
   못합니다. CSRF token과 same-origin 확인은 유지됩니다.
@@ -111,7 +116,7 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
   [Windows 안내](https://github.com/mykim0409/persona-vault-gateway/blob/main/plugins/persona-vault/skills/persona-vault/references/windows.md)입니다.
 
 Curator(`pvg-wiki`)는 계획을 제안만 하며 승인·apply·commit·push는 사람이 합니다. 절차 전체는
-[CURATOR.ko.md](CURATOR.ko.md)를 따르세요. CLI는 소스 checkout에서 `uv sync --frozen` 후 `uv run pvg-wiki ...`로
+[CURATOR.md](CURATOR.md)(영문)를 따르세요. CLI는 소스 checkout에서 `uv sync --frozen` 후 `uv run pvg-wiki ...`로
 실행합니다.
 
 CLI와 직접 실행하는 Python은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본입니다(Gateway 서비스 기본은 `none`).

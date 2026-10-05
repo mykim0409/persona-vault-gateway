@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pvg": {
+      "command": "node",
+      "args": ["./scripts/pvg-mcp.js"],
+      "cwd": ".",
+      "env_vars": ["HOME", "USERPROFILE", "APPDATA", "XDG_CONFIG_HOME"],
+      "tool_timeout_sec": 90
+    }
+  }
+}

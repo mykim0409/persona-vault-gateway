@@ -31,7 +31,8 @@ COMPOSE_IMAGE_COUNTS = {STANDALONE_COMPOSE: 1}
 PROVIDER_IMAGE_FILES = ("render.yaml", ".railway/railway.ts")
 
 # Everything that ships, relative to the repo root. docs/setup.md links the other docs. Every shipped Markdown doc ships
-# with its .ko.md reader translation; docs/WORKING_AGREEMENT.md is deliberately not shipped (and neither is its translation).
+# with its .ko.md reader translation, except docs/CURATOR.md (English only); docs/WORKING_AGREEMENT.md is deliberately not
+# shipped (and neither is its translation).
 ALLOWLIST = (
     "compose.yml",
     "LICENSE",
@@ -44,7 +45,6 @@ ALLOWLIST = (
     "docs/operations.md",
     "docs/operations.ko.md",
     "docs/CURATOR.md",
-    "docs/CURATOR.ko.md",
     "docs/metadata.md",
     "docs/metadata.ko.md",
     # Provider recipes with the image pinned to the release digest. Railway needs its whole (optional) tooling folder

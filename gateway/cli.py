@@ -13,9 +13,20 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from .compaction import concurrent_raw_captures, finish_search, projected_documents, review_binding, staging_path
+from .compaction import annotate_drafts, concurrent_raw_captures, finish_search, projected_documents, review_binding, staging_path
 from .core import RAG_EXCLUDED_DIRS, Settings, document_metadata, markdown_body, qdrant_compaction_neighbors, vault_documents
-from .wiki import analyze_documents, build_compaction_plan, check_compaction, health_report
+from .wiki import BRIEF_CAP, analyze_documents, build_compaction_plan, check_compaction, health_report
+
+
+def plan_brief_cap(plan: dict, args) -> int:
+    # The flag wins; otherwise reuse the cap compact-plan recorded, so later commands need not repeat it.
+    flag = getattr(args, "brief_cap", None)
+    if flag is not None:
+        return flag
+    for ledger in (plan.get("selected") or {}).get("ledgers") or []:
+        if "cap" in ledger:
+            return int(ledger["cap"])
+    return BRIEF_CAP
 
 
 def settings_for(vault: str | None) -> Settings:
@@ -96,11 +107,16 @@ def parser() -> argparse.ArgumentParser:
     compact.add_argument("--full", action="store_true", help="Print the full plan instead of the compact preview.")
     check = commands.add_parser("compact-check", help="Check applied Markdown against an annotated plan; does not authorize changes.")
     check.add_argument("plan", help="Saved compact-plan JSON with its review section completed.")
+    annotate = commands.add_parser("compact-annotate", help="Write pvg-src provenance markers from review anchors into staged drafts only.")
+    annotate.add_argument("plan")
     review = commands.add_parser("compact-review", help="Check staged targets and report reusable semantic-review bindings.")
     review.add_argument("plan")
     review.add_argument("--record", action="store_true", help="Record bindings AFTER independent review; not user approval.")
     finish = commands.add_parser("compact-finish", help="Check applied changes, index once and run final search probes; never apply/commit.")
     finish.add_argument("plan")
+    compact.add_argument("--brief-cap", type=int, default=BRIEF_CAP, help="Maximum BRIEF.md/PROFILE.md body characters, pvg-src markers excluded.")
+    for command in (check, review, finish):
+        command.add_argument("--brief-cap", type=int, default=None, help="Override the cap recorded in the plan (default: the plan's cap).")
 
     conflicts = commands.add_parser("conflicts", help="List explicit conflicts.")
     conflict_commands = conflicts.add_subparsers(dest="conflict_command", required=True)
@@ -175,11 +191,12 @@ def plan_output(plan: dict[str, Any], args: argparse.Namespace, vault: Path) -> 
         "selected": {
             **{key: selected[key] for key in (
                 "component_id", "routing", "source_paths", "source_items", "source_characters",
-                "character_budget", "oversized_source", "remaining_source_files", "semantic",
+                "character_budget", "oversized_source", "remaining_source_files", "semantic", "ledgers", "subagent_items",
             )},
             "target_candidates": [
                 node["path"] for node in selected["graph"]["nodes"] if node["type"] == "canonical_candidate"
             ],
+            "create_targets": [node["path"] for node in selected["graph"]["nodes"] if node.get("create")],
         } if selected else None,
     }
 
@@ -233,7 +250,9 @@ def run_compaction(args: argparse.Namespace, settings: Settings, documents: list
             after = projected_documents(settings.vault_dir, plan, before)
         integrity_after = {doc["path"]: doc for doc in after}
         integrity_after.update((doc["path"], doc) for doc in documents if doc["path"] in concurrent_raw)
-        result = check_compaction(plan, before, after, integrity_after=list(integrity_after.values()))
+        result = check_compaction(
+            plan, before, after, integrity_after=list(integrity_after.values()), brief_cap=plan_brief_cap(plan, args),
+        )
         result["concurrent_raw_captures"] = concurrent_raw
         timings["mechanical_seconds"] = round(perf_counter() - started, 4)
         if result["status"] != "ok":
@@ -293,6 +312,12 @@ def run_compaction(args: argparse.Namespace, settings: Settings, documents: list
 def run(argv: list[str] | None = None) -> dict[str, Any]:
     args = parser().parse_args(argv)
     settings = settings_for(args.vault)
+    if args.command == "compact-annotate":
+        try:
+            plan = json.loads(staging_path(settings.vault_dir, Path(args.plan)).read_text(encoding="utf-8"))
+            return {"status": "ok", "annotated": annotate_drafts(settings.vault_dir, plan)}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            return {"status": "blocked", "reason": f"invalid_annotation: {exc}"}
     read_started = perf_counter()
     documents = vault_documents(settings)
     read_seconds = round(perf_counter() - read_started, 4)
@@ -323,6 +348,7 @@ def run(argv: list[str] | None = None) -> dict[str, Any]:
                 max_sources=args.max_sources,
                 max_characters=args.max_characters,
                 deferrals=deferrals,
+                brief_cap=args.brief_cap,
             )
         except (TypeError, ValueError) as exc:
             return {"status": "blocked", "reason": f"invalid_compaction_plan: {exc}"}
@@ -346,6 +372,7 @@ def run(argv: list[str] | None = None) -> dict[str, Any]:
                 max_sources=args.max_sources,
                 max_characters=args.max_characters,
                 deferrals=deferrals,
+                brief_cap=args.brief_cap,
             )
         else:
             plan["selected"]["semantic"] = {key: value for key, value in semantic.items() if key != "edges"}

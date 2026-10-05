@@ -115,6 +115,8 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 raw note(승인된 지식 아님)를 저장하고 다시 찾습니다. 새 Vault에서는 `--view current`가 비어 있을 수 있습니다.
 Windows PowerShell 버전: [docs/setup.ko.md](docs/setup.ko.md).
 
+plugin에는 `pvg_search`, `pvg_memo` 두 도구를 가진 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.
+
 ## 동작 방식
 
 1. **기록.** hook이 세션을 Gateway로 보내고, Gateway는 `30_Conversations/raw/` 아래에만 씁니다.
@@ -171,7 +173,7 @@ embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.
   프로세스 간에 공유되지 않습니다. forwarded 헤더는 정확히 신뢰하도록 설정한 proxy에서만 반영되고(wildcard
   금지) CSRF 보호는 그대로입니다. 암호화된 경로나 TLS와 접근 제어 뒤에서 비공개로 운영하세요.
 - **정리에는 사람이 필요합니다.** 모든 plan은 사람이 승인하며 raw 삭제의 원자성은 보장되지
-  않습니다. [Curator protocol](docs/CURATOR.ko.md)을 보세요.
+  않습니다. [Curator protocol (영문)](docs/CURATOR.md)을 보세요.
 
 이 베타는 보안 점검을 마치지 않았습니다. [SECURITY.ko.md](SECURITY.ko.md)를 보세요.
 
@@ -185,7 +187,7 @@ embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
 | [docs/gpt-actions.ko.md](docs/gpt-actions.ko.md) | plugin 대신 쓰는 Custom GPT Actions |
 | [docs/metadata.ko.md](docs/metadata.ko.md) | Markdown metadata 계약 |
-| [docs/CURATOR.ko.md](docs/CURATOR.ko.md) | Curator protocol |
+| [docs/CURATOR.md](docs/CURATOR.md) | Curator protocol (영문) |
 | [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md), [SECURITY.ko.md](SECURITY.ko.md) | 개발과 보안 정책 |
 
 [MIT License](LICENSE)로 배포됩니다.

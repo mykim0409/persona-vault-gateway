@@ -1,6 +1,6 @@
 {
   "name": "persona-vault",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Load approved user rules, capture raw evidence, search PersonaVault, and submit requested notes.",
   "author": {
     "name": "mykim0409"

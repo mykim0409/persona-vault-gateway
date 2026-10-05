@@ -21,8 +21,8 @@ The Vault is a Git repository of Markdown files. Follow [metadata.md](metadata.m
 | Directory | Purpose | Edited by |
 | --- | --- | --- |
 | `00_Inbox/` | Unsorted notes | Person |
-| `10_User/` | Collaboration rules (`WORKING_AGREEMENT.md`), user records | Person, approved Curator |
-| `20_Projects/` | Project goals and decisions | Person, approved Curator |
+| `10_User/` | Collaboration rules (`WORKING_AGREEMENT.md`), user brief and ledger (`PROFILE.md`, `OBSERVATIONS.md`), user records | Person, approved Curator |
+| `20_Projects/` | Project status (`BRIEF.md`), decision ledger (`DECISIONS.md`), topic documents | Person, approved Curator |
 | `30_Conversations/raw/` | Raw agent conversations (by date) | Agent (the only path the Gateway writes) |
 | `30_Conversations/summaries/` | Conversation summaries | Person, Curator |
 | `50_Knowledge/` | Verified, reusable knowledge | Person, Curator |
@@ -88,8 +88,14 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
   Do not use `*`. `X-Forwarded-*` from addresses not on the trusted list is ignored, and in that case the Secure cookie decision and the
   login limit are based on the connection address. All users behind the front end are counted as the one front-end address.
 - On a platform (Railway, Render, and so on) where the front-end address cannot be trusted or is unknown and you connect only over HTTPS, `PVG_SECURE_COOKIES=true` forces Secure on the admin
-  cookie. It does not trust forwarded headers, so the login limit is based on the connection address. Over plain HTTP the
-  Secure cookie is not sent and you cannot log in, so use it only when access is HTTPS-only.
+  cookie. It does not trust forwarded headers. Over plain HTTP the Secure cookie is not sent and you cannot log in, so use it only when access is
+  HTTPS-only.
+- `PVG_TRUSTED_PROXY_HOPS` (default `0`) is the number of proxies in front of the Gateway that append the client address to `X-Forwarded-For`. At `0` the
+  login limit is keyed on the connection address, so everyone behind one proxy shares one bucket and can lock the operator out. At `1` (the Render and
+  Railway configs set it) the limit is keyed on the entry one position from the right, the address the platform proxy saw, so a prefix a client sends
+  cannot choose its bucket. A missing, too short, or non-IP entry falls back to the connection address. Use `1` for Render and Railway, `0` for Compose and
+  loopback, and never more than the real number of proxies (add one for a CDN in front). It affects only how the admin login and setup limiter is keyed,
+  not the Secure cookie decision or `FORWARDED_ALLOW_IPS`.
 - Admin login allows 5 attempts per 5 minutes per client address. Beyond that it returns `429` with `Retry-After`.
   It lives only in process memory, resets on restart, and is not shared, so it does not replace network
   access control. The CSRF token and same-origin check remain in place.

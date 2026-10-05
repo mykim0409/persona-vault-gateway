@@ -19,6 +19,8 @@ from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any
 
+from .wiki import _SRC_RE
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -700,6 +702,7 @@ def document_metadata(rel_path: str, text: str) -> dict[str, Any]:
         "retrieval_tier": retrieval_tier,
         "agent_id": parts[1] if agent_root and len(parts) > 1 else str(frontmatter.get("agent_id") or ""),
         "session_id": str(frontmatter.get("session_id") or ""),
+        "capture_kind": str(frontmatter.get("capture_kind") or ""),
         "created_at": str(frontmatter.get("created_at") or ""),
         "observed_at": str(observed_at),
         "effective_from": str(frontmatter.get("effective_from") or temporal.get("effective_from") or ""),
@@ -2246,7 +2249,8 @@ def int_meta(value: str | None, default: int = 0) -> int:
 
 
 def chunk_text(text: str) -> list[str]:
-    text = text.strip()
+    # pvg-src provenance markers stay in the file but never reach the index, scoring, snippets or search results.
+    text = _SRC_RE.sub("", text).strip()
     if not text:
         return []
     chunks: list[str] = []

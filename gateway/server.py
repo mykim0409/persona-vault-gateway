@@ -3,6 +3,7 @@
 One uvicorn worker (setup state, rate limits and the Git sync thread are process-local), listening on PORT
 (default 8000). Persistent data lives under PVG_DATA_DIR (default /data). Set PVG_SECURE_COOKIES=true when the
 public URL is HTTPS but the proxy is not trusted for forwarded headers (never widen FORWARDED_ALLOW_IPS for this).
+Set PVG_TRUSTED_PROXY_HOPS=1 behind one such proxy (Render, Railway) so the login limiter keys on the real client.
 """
 import os
 import sys

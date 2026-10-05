@@ -9,9 +9,13 @@ from collections import defaultdict
 from datetime import date
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote
 
 
-__all__ = ["analyze_documents", "build_compaction_plan", "check_compaction", "bundle_groups", "health_report"]
+__all__ = [
+    "analyze_documents", "build_compaction_plan", "check_compaction", "bundle_groups", "health_report",
+    "ledger_entries", "brief_sections", "BRIEF_CAP",
+]
 
 _BUNDLES = {"auto", "current", "evidence", "experiences", "history", "conflicts"}
 _CORROBORATABLE_KINDS = {"debugging", "procedure"}
@@ -31,10 +35,75 @@ _COMMIT_RE = re.compile(r"[0-9a-fA-F]{7,64}")
 _RAW_PATH_RE = re.compile(r"^30_Conversations/raw/(\d{4})/(\d{2})/(\d{2})/")
 _DATED_PATH_RE = re.compile(r"(?:^|/)(\d{4})/(\d{2})/(\d{2})(?:/|$)")
 _RAW_ITEM_RE = re.compile(r"(?m)^### ([^\n]+)\n\n<!-- pvg-event (\{[^\n]*\}) -->\n?")
+# Claim provenance. item: (raw item id) and sess: (hash of a session id) are written by compact-annotate only and
+# are one-way hashes: no path, locator or quote leaks. doc:<path>[#<heading>] is typed by hand for migration.
+_SRC_RE = re.compile(r"<!-- pvg-src:((?: (?:item:[0-9a-f]{16}|sess:[0-9a-f]{8}|doc:[^\s>]+))+) -->")
+BRIEF_CAP = 8000
+PROJECT_DISPOSITIONS = {"decision", "deferral", "supersession", "goal_change", "question"}
+USER_DISPOSITIONS = {"user_preference", "user_constraint", "user_feedback", "user_context", "user_retraction"}
+CLAIM_DISPOSITIONS = PROJECT_DISPOSITIONS | USER_DISPOSITIONS | {"knowledge"}
+LEGACY_DISPOSITIONS = {"merge", "replace"}  # deprecated in protocol 23, removed in 24
+MARKED_DISPOSITIONS = CLAIM_DISPOSITIONS | LEGACY_DISPOSITIONS  # these owe a pvg-src marker in each target
+SUBAGENT_DISPOSITIONS = {"knowledge", "already-covered", "discard", "hold"}
+DISPOSITIONS = MARKED_DISPOSITIONS | {"already-covered", "discard", "hold"}
+# Curator documents are detected by frontmatter kind, never by file name. Ledger kinds list their table header and
+# vocabularies; brief kinds list their fixed headings and the section that may only cite ledger rows of one status.
+CURATOR_KINDS: dict[str, dict[str, Any]] = {
+    "decision_ledger": {
+        "dir": "20_Projects/", "file": "DECISIONS.md", "template": "docs/templates/DECISIONS.md", "prefix": "D",
+        "header": ("id", "날짜", "유형", "상태", "내용", "이유·근거", "후속"),
+        "types": {"결정", "미룸", "대체", "목표변경", "질문"}, "statuses": {"유효", "대체됨", "보류", "종결"},
+    },
+    "user_ledger": {
+        "dir": "10_User/", "file": "OBSERVATIONS.md", "template": "docs/templates/OBSERVATIONS.md", "prefix": "U",
+        "header": ("id", "날짜", "유형", "상태", "내용", "근거", "독립 세션"),
+        "types": {"선호(명시)", "선호(추론)", "제약", "피드백", "맥락", "철회"}, "statuses": {"확인", "가설", "철회됨"},
+    },
+    "brief": {
+        "dir": "20_Projects/", "file": "BRIEF.md", "template": "docs/templates/BRIEF.md", "label": "brief",
+        "headings": ("현재 목표", "유효한 결정", "미뤄진 것", "대체된 것", "열린 질문", "최근 변화"),
+        "ledger": "decision_ledger", "section": "유효한 결정", "status": "유효", "soft": ("현재 목표", "열린 질문"),
+    },
+    "user_profile": {
+        "dir": "10_User/", "file": "PROFILE.md", "template": "docs/templates/PROFILE.md", "label": "profile",
+        "headings": ("역할·맥락", "확인된 선호", "가설", "제약", "에이전트에 준 피드백", "반례·철회", "최근 변화"),
+        "ledger": "user_ledger", "section": "확인된 선호", "status": "확인",
+    },
+}
 
 
 def _normal(value: Any) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or "")).casefold()).strip()
+
+
+def _src_tokens(text: str, prefix: str) -> set[str]:
+    return {token for match in _SRC_RE.finditer(text) for token in match.group(1).split() if token.startswith(prefix)}
+
+
+def _src_ids(text: str) -> set[str]:
+    return _src_tokens(text, "item:")
+
+
+def _src_docs(text: str) -> set[str]:
+    return _src_tokens(text, "doc:")
+
+
+def _sess(session_id: Any) -> str:
+    value = str(session_id or "")
+    return "sess:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:8] if value else ""
+
+
+def _doc_sess(document: dict[str, Any]) -> str:
+    """Session hash of a source file. An agent memo's session_id is a fresh note id, so it names no session."""
+    return "" if document.get("capture_kind") == "agent_note" else _sess(document.get("session_id"))
+
+
+def _cells(line: str) -> list[str] | None:
+    """Cells of a Markdown table row with pvg-src markers removed, or None for any other line."""
+    line = _SRC_RE.sub("", line).strip()
+    if not (line.startswith("|") and line.endswith("|")):
+        return None
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", line)[1:-1]]
 
 
 def _values(value: Any) -> list[Any]:
@@ -201,12 +270,17 @@ def _routing_key(document: dict[str, Any]) -> tuple[str, str, str]:
     return project, "document", _document_id(document)
 
 
-def _raw_items(document: dict[str, Any]) -> list[dict[str, Any]]:
+def _raw_items(document: dict[str, Any], *, body: bool = False) -> list[dict[str, Any]]:
+    """Items of one raw file. `body=True` adds each item's own text; only check_compaction uses it, never the plan."""
     text = str(document.get("text") or "")
     path = str(document.get("path") or "")
     matches = list(_RAW_ITEM_RE.finditer(text))
+
+    def item(locator: str, role: str, value: str, **extra: str) -> dict[str, Any]:
+        return {"locator": locator, "role": role, **extra, "characters": len(value), **({"body": value} if body else {})}
+
     if not matches:
-        return [{"locator": f"{path}#document", "role": "document", "characters": len(text.strip())}]
+        return [item(f"{path}#document", "document", text.strip())]
 
     items: list[dict[str, Any]] = []
     for index, match in enumerate(matches):
@@ -219,6 +293,7 @@ def _raw_items(document: dict[str, Any]) -> list[dict[str, Any]]:
             metadata = {}
         event_id = str(metadata.get("event_id") or f"{path}#item-{index + 1}")
         role = match.group(1).strip()
+        event_role = str(metadata.get("role") or role.split(":", 1)[0]).strip()
         delegation_marker = "**Agent delegation (not a user statement)**"
         result_marker = "**Result**"
         if delegation_marker in content and result_marker in content:
@@ -228,22 +303,9 @@ def _raw_items(document: dict[str, Any]) -> list[dict[str, Any]]:
                 ("delegation", "agent_delegation", request),
                 ("result", "agent_result", result.strip()),
             ):
-                items.append(
-                    {
-                        "locator": f"{event_id}#{suffix}",
-                        "role": component_role,
-                        "characters": len(value),
-                    }
-                )
+                items.append(item(f"{event_id}#{suffix}", component_role, value, event_role=event_role))
             continue
-        items.append(
-            {
-                "locator": event_id,
-                "role": role,
-                "agent_type": str(metadata.get("agent_type") or ""),
-                "characters": len(content),
-            }
-        )
+        items.append(item(event_id, role, content, agent_type=str(metadata.get("agent_type") or ""), event_role=event_role))
     return items
 
 
@@ -259,11 +321,12 @@ def build_compaction_plan(
     max_sources: int = 8,
     max_characters: int = 60_000,
     deferrals: list[dict[str, Any]] | None = None,
+    brief_cap: int = BRIEF_CAP,
 ) -> dict[str, Any]:
     """Build a deterministic, read-only graph for the next raw compaction batch."""
     cutoff = date.fromisoformat(before).isoformat()
-    if max_sources < 1 or max_characters < 1:
-        raise ValueError("source and character limits must be positive")
+    if max_sources < 1 or max_characters < 1 or brief_cap < 1:
+        raise ValueError("source, character and brief limits must be positive")
     dirty_paths = dirty_paths or set()
     fallback_dates = fallback_dates or {}
     semantic = semantic or {"status": "not_requested", "edges": []}
@@ -409,12 +472,38 @@ def build_compaction_plan(
         if target:
             target_documents[_document_id(target)] = target
 
+    # Curator documents are offered in every plan: a missing one is a create node, an existing one of another kind is
+    # an adopt candidate. Under 10_User only PROFILE.md and OBSERVATIONS.md are ever added, never other files.
+    curator = [("user_profile", "10_User"), ("user_ledger", "10_User")]
+    if selected_routing[0] != "_unscoped":
+        project_docs = [
+            doc for doc in target_documents.values()
+            if str(doc.get("path") or "").startswith("20_Projects/") and len(PurePosixPath(str(doc["path"])).parts) > 2
+            and _routing_key(doc)[0] == selected_routing[0]
+        ]
+        top = lambda doc: "/".join(PurePosixPath(str(doc["path"])).parts[:2])
+        label = _named_values(_values(selected_sources[0].get("projects")))[0][1].replace("/", "-")
+        holding = sorted({top(doc) for doc in project_docs if doc.get("kind") in {"brief", "decision_ledger"}})
+        project = (holding or sorted({top(doc) for doc in project_docs}) or [f"20_Projects/{label}"])[0]
+        curator = [("brief", project), ("decision_ledger", project), *curator]
+    curator_paths: list[tuple[str, str]] = []
+    for kind, folder in curator:
+        found = sorted(
+            path for path, doc in documents_by_path.items()
+            if doc.get("kind") == kind and doc.get("memory_type") == "canonical" and PurePosixPath(path).parent.as_posix() == folder
+        )
+        path = found[0] if found else f"{folder}/{CURATOR_KINDS[kind]['file']}"
+        curator_paths.append((kind, path))
+        if path in documents_by_path:
+            target_documents[_document_id(documents_by_path[path])] = documents_by_path[path]
+
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     source_node_ids: dict[str, str] = {}
     for source in selected_sources:
         source_node = f"source:{_document_id(source)}"
         source_node_ids[source["path"]] = source_node
+        session = _doc_sess(source)
         nodes.append(
             {
                 "id": source_node,
@@ -424,6 +513,7 @@ def build_compaction_plan(
                 "date": source["source_date"],
                 "date_basis": source["date_basis"],
                 "sha256": source.get("document_hash"),
+                **({"session": session} if session else {}),
             }
         )
         for item in source["items"]:
@@ -470,6 +560,27 @@ def build_compaction_plan(
             }
         )
 
+    ledgers = []
+    for kind, path in curator_paths:
+        spec, document = CURATOR_KINDS[kind], documents_by_path.get(path)
+        create, adopt = document is None, document is not None and document.get("kind") != kind
+        node_id = f"create:{path}" if create else f"document:{_document_id(document)}"
+        if create:
+            nodes.append(
+                {"id": node_id, "type": "canonical_candidate", "path": path, "create": True, "kind": kind, "template": spec["template"]}
+            )
+        edges.append({"source": anchor_node, "target": node_id, "type": "curator_target"})
+        text = str(document.get("text") or "") if document else ""
+        if "header" in spec:
+            rows = ledger_entries(text, kind)[0]
+            size = {"rows": len(rows), "next_id": f"{spec['prefix']}-{max((int(row['id'][2:]) for row in rows), default=0) + 1:03d}"}
+        else:
+            size = {"chars": _brief_chars(text), "cap": brief_cap}
+        ledgers.append({
+            "path": path, "kind": kind, "create": create, "adopt": adopt,
+            **({"template": spec["template"]} if create or adopt else {}), **size,
+        })
+
     nodes = sorted({node["id"]: node for node in nodes}.values(), key=lambda node: node["id"])
     edges = sorted(
         {json.dumps(edge, sort_keys=True): edge for edge in edges}.values(),
@@ -502,6 +613,8 @@ def build_compaction_plan(
             "source_paths": [source["path"] for source in selected_sources],
             "remaining_source_files": max(0, selected_summary["source_files"] - len(selected_sources)),
             "graph": {"nodes": nodes, "edges": edges},
+            "ledgers": ledgers,
+            "subagent_items": sum(node.get("event_role") == "subagent" for node in nodes if node["type"] == "raw_item"),
             "semantic": {key: value for key, value in semantic.items() if key != "edges"},
             "compression_gate": {
                 "source_characters": selected_characters,
@@ -529,12 +642,196 @@ def _review_items(entries: Any) -> list[dict[str, Any]]:
     return expanded
 
 
+def ledger_entries(text: str, kind: str = "decision_ledger", path: str = "") -> tuple[list[dict[str, Any]], list[str]]:
+    """Parse the one ledger table of a curator document into rows plus path-qualified problems."""
+    spec, problems = CURATOR_KINDS[kind], []
+    header, lines = list(spec["header"]), text.split("\n")
+    starts = [index for index, line in enumerate(lines) if _cells(line) == header]
+    if len(starts) != 1:
+        return [], [f"ledger table missing or header differs: {path}"]
+    index = starts[0] + 1
+    separator = _cells(lines[index]) if index < len(lines) else None
+    if not separator or not all(re.fullmatch(r":?-+:?", cell) for cell in separator):
+        return [], [f"ledger separator row missing: {path}"]
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in lines[index + 1 :]:
+        if not line.lstrip().startswith("|"):
+            break
+        cells = _cells(line)
+        if cells is None or len(cells) != len(header):
+            problems.append(f"ledger row needs {len(header)} cells: {path}: {line.strip()[:40]}")
+            continue
+        row_id, day, row_type, status = cells[:4]
+        if not re.fullmatch(rf"{spec['prefix']}-\d{{3,}}", row_id):
+            problems.append(f"ledger id invalid: {path}: {row_id}")
+            continue
+        if row_id in seen:
+            problems.append(f"ledger id duplicated: {path}: {row_id}")
+            continue
+        seen.add(row_id)
+        for label, value, allowed in (("유형", row_type, spec["types"]), ("상태", status, spec["statuses"])):
+            if value not in allowed:
+                problems.append(f"ledger {label} invalid: {path}: {row_id}")
+        try:
+            known_date = day == "-" or (re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and date.fromisoformat(day))
+        except ValueError:
+            known_date = False
+        if not known_date:
+            problems.append(f"ledger 날짜 invalid: {path}: {row_id}")
+        successor = "" if kind != "decision_ledger" or cells[6] in {"", "-", "—", "–"} else cells[6]
+        rows.append({
+            "id": row_id, "date": day, "type": row_type, "status": status, "successor": successor, "cells": cells,
+            "items": _src_tokens(line, "item:"), "docs": _src_tokens(line, "doc:"), "sess": _src_tokens(line, "sess:"),
+        })
+    for row in rows:
+        if row["successor"] and row["successor"] not in seen - {row["id"]}:
+            problems.append(f"ledger 후속 not found: {path}: {row['id']}")
+        if row["status"] == "대체됨" and not row["successor"]:
+            problems.append(f"ledger 대체됨 requires 후속: {path}: {row['id']}")
+    return rows, problems
+
+
+def brief_sections(text: str) -> list[tuple[str, str]]:
+    """Level-2 sections as (heading, body); `###` and deeper stay inside their section."""
+    matches = list(re.finditer(r"(?m)^## +(.+?) *$", text))
+    return [
+        (match.group(1), text[match.end() : matches[index + 1].start() if index + 1 < len(matches) else len(text)])
+        for index, match in enumerate(matches)
+    ]
+
+
+def _brief_chars(text: str) -> int:
+    return len(_SRC_RE.sub("", text).strip())
+
+
+def _section_ids(body: str) -> list[str]:
+    """Ledger ids that open a table row (first cell) or a bullet."""
+    ids: list[str] = []
+    for line in body.split("\n"):
+        cells = _cells(line)
+        ids += re.findall(r"\b[DU]-\d{3,}\b", cells[0]) if cells else re.findall(r"^\s*[-*]\s+(?:\*\*)?([DU]-\d{3,})\b", line)
+    return ids
+
+
+def _doc_source_ok(token: str, original: dict[str, dict[str, Any]]) -> bool:
+    """A migration source `doc:<path>[#<heading>]` must name a Git-base 20_Projects/10_User topic or user document (never a
+    brief or ledger, or a row could cite itself) and its heading."""
+    path, _, heading = token[4:].partition("#")
+    path, heading = unquote(path), unquote(heading)
+    document = original.get(path)
+    if not document or not path.startswith(("20_Projects/", "10_User/")) or document.get("kind") in CURATOR_KINDS:
+        return False
+    headings = {_normal(match) for match in re.findall(r"(?m)^#{1,6} +(.+?) *$", str(document.get("text") or ""))}
+    return not heading or _normal(heading) in headings
+
+
+def _curator_checks(
+    targets: set[str], current: dict[str, dict[str, Any]], original: dict[str, dict[str, Any]],
+    session_of: dict[str, str], brief_cap: int,
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Mechanical checks for BRIEF/PROFILE and the two ledgers; the meaning of a claim stays with the reviewer."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    numbers: dict[str, Any] = {"brief_cap": brief_cap, "brief_chars": {}, "ledger_rows": {}, "superseded_rows": {}}
+    # A brief cites ledger rows by id, so a changed ledger also re-checks the brief beside it, targeted or not.
+    ledger_dirs = {
+        PurePosixPath(path).parent for path in targets if "header" in CURATOR_KINDS.get(current.get(path, {}).get("kind"), {})
+    }
+    targets = targets | {
+        path for path, doc in current.items()
+        if "label" in CURATOR_KINDS.get(doc.get("kind"), {}) and PurePosixPath(path).parent in ledger_dirs
+    }
+    for path in sorted(targets):
+        document, base = current.get(path, {}), original.get(path, {})
+        kind = document.get("kind")
+        if base.get("kind") in CURATOR_KINDS and kind != base["kind"]:
+            errors.append(f"curator document kind changed: {path}")
+        spec = CURATOR_KINDS.get(kind)
+        if spec is None:
+            continue
+        text, base_text = str(document.get("text") or ""), str(base.get("text") or "")
+        if not path.startswith(spec["dir"]):
+            errors.append(f"curator document not allowed here: {path}")
+        errors += [
+            f"doc source invalid: {path}: {token}" for token in sorted(_src_docs(text) - _src_docs(base_text))
+            if not _doc_source_ok(token, original)
+        ]
+        if "header" in spec:
+            rows, problems = ledger_entries(text, kind, path)
+            errors += problems
+            old_rows = {row["id"]: row for row in ledger_entries(base_text, kind, path)[0]} if base.get("kind") == kind else {}
+            ceiling = max((int(row_id[2:]) for row_id in old_rows), default=0)
+            errors += [f"ledger row deleted: {path}: {row_id}" for row_id in sorted(old_rows.keys() - {row["id"] for row in rows})]
+            numbers["ledger_rows"][path] = len(rows)
+            if kind == "decision_ledger":
+                numbers["superseded_rows"][path] = sum(row["status"] == "대체됨" for row in rows)
+            for row in rows:
+                old, where = old_rows.get(row["id"]), f"{path}: {row['id']}"
+                if old is None:
+                    if int(row["id"][2:]) <= ceiling:
+                        errors.append(f"ledger id not above the base maximum: {where}")
+                    if not row["items"] | row["docs"]:
+                        errors.append(f"ledger row without provenance: {where}")
+                else:
+                    # Only 상태 and the last column (후속 / 독립 세션) may change; history is never rewritten.
+                    if [cell for index, cell in enumerate(row["cells"]) if index not in (3, 6)] != [
+                        cell for index, cell in enumerate(old["cells"]) if index not in (3, 6)
+                    ]:
+                        errors.append(f"ledger row changed outside its mutable columns: {where}")
+                    if not (old["items"] <= row["items"] and old["docs"] <= row["docs"] and old["sess"] <= row["sess"]):
+                        errors.append(f"ledger row lost provenance: {where}")
+                if kind != "user_ledger":
+                    continue
+                # 독립 세션 is the tool's count of distinct sessions behind the row, never the Curator's claim.
+                want = (old["sess"] if old else set()) | {
+                    session_of[item_id] for item_id in row["items"] - (old["items"] if old else set()) if session_of.get(item_id)
+                }
+                if row["sess"] != want or row["cells"][6] != str(len(want)):
+                    errors.append(f"ledger 독립 세션 differs from the tool count: {where}")
+                if row["status"] == "확인" and (old is None or old["status"] != "확인"):
+                    if not row["items"] | row["docs"]:
+                        errors.append(f"ledger 확인 needs a source: {where}")
+                    if row["type"] == "선호(추론)" and len(row["sess"]) < 3:
+                        errors.append(f"ledger 확인 needs 3 independent sessions: {where}")
+            continue
+        label, sections = spec["label"], brief_sections(text)
+        if [name for name, _body in sections if name in spec["headings"]] != list(spec["headings"]):
+            errors.append(f"{label} headings missing or out of order: {path}")
+        chars = numbers["brief_chars"][path] = _brief_chars(text)
+        if chars > brief_cap:
+            errors.append(f"{label} over the cap: {path} ({chars} > {brief_cap})")
+        bodies = dict(sections[::-1])  # a duplicated heading is reported above; the first one is read here
+        folder = PurePosixPath(path).parent
+        ledger = next((
+            current[other] for other in sorted(current)
+            if current[other].get("kind") == spec["ledger"] and PurePosixPath(other).parent == folder
+        ), None)
+        status = {row["id"]: row["status"] for row in ledger_entries(str(ledger.get("text") or ""), spec["ledger"])[0]} if ledger else {}
+        listed = _section_ids(bodies.get(spec["section"], ""))
+        if listed and not ledger:
+            errors.append(f"{label} needs a {spec['ledger']}{' in its folder' if label == 'brief' else ''}: {path}")
+        for row_id in listed:
+            if status.get(row_id) != spec["status"]:
+                bad = "non-valid" if label == "brief" else "non-confirmed"
+                errors.append(f"{label} {spec['section']} lists a {bad} entry: {path}: {row_id}")
+        for name in spec.get("soft", ()):
+            warnings += [
+                f"{label} references ledger id {row_id} that is not 유효: {path}"
+                for row_id in _section_ids(bodies.get(name, "")) if status.get(row_id) != "유효"
+            ]
+    return errors, warnings, numbers
+
+
 def check_compaction(
     plan: dict[str, Any], before: list[dict[str, Any]], after: list[dict[str, Any]],
-    *, integrity_after: list[dict[str, Any]] | None = None,
+    *, integrity_after: list[dict[str, Any]] | None = None, brief_cap: int = BRIEF_CAP,
 ) -> dict[str, Any]:
     """Check batch changes against Git, while preserving live-tree integrity checks."""
+    if brief_cap < 1:
+        raise ValueError("brief cap must be positive")
     errors: list[str] = []
+    warnings: list[str] = []
     original = {doc["path"]: doc for doc in before}
     current = {doc["path"]: doc for doc in after}
     selected = plan.get("selected") or {}
@@ -545,17 +842,24 @@ def check_compaction(
     nodes = selected.get("graph", {}).get("nodes", [])
     frozen = {node["path"]: node.get("sha256") for node in nodes if node.get("type") == "source_file"}
     expected: dict[str, str] = {}
+    facts: dict[str, tuple[str, str]] = {}  # item id -> (event role, normalized own text) for quote and role checks
     for path in paths:
         source = original.get(path)
         if not source or not path.startswith(("30_Conversations/raw/", "40_Agents/")) or frozen.get(path) != source.get("document_hash"):
             errors.append(f"source does not match Git base: {path}")
             continue
-        for item in _raw_items(source):
+        for item in _raw_items(source, body=True):
             item_id = "item:" + hashlib.sha256(f"{path}\0{item['locator']}".encode("utf-8")).hexdigest()[:16]
             if item_id in expected:
                 errors.append(f"ambiguous item identity: {item_id}")
             expected[item_id] = path
+            facts[item_id] = (item.get("event_role", ""), _normal(item["body"]))
+    session_of = {item_id: _doc_sess(original[path]) for item_id, path in expected.items()}
     entries = _review_items(review.get("items"))
+    errors += [
+        f"claim items cannot be grouped under ids: {raw['disposition']}"
+        for raw in review["items"] if "ids" in raw and raw.get("disposition") in CLAIM_DISPOSITIONS
+    ]
     deleted = review.get("delete_paths")
     if not isinstance(deleted, list) or any(not isinstance(path, str) for path in deleted):
         raise ValueError("review.delete_paths must be a list of paths")
@@ -564,6 +868,7 @@ def check_compaction(
     classified: set[str] = set()
     targets: set[str] = set()
     retained: set[str] = set()
+    owed: defaultdict[str, set[str]] = defaultdict(set)
     for entry in entries:
         item_id = entry.get("id")
         disposition = entry.get("disposition")
@@ -572,26 +877,49 @@ def check_compaction(
             errors.append(f"unknown or duplicate reviewed item: {item_id}")
             continue
         classified.add(item_id)
-        if disposition not in {"merge", "replace", "already-covered", "discard", "hold"}:
+        if disposition not in DISPOSITIONS:
             errors.append(f"unclassified item: {item_id}")
         if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
             errors.append(f"item requires a reason: {item_id}")
         if not isinstance(destinations, list) or any(not isinstance(path, str) for path in destinations):
             raise ValueError("item.targets must be a list of paths")
-        if disposition in {"merge", "replace", "already-covered"} and not destinations:
+        if disposition in MARKED_DISPOSITIONS | {"already-covered"} and not destinations:
             errors.append(f"durable item requires a target: {item_id}")
+        if disposition in LEGACY_DISPOSITIONS:
+            warnings.append("legacy disposition merge/replace is deprecated: use a typed disposition")
+        quote = entry.get("quote")
+        if quote is None:
+            if disposition in CLAIM_DISPOSITIONS:
+                errors.append(f"claim item requires a quote: {item_id}")
+        elif not isinstance(quote, str) or not 4 <= len(_normal(quote)) <= 200:
+            errors.append(f"quote must be 4 to 200 characters: {item_id}")
+        elif _normal(quote) not in facts[item_id][1]:
+            errors.append(f"quote not found in item: {item_id}")
+        if facts[item_id][0] == "subagent" and disposition not in SUBAGENT_DISPOSITIONS:
+            errors.append(f"subagent item may only be knowledge, already-covered, discard or hold: {item_id}")
         if disposition == "hold":
             retained.add(expected[item_id])
             if expected[item_id] in deleted:
                 errors.append(f"held source must be retained: {expected[item_id]}")
         for target in destinations:
+            kind = current.get(target, {}).get("kind")
             if (
                 target not in current
                 or not target.startswith(("10_User/", "20_Projects/", "50_Knowledge/", "30_Conversations/summaries/"))
                 or current[target].get("metadata_valid") is False
             ):
                 errors.append(f"missing or invalid knowledge target: {target}")
+            elif disposition in PROJECT_DISPOSITIONS and kind not in {"brief", "decision_ledger"}:
+                errors.append(f"project claim must target a brief or decision_ledger: {target}")
+            elif disposition in USER_DISPOSITIONS and kind not in {"user_profile", "user_ledger"}:
+                errors.append(f"user claim must target a user_profile or user_ledger: {target}")
+            elif disposition == "knowledge" and kind in CURATOR_KINDS:
+                errors.append(f"knowledge item cannot target a curator document: {target}")
+            elif disposition in LEGACY_DISPOSITIONS and kind in CURATOR_KINDS:
+                errors.append(f"legacy merge/replace cannot target a curator document: {target}")
             targets.add(target)
+            if disposition in MARKED_DISPOSITIONS:
+                owed[target].add(item_id)
     if classified != set(expected):
         errors.append("every source item must be reviewed exactly once")
     for path in paths:
@@ -607,6 +935,21 @@ def check_compaction(
     unexpected = changed - set(deleted) - targets
     if unexpected:
         errors.append(f"unplanned Markdown changes: {', '.join(sorted(unexpected))}")
+    # New markers must be backed by a claim review of that target. A missing marker is an error in a curator
+    # document and only a count elsewhere, until compact-annotate has been used on a real batch.
+    unmarked: set[str] = set()
+    for target in targets:
+        have = _src_ids(str(current.get(target, {}).get("text") or ""))
+        if have - _src_ids(str(original.get(target, {}).get("text") or "")) - owed[target]:
+            errors.append(f"provenance marker without a claim review: {target}")
+        missing = owed[target] - have
+        if missing and current.get(target, {}).get("kind") in CURATOR_KINDS:
+            errors.append(f"claim without provenance marker: {target}")
+        else:
+            unmarked |= missing
+    curator_errors, curator_warnings, curation = _curator_checks(targets, current, original, session_of, brief_cap)
+    errors += curator_errors
+    warnings += curator_warnings
     user = review.get("user_knowledge") or {}
     user_changed = any(path.startswith("10_User/") for path in changed)
     if (
@@ -632,10 +975,13 @@ def check_compaction(
         "status": "blocked" if errors else "ok",
         "mechanical_checks": "failed" if errors else "passed",
         "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+        "curation": curation,
         "classified_items": len(classified),
         "item_count": len(expected),
         "active_characters": {"before": before_chars, "after": after_chars, "delta": after_chars - before_chars},
         "retained_sources": sorted(retained),
+        "provenance": {"unmarked_items": len(unmarked), "examples": sorted(unmarked)[:20]},
         "integrity": {
             "new_errors": new_errors,
             "unresolved_conflicts_before": len(baseline["conflict_queue"]),

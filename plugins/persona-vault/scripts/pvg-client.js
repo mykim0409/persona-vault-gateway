@@ -572,6 +572,10 @@ async function runCommand(command, argv) {
 }
 
 module.exports = {
+  NOTE_TYPES,
+  OUTCOMES,
+  PROVENANCE,
+  VIEWS,
   configDir,
   gatewayConfig,
   gatewayRequest,

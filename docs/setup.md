@@ -129,3 +129,5 @@ Windows PowerShell:
 
 The memo command prints JSON that includes the saved `path` (under `30_Conversations/raw/`), and the search should list the same memo. This writes a raw note
 to your Vault, not approved knowledge, so `--view current` can legitimately be empty or abstain on a new Vault.
+
+The plugin also ships a small MCP server with two tools, `pvg_search` and `pvg_memo`. Agents call them instead of the helper commands. They read the same token config, so the installer is still required and the helpers remain the fallback. In Claude Code they are named `mcp__plugin_persona-vault_pvg__pvg_search` and `mcp__plugin_persona-vault_pvg__pvg_memo`: allowlist only `pvg_search` if you want searches without an approval prompt, and keep `pvg_memo` prompting, because a note is saved only when you explicitly ask.
