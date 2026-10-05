@@ -137,10 +137,10 @@ The Gateway package, plugin, and API versions are independent. Currently the Gat
 
 - Installation is `docs/setup.md`, hosting is `docs/hosting.md`, operations is `docs/operations.md`, and the Wiki curation protocol is `docs/CURATOR.md`.
   `docs/operations.md` must be included in the release bundle (`scripts/build_release_bundle.py` ALLOWLIST).
-- Docs are paired in English (the default `.md`) and Korean (`.ko.md`). Update paired documents together in the same change. A document that
-  ships in the release bundle must also have its `.ko.md` in the ALLOWLIST. Agent-facing templates (`docs/CURATOR.md`, `docs/WORKING_AGREEMENT.md`, and so on) remain
-  canonical in English, and the Korean document is a translation for human readers. Paths the runtime reads, template download URLs, and the canonical `CURATOR.md`
-  filename stay in English.
+- Docs are paired in English (the default `.md`) and Korean (`.ko.md`), except `docs/CURATOR.md`, which is English-only by decision: the Curator LLM reads it,
+  people do not, and a Korean twin only drifts. Update paired documents together in the same change. A document that ships in the release bundle must also
+  have its `.ko.md` in the ALLOWLIST (again except `docs/CURATOR.md`). `docs/WORKING_AGREEMENT.md` remains canonical in English with a Korean translation for
+  human readers. Paths the runtime reads, template download URLs, and the canonical `CURATOR.md` filename stay in English.
 - The default deployment uses keyword search. Semantic search is used only when you turn it on explicitly (`EMBEDDING_PROVIDER=cloudflare` +
   `COMPOSE_PROFILES=semantic`), and API `v3` is not a contract that guarantees semantic search accuracy.
 - Known QA gaps: the Windows launcher passed PowerShell 5.1/7 regression checks in CI, but real desktop and agent host integration and the full pre-release QA are not all finished, and the security review is not finished either.

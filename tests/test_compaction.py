@@ -6,9 +6,11 @@ import contextlib
 from copy import deepcopy
 from argparse import Namespace
 from dataclasses import replace
+import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import socket
 import subprocess
 import sys
@@ -19,9 +21,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gateway import cli, core
-from gateway.compaction import concurrent_raw_captures, finish_search, review_binding, staging_path
+from gateway.compaction import annotate_drafts, concurrent_raw_captures, finish_search, review_binding, staging_path
 from gateway.core import Settings, document_metadata, rag_answer_state, vault_documents
-from gateway.wiki import build_compaction_plan, check_compaction
+from gateway.wiki import _src_ids, build_compaction_plan, check_compaction
 
 
 @contextlib.contextmanager
@@ -456,6 +458,558 @@ def workflow_checks() -> None:
     print("compaction workflow: review reuse/invalidation, quota retry, single index/search and no Markdown mutation passed")
 
 
+def provenance_checks() -> None:
+    """compact-annotate writes the only provenance markers; check_compaction rejects markers no review backs."""
+    with TemporaryDirectory(prefix="pvg-provenance-") as temporary:
+        root = Path(temporary)
+        staging = root / ".tmp/curating"
+        staging.mkdir(parents=True)
+        plan_path, draft_path = staging / "plan.json", staging / "cur.md"
+        source, target, other = "30_Conversations/raw/2026/01/01/s.md", "20_Projects/Demo/cur.md", "20_Projects/Demo/other.md"
+        old = "item:9999999999999999"
+
+        def git(*args: str) -> bytes:
+            return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True).stdout
+
+        def note(path: str, identity: str, memory_type: str, body: str) -> None:
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(
+                f"---\nid: {identity}\nmemory_type: {memory_type}\nreview_state: human_accepted\n"
+                f"provenance_mode: human_asserted\ntemporal_state: current\nprojects: [Demo]\nsubject_id: demo\n---\n\n{body}\n",
+                encoding="utf-8",
+            )
+
+        retry, timeout = "- Retries stop after 3 attempts.", "- Timeout is 30 seconds."
+        events = [retry[2:] + " Repeated filler." * 40, timeout[2:], "Smoke output.", "Covered elsewhere."]
+        note(source, "raw_s", "transcript", "\n\n".join(
+            f'### user\n\n<!-- pvg-event {{"event_id":"e{index}"}} -->\n\n{text}' for index, text in enumerate(events)
+        ))
+        note(target, "kn_cur", "canonical", f"Old retry policy.\n\n- Retries stop after 5 attempts. <!-- pvg-src: {old} -->\n- Timeout is unknown.")
+        note(other, "kn_other", "canonical", "Unrelated knowledge.")
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Provenance Test")
+        git("config", "user.email", "test@localhost")
+        git("add", "30_Conversations", "20_Projects")
+        git("commit", "-qm", "Test base")
+        settings = Settings(root, root / "unused.db", "test", embedding_provider="hash")
+        plan = build_compaction_plan(vault_documents(settings), before="2026-01-02", revision=git("rev-parse", "HEAD").decode().strip())
+        ids = {node["locator"]: node["id"] for node in plan["selected"]["graph"]["nodes"] if node["type"] == "raw_item"}
+        plan["review"].update(
+            items=[
+                {"id": ids["e0"], "disposition": "merge", "targets": [target], "anchors": {target: "Retries stop after 3"}, "reason": "Keeps the retry limit."},
+                {"id": ids["e1"], "disposition": "replace", "targets": [target], "anchors": {target: "Timeout is 30"}, "reason": "Fixes the timeout."},
+                {"id": ids["e2"], "disposition": "discard", "targets": [], "reason": "Smoke output."},
+                {"id": ids["e3"], "disposition": "already-covered", "targets": [other], "reason": "Same meaning."},
+            ],
+            delete_paths=[source], user_knowledge={"status": "unchanged", "reason": "No new preference."},
+            drafts={target: ".tmp/curating/cur.md"},
+            probes=[{"query": "Timeout seconds", "bundle": "current", "expect_paths": [target], "answer_state": "supported"}],
+        )
+        plain = "# Retry policy\n\nConsolidated retry policy.\n\n" + f"{retry} <!-- pvg-src: {old} -->\n{timeout}"
+        note(".tmp/curating/cur.md", "kn_cur", "canonical", plain)
+        plain_bytes = draft_path.read_bytes()
+
+        def command(name: str, value: dict | None = None) -> dict:
+            plan_path.write_text(json.dumps(plan if value is None else value), encoding="utf-8")
+            return cli.run(["--vault", str(root), name, str(plan_path)])
+
+        def marker(*item_ids: str) -> str:
+            return f"<!-- pvg-src: {' '.join(sorted(item_ids))} -->"
+
+        assert _src_ids("<!-- pvg-src: item:abc -->") == set() and _src_ids(f"x {marker(old, ids['e0'])}") == {old, ids["e0"]}
+        annotated = command("compact-annotate")
+        assert annotated == {"status": "ok", "annotated": {target: 2}}, annotated
+        marked = draft_path.read_text(encoding="utf-8")
+        # Only the two anchored lines change; frontmatter, heading and metadata stay byte-identical.
+        assert marked == plain_bytes.decode().replace(
+            f"{retry} <!-- pvg-src: {old} -->", f"{retry} {marker(old, ids['e0'])}"
+        ).replace(timeout, f"{timeout} {marker(ids['e1'])}"), marked
+        assert core.document_metadata(target, marked) == core.document_metadata(target, plain_bytes.decode())
+        assert command("compact-annotate")["status"] == "ok" and draft_path.read_text(encoding="utf-8") == marked
+        reviewed = command("compact-review")
+        assert reviewed["status"] == "ok" and reviewed["provenance"] == {"unmarked_items": 0, "examples": []}, reviewed
+        # Markers are body text: they count as active characters instead of hiding from the gate.
+        assert reviewed["active_characters"]["after"] == len(core.markdown_body(marked)) + len(core.markdown_body((root / other).read_text()))
+        assert git("diff", "--name-only") == b"", "annotate/review modified tracked Markdown"
+
+        # A second id on an already marked line merges into the same marker; annotate never removes markers.
+        merged = deepcopy(plan)
+        merged["review"]["items"][1]["anchors"] = {target: "Retries stop after 3"}
+        assert command("compact-annotate", merged)["status"] == "ok"
+        union = draft_path.read_text(encoding="utf-8")
+        assert union.count("<!-- pvg-src:") == 2 and f"{retry} {marker(old, ids['e0'], ids['e1'])}" in union, union
+        assert f"{timeout} {marker(ids['e1'])}" in union
+
+        # Fail closed: no draft changes, even when the first target resolves and the second does not.
+        def anchor(quote: str):
+            return lambda value: value["review"]["items"][0]["anchors"].update({target: quote})
+
+        def late_failure(value: dict) -> None:
+            note(".tmp/curating/other.md", "kn_other", "canonical", "Unrelated knowledge.")
+            first = value["review"]["items"][0]
+            first["targets"].append(other)
+            first["anchors"][other] = "Missing"
+            value["review"]["drafts"][other] = ".tmp/curating/other.md"
+
+        cases = {
+            "no match": anchor("Nonexistent claim"), "two lines": anchor("- "), "heading": anchor("Retry policy"),
+            "frontmatter only": anchor("memory_type"), "empty": anchor("  "),
+            "not an object": lambda value: value["review"]["items"][0].update(anchors="Timeout"),
+            "unknown id": lambda value: value["review"]["items"][0].update(id="item:" + "0" * 16),
+            "discard": lambda value: value["review"]["items"][0].update(disposition="discard"),
+            "not a target": lambda value: value["review"]["items"][0].update(anchors={other: "Timeout"}),
+            "not a draft": lambda value: value["review"]["items"][0].update(targets=[target, other], anchors={other: "Timeout"}),
+            "late failure": late_failure,
+        }
+        for name, mutate in cases.items():
+            draft_path.write_bytes(plain_bytes)
+            invalid = deepcopy(plan)
+            mutate(invalid)
+            blocked = command("compact-annotate", invalid)
+            assert blocked["status"] == "blocked" and blocked["reason"].startswith("invalid_annotation"), (name, blocked)
+            assert draft_path.read_bytes() == plain_bytes, name
+        (root / "outside.json").write_text(json.dumps(plan), encoding="utf-8")
+        assert cli.run(["--vault", str(root), "compact-annotate", str(root / "outside.json")])["status"] == "blocked"
+
+        # Line endings are not normalized: a CRLF draft gets the markers and nothing else changes.
+        draft_path.write_bytes(plain_bytes.replace(b"\n", b"\r\n"))
+        assert command("compact-annotate")["status"] == "ok"
+        assert draft_path.read_bytes() == plain_bytes.decode().replace(
+            f"{retry} <!-- pvg-src: {old} -->", f"{retry} {marker(old, ids['e0'])}"
+        ).replace(timeout, f"{timeout} {marker(ids['e1'])}").replace("\n", "\r\n").encode(), draft_path.read_bytes()
+
+        # Applied tree: markers are indexed text and harmless to metadata and keyword search.
+        draft_path.write_bytes(plain_bytes)
+        assert command("compact-annotate")["status"] == "ok"
+        applied = draft_path.read_text(encoding="utf-8")
+        (root / target).write_text(applied, encoding="utf-8")
+        (root / source).unlink()
+        checked = command("compact-check")
+        assert checked["status"] == "ok" and checked["provenance"]["unmarked_items"] == 0, checked
+        assert checked["active_characters"]["after"] == len(core.markdown_body(applied)) + len(core.markdown_body((root / other).read_text()))
+        with no_network():
+            found = core.search_vault(replace(settings, embedding_provider="none"), {"scopes": ["vault-rag"]}, "Timeout is 30 seconds", bundle="current")
+        assert target in {result["path"] for result in found["results"]}, found
+
+        plain_other = (root / other).read_text(encoding="utf-8")
+
+        def tampered(live: dict[str, str]) -> dict:
+            for path, text in live.items():
+                (root / path).write_text(text, encoding="utf-8")
+            result = command("compact-check")
+            (root / target).write_text(applied, encoding="utf-8")
+            (root / other).write_text(plain_other, encoding="utf-8")
+            return result
+
+        for name, live, path in (
+            ("fabricated id", {target: applied + f"- Extra. {marker('item:0123456789abcdef')}\n"}, target),
+            ("discard id", {target: applied.replace(marker(ids["e1"]), marker(ids["e1"], ids["e2"]))}, target),
+            ("already-covered id", {target: applied.replace(marker(ids["e1"]), marker(ids["e1"], ids["e3"]))}, target),
+            ("wrong target", {other: plain_other + f"\n{marker(ids['e1'])}\n"}, other),
+        ):
+            blocked = tampered(live)
+            assert blocked["status"] == "blocked", (name, blocked)
+            assert f"provenance marker without a claim review: {path}" in blocked["errors"], (name, blocked)
+        # Missing markers only warn for now; the old base marker alone never errors.
+        warned = tampered({target: plain_bytes.decode()})
+        assert warned["status"] == "ok" and warned["provenance"] == {
+            "unmarked_items": 2, "examples": sorted([ids["e0"], ids["e1"]]),
+        }, warned
+    print("compaction provenance: annotate, fail-closed anchors, marker enforcement and search harmlessness passed")
+
+
+def brief_cap_argument_checks() -> None:
+    parse = cli.parser().parse_args
+    assert parse(["compact-plan"]).brief_cap == 8000 and parse(["compact-plan", "--brief-cap", "5"]).brief_cap == 5
+    for command in ("compact-check p", "compact-review p", "compact-finish p"):
+        # Later commands default to the cap compact-plan recorded; the flag overrides it.
+        assert parse([*command.split()]).brief_cap is None and parse([*command.split(), "--brief-cap", "5"]).brief_cap == 5, command
+    recorded = {"selected": {"ledgers": [{"path": "20_Projects/P/DECISIONS.md", "rows": 0}, {"path": "20_Projects/P/BRIEF.md", "cap": 5000}]}}
+    assert cli.plan_brief_cap(recorded, Namespace(brief_cap=None)) == 5000
+    assert cli.plan_brief_cap(recorded, Namespace(brief_cap=7)) == 7
+    assert cli.plan_brief_cap({"selected": {}}, Namespace(brief_cap=None)) == 8000
+    for command in ("compact-annotate p", "health"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parse([*command.split(), "--brief-cap", "5"])
+            except SystemExit:
+                continue
+        raise AssertionError(f"{command} accepted --brief-cap")
+
+
+def annotate_checks() -> None:
+    """compact-annotate on synthetic plans: claim items only, quotes see visible text only, user rows are tool-counted."""
+    with TemporaryDirectory(prefix="pvg-annotate-") as temporary:
+        root = Path(temporary)
+        (root / ".tmp/curating").mkdir(parents=True)
+        source, first, second, third = "30_Conversations/raw/2026/01/01/a.md", "item:" + "1" * 16, "item:" + "2" * 16, "item:" + "3" * 16
+        sessions = ("sess:11111111", "sess:22222222")
+        plan = {"selected": {"graph": {"nodes": [
+            {"id": "source:a", "type": "source_file", "path": source, "session": sessions[0]},
+            {"id": "source:b", "type": "source_file", "path": source + ".b", "session": sessions[1]},
+            {"id": first, "type": "raw_item", "path": source}, {"id": third, "type": "raw_item", "path": source},
+            {"id": second, "type": "raw_item", "path": source + ".b"},
+        ]}}, "review": {"items": [], "drafts": {}}}
+        topic, observations = "20_Projects/Demo/topic.md", "10_User/OBSERVATIONS.md"
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 근거 | 독립 세션 |"
+        fence = "```"
+        texts = {
+            topic: f"# Topic\n\nReal claim line.\n\n{fence}\nOnly in code.\nReal claim line.\n{fence}\n\n- Kept <!-- pvg-src: item:{'9' * 16} --> note\n",
+            observations: f"{header}\n|---|---|---|---|---|---|---|\n| U-001 | 2026-01-01 | 선호(명시) | 확인 | Wants Korean | 근거 | 0 |\n| U-002 | 2026-01-01 | 맥락 | 확인 | Short row | 근거 |\n",
+        }
+        drafts = {}
+        for target, body in texts.items():
+            drafts[target] = root / ".tmp/curating" / PurePosixPath(target).name
+            plan["review"]["drafts"][target] = drafts[target].relative_to(root).as_posix()
+
+        def reset() -> None:
+            for target, body in texts.items():
+                kind = "user_ledger" if target == observations else "note"
+                drafts[target].write_text(f"---\nid: {kind}\nmemory_type: canonical\nkind: {kind}\n---\n\n{body}", encoding="utf-8")
+
+        def annotate(*items: dict, fresh: bool = True) -> dict[str, int]:
+            plan["review"]["items"] = [{"reason": "x", **entry} for entry in items]
+            if fresh:
+                reset()
+            return annotate_drafts(root, plan)
+
+        def refused(*items: dict, text: str = "") -> None:
+            reset()
+            before = {path: path.read_bytes() for path in drafts.values()}
+            try:
+                annotate(*items, fresh=False)
+            except ValueError as exc:
+                assert text in str(exc), (items, exc)
+            else:
+                raise AssertionError(("annotate accepted", items))
+            assert before == {path: path.read_bytes() for path in drafts.values()}, items
+
+        claim = {"id": first, "disposition": "knowledge", "targets": [topic]}
+        # Fenced code and existing markers are invisible to the quote match; a quote seen twice or not at all fails.
+        assert annotate({**claim, "anchors": {topic: "Real claim"}}) == {topic: 1}
+        marked = drafts[topic].read_text(encoding="utf-8")
+        assert f"Real claim line. <!-- pvg-src: {first} -->\n\n{fence}\nOnly in code.\nReal claim line.\n{fence}" in marked, marked
+        for quote in ("Only in code", "pvg-src", "9999", "Real claim line.\n", "Absent"):
+            refused({**claim, "anchors": {topic: quote}}, text="anchor must match exactly one")
+        assert annotate({**claim, "anchors": {topic: "Kept"}}) == {topic: 1}
+        assert f"- Kept  note <!-- pvg-src: {first} item:{'9' * 16} -->" in drafts[topic].read_text(encoding="utf-8")
+        # A list of quotes marks several lines with one item; markers merge, and a second run changes nothing.
+        both = {**claim, "anchors": {topic: ["Real claim", "Kept"]}}
+        assert annotate(both) == {topic: 2}
+        once = drafts[topic].read_bytes()
+        assert annotate(both, fresh=False) == {topic: 2} and drafts[topic].read_bytes() == once
+        # Only claim dispositions may anchor; a malformed anchor is refused before anything is written.
+        for disposition in ("discard", "already-covered", "hold"):
+            refused({**claim, "disposition": disposition, "anchors": {topic: "Real claim"}}, text="anchors require a claim item")
+        for anchors in ({topic: [""]}, {topic: []}, {topic: ["Real claim", " "]}, {topic: 5}, {topic: ["Real claim", 5]}, ["Real claim"], {observations: "x"}):
+            refused({**claim, "anchors": anchors}, text="anchors require a claim item")
+        for disposition in ("decision", "supersession", "user_context", "merge", "replace"):
+            assert annotate({**claim, "disposition": disposition, "anchors": {topic: "Real claim"}}) == {topic: 1}
+
+        # A user_ledger row is rewritten by the tool: one sess: token per source session and the 독립 세션 cell as their count.
+        pref = lambda item_id, quote="Wants Korean": {"id": item_id, "disposition": "user_preference", "targets": [observations], "anchors": {observations: quote}}
+        assert annotate(pref(first), pref(second)) == {observations: 1}
+        row = next(line for line in drafts[observations].read_text(encoding="utf-8").splitlines() if "Wants Korean" in line)
+        assert row == f"| U-001 | 2026-01-01 | 선호(명시) | 확인 | Wants Korean | 근거 | 2 <!-- pvg-src: {first} {second} {' '.join(sessions)} --> |", row
+        annotated = drafts[observations].read_bytes()
+        assert annotate(pref(first), pref(second), fresh=False) == {observations: 1} and drafts[observations].read_bytes() == annotated
+        assert annotate(pref(first), pref(third)) == {observations: 1}  # two items of one session count once
+        assert f"| 1 <!-- pvg-src: {first} {third} {sessions[0]} --> |" in drafts[observations].read_text(encoding="utf-8")
+        assert annotate(pref(second), pref(third, "Wants Korean")) == {observations: 1}
+        assert f"| 2 <!-- pvg-src: {second} {third} {' '.join(sessions)} --> |" in drafts[observations].read_text(encoding="utf-8")
+        for quote in ("Short row", "| id |", "---", "독립 세션"):
+            refused(pref(first, quote), text="user_ledger anchor must be a 7-cell U-### row")
+        refused(pref(first, "Missing"), text="anchor must match exactly one")
+        # All or nothing: a failing user row leaves the topic draft untouched, however the items are ordered.
+        refused(
+            {**claim, "targets": [topic, observations], "anchors": {topic: "Real claim", observations: "Short row"}},
+            text="user_ledger anchor must be a 7-cell U-### row",
+        )
+    print("compaction annotate: claim-only anchors, visible-text matching, quote lists and tool-counted user rows passed")
+
+
+def ledger_workflow_checks() -> None:
+    """Typed review end to end on a Git vault: two curations (create, then supersede/confirm), CLI flags and mutations."""
+    with TemporaryDirectory(prefix="pvg-ledger-") as temporary:
+        root = Path(temporary)
+        staging = root / ".tmp/curating"
+        staging.mkdir(parents=True)
+        decisions, brief, topic = "20_Projects/Demo/DECISIONS.md", "20_Projects/Demo/BRIEF.md", "20_Projects/Demo/topic.md"
+        observations, profile = "10_User/OBSERVATIONS.md", "10_User/PROFILE.md"
+        kinds = {decisions: "decision_ledger", brief: "brief", topic: "note", observations: "user_ledger", profile: "user_profile"}
+        raw_paths = {name: f"30_Conversations/raw/2026/01/0{day}/{name}.md" for day, name in enumerate(("r1", "r2", "r3", "r4"), 1)}
+
+        def git(*args: str) -> bytes:
+            return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True).stdout
+
+        def text_of(path: str, body: str, **extra: str) -> str:
+            front = {"id": path.replace("/", "_").replace(".", "_"), "memory_type": "canonical", "review_state": "human_accepted",
+                     "provenance_mode": "human_asserted", "temporal_state": "current", "retrieval_tier": "primary",
+                     **({"kind": kinds[path]} if path in kinds else {}), **({"projects": '["Demo"]'} if path.startswith("20_") else {}), **extra}
+            return "---\n" + "".join(f"{key}: {value}\n" for key, value in front.items()) + f"---\n\n{body}\n"
+
+        def capture(name: str, session: str, *events: tuple[str, str, object]) -> None:
+            parts = []
+            for event_id, role, content in events:
+                heading, text = role, content
+                if role == "subagent":
+                    heading, text = "subagent: reviewer", f"**Agent delegation (not a user statement)**\n\n{content[0]}\n\n**Result**\n\n{content[1]}"
+                parts.append(f"### {heading}\n\n<!-- pvg-event {json.dumps({'event_id': event_id, 'role': role})} -->\n\n{text}")
+            path = root / raw_paths[name]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text_of(raw_paths[name], "\n\n".join(parts), session_id=session, projects='["Demo"]', memory_type="transcript"), encoding="utf-8")
+
+        filler = "x " * 2500
+        capture("r1", "s1", ("e0", "user", "We will keep SQLite as the storage engine."), ("e1", "user", "Postpone the caching layer until traffic grows."),
+                ("e2", "user", "I want answers in Korean."), ("f", "user", filler))
+        capture("r2", "s2", ("e4", "user", "Please answer in Korean again."), ("e6", "user", "What about the retry budget?"),
+                ("e8", "user", "Reusable tip: vacuum SQLite after bulk deletes."))
+        capture("r3", "s3", ("e9", "user", "Replace SQLite with Postgres for storage."), ("e10", "user", "Korean answers please, always."), ("g", "user", filler))
+        capture("r4", "s4", ("sa", "subagent", ("Check the schema.", "The schema is fine.")))
+        (root / topic).parent.mkdir(parents=True, exist_ok=True)
+        (root / topic).write_text(text_of(topic, "Old topic notes."), encoding="utf-8")
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Ledger Test")
+        git("config", "user.email", "test@localhost")
+        git("add", "30_Conversations", "20_Projects")
+        git("commit", "-qm", "Base")
+        plan_path = staging / "plan.json"
+
+        def run(*argv: str) -> dict:
+            with patch.object(cli, "qdrant_compaction_neighbors", return_value={"status": "unavailable", "edges": []}):
+                return cli.run(["--vault", str(root), *argv])
+
+        def command(name: str, *extra: str) -> dict:
+            return run(name, str(plan_path), *extra)
+
+        def stage(plan: dict, drafts: dict[str, str]) -> dict:
+            plan["review"]["drafts"] = {path: f".tmp/curating/{PurePosixPath(path).name}" for path in drafts}
+            for path, body in drafts.items():
+                (root / plan["review"]["drafts"][path]).write_text(text_of(path, body), encoding="utf-8")
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            return plan
+
+        def review(plan: dict, *rows: dict, deleted: list[str]) -> None:
+            ids = {node["locator"]: node["id"] for node in plan["selected"]["graph"]["nodes"] if node["type"] == "raw_item"}
+            named = {row["id"] for row in rows}
+            plan["review"].update(
+                items=[{**row, "id": ids[row["id"]], "reason": "Reviewed."} for row in rows]
+                + [{"id": node, "disposition": "discard", "targets": [], "reason": "No lasting value."} for loc, node in ids.items() if loc not in named],
+                delete_paths=deleted, user_knowledge={"status": "updated", "reason": "The profile and observations changed."},
+                probes=[{"query": "SQLite storage", "bundle": "current", "expect_paths": [brief], "answer_state": "supported"}],
+            )
+
+        # --- Curation 1: everything is created from nothing; plan preview, --brief-cap and --full.
+        preview = run("compact-plan", "--before", "2026-01-03", "--output", str(plan_path))
+        selected = preview["selected"]
+        assert {entry["kind"]: entry["create"] for entry in selected["ledgers"]} == dict.fromkeys(("brief", "decision_ledger", "user_profile", "user_ledger"), True)
+        assert selected["ledgers"][0]["cap"] == 8000 and selected["subagent_items"] == 0
+        assert sorted(selected["create_targets"]) == sorted([brief, decisions, profile, observations])
+        assert set(selected["create_targets"]) <= set(selected["target_candidates"])
+        assert "graph" not in selected and "review" not in preview
+        wide = run("compact-plan", "--before", "2026-01-03", "--brief-cap", "5000", "--output", str(staging / "wide.json"))
+        assert wide["selected"]["ledgers"][0]["cap"] == 5000 and wide["selected"]["ledgers"][2]["cap"] == 5000
+        assert json.loads((staging / "wide.json").read_text(encoding="utf-8"))["selected"]["ledgers"][0]["cap"] == 5000
+        for argv in (("--brief-cap", "0"), ("--brief-cap", "-1")):
+            refused = run("compact-plan", "--before", "2026-01-03", *argv)
+            assert refused["status"] == "blocked" and refused["reason"].startswith("invalid_compaction_plan"), refused
+        full = run("compact-plan", "--before", "2026-01-03", "--full")
+        assert full["selected"]["graph"]["nodes"] and full["review"]["items"]
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert plan["selected"]["source_paths"] == [raw_paths["r1"], raw_paths["r2"]]
+        next_id = {entry["kind"]: entry["next_id"] for entry in plan["selected"]["ledgers"] if "next_id" in entry}
+        assert next_id == {"decision_ledger": "D-001", "user_ledger": "U-001"}
+
+        rows = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n|---|---|---|---|---|---|---|\n"
+        decision_body = "# 결정 장부\n\n" + rows + "\n".join([
+            "| D-001 | 2026-01-01 | 결정 | 유효 | Keep SQLite as the storage engine | 단순함 | - |",
+            "| D-002 | 2026-01-01 | 미룸 | 보류 | Postpone the caching layer | 트래픽 적음 | - |",
+            "| D-003 | 2026-01-02 | 질문 | 유효 | What about the retry budget? | 미정 | - |",
+        ])
+        brief_body = "\n\n".join([
+            "# Demo 브리프", "## 현재 목표\n\nSQLite 기반 저장소를 유지한다.",
+            "## 유효한 결정\n\n| id | 날짜 | 결정 | 이유 |\n|---|---|---|---|\n| D-001 | 2026-01-01 | Keep SQLite storage | 단순함 |",
+            "## 미뤄진 것\n\n| id | 무엇 | 왜 | 재개 조건 |\n|---|---|---|---|\n| D-002 | Caching layer postponed | 트래픽 적음 | 트래픽 증가 |",
+            "## 대체된 것\n\n| 원래(id) | → 지금(id) | 언제·왜 |\n|---|---|---|", "## 열린 질문\n\n- D-003 Open retry budget question",
+            "## 최근 변화\n\n- 2026-01-02 첫 정리",
+        ])
+        observation_body = "# 관찰 장부\n\n| id | 날짜 | 유형 | 상태 | 내용 | 근거 | 독립 세션 |\n|---|---|---|---|---|---|---|\n" + \
+            "| U-001 | 2026-01-01 | 선호(추론) | 가설 | Wants answers in Korean | 두 세션 | 0 |"
+        profile_body = "\n\n".join(["# 프로필", *(f"## {name}\n\n-" for name in ("역할·맥락", "확인된 선호")), "## 가설\n\n- Likely wants Korean answers (U-001)",
+                                    *(f"## {name}\n\n-" for name in ("제약", "에이전트에 준 피드백", "반례·철회", "최근 변화"))])
+        topic_body = "Old topic notes.\n\n- Vacuum SQLite after bulk deletes."
+        drafts = {decisions: decision_body, brief: brief_body, observations: observation_body, profile: profile_body, topic: topic_body}
+        both = lambda row: {"disposition": row, "targets": [decisions, brief]}
+        review(
+            plan,
+            {"id": "e0", **both("decision"), "quote": "keep SQLite as the storage engine", "entry": {"id": "D-001", "type": "결정", "status": "유효"},
+             "anchors": {decisions: "Keep SQLite as the storage engine", brief: "Keep SQLite storage"}},
+            {"id": "e1", **both("deferral"), "quote": "Postpone the caching layer", "anchors": {decisions: "Postpone the caching layer", brief: "Caching layer postponed"}},
+            {"id": "e6", **both("question"), "quote": "retry budget", "anchors": {decisions: "retry budget", brief: "retry budget"}},
+            *({"id": item, "disposition": "user_preference", "targets": [observations, profile], "quote": quote,
+               "anchors": {observations: "Wants answers in Korean", profile: "Likely wants Korean answers"}}
+              for item, quote in (("e2", "answers in Korean"), ("e4", "answer in Korean again"))),
+            {"id": "e8", "disposition": "knowledge", "targets": [topic], "quote": "vacuum SQLite after bulk deletes", "anchors": {topic: "Vacuum SQLite after bulk deletes"}},
+            deleted=[raw_paths["r1"], raw_paths["r2"]],
+        )
+        stage(plan, drafts)
+        plain = {path: (root / plan["review"]["drafts"][path]).read_bytes() for path in drafts}
+        # Without annotation every typed item is missing its marker: an error in a curator document.
+        unmarked = command("compact-review")
+        assert unmarked["status"] == "blocked", unmarked
+        for path in (decisions, brief, observations, profile):
+            assert f"claim without provenance marker: {path}" in unmarked["errors"], unmarked["errors"]
+        assert f"claim without provenance marker: {topic}" not in unmarked["errors"] and unmarked["provenance"]["unmarked_items"] == 1
+        assert command("compact-annotate") == {"status": "ok", "annotated": {decisions: 3, brief: 3, observations: 1, profile: 1, topic: 1}}
+        annotated = {path: (root / plan["review"]["drafts"][path]).read_bytes() for path in drafts}
+        text = annotated[decisions].decode()
+        assert re.search(r"\| D-001 \|.*\| - <!-- pvg-src: item:[0-9a-f]{16} --> \|\n", text), text
+        row = next(line for line in annotated[observations].decode().splitlines() if "Wants answers" in line)
+        assert row.count("sess:") == 2 and "| 2 <!-- pvg-src: item:" in row and row.endswith("--> |"), row
+        assert command("compact-annotate")["status"] == "ok" and annotated == {path: (root / plan["review"]["drafts"][path]).read_bytes() for path in drafts}
+        # CRLF drafts keep their line endings; a list of quotes marks several rows with one item.
+        draft_files = {path: root / plan["review"]["drafts"][path] for path in drafts}
+        draft_files[decisions].write_bytes(plain[decisions].replace(b"\n", b"\r\n"))
+        assert command("compact-annotate")["status"] == "ok"
+        assert draft_files[decisions].read_bytes() == annotated[decisions].replace(b"\n", b"\r\n")
+        draft_files[decisions].write_bytes(plain[decisions])
+        listed_plan = deepcopy(plan)
+        listed_plan["review"]["items"][0]["anchors"][decisions] = ["Keep SQLite as the storage engine", "Postpone the caching layer"]
+        plan_path.write_text(json.dumps(listed_plan), encoding="utf-8")
+        assert command("compact-annotate")["annotated"][decisions] == 3
+        assert draft_files[decisions].read_text(encoding="utf-8").count(listed_plan["review"]["items"][0]["id"]) == 2
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        draft_files[decisions].write_bytes(plain[decisions])
+        assert command("compact-annotate")["status"] == "ok"
+
+        reviewed = command("compact-review")
+        assert reviewed["status"] == "ok" and reviewed["warnings"] == [] and reviewed["provenance"] == {"unmarked_items": 0, "examples": []}, reviewed
+        curation = reviewed["curation"]
+        assert curation["brief_cap"] == 8000 and set(curation["brief_chars"]) == {brief, profile}
+        assert curation["ledger_rows"] == {decisions: 3, observations: 1} and curation["superseded_rows"] == {decisions: 0}
+        over = command("compact-review", "--brief-cap", str(curation["brief_chars"][brief] - 1))
+        assert over["status"] == "blocked" and f"brief over the cap: {brief}" in " ".join(over["errors"]), over
+        assert command("compact-review", "--brief-cap", str(max(curation["brief_chars"].values())))["status"] == "ok"
+        assert command("compact-review", "--brief-cap", "0")["reason"].startswith("invalid_compaction_check")
+
+        def blocked(expected: str, mutate) -> None:
+            """Mutate the plan (a callable) or drafts ({path: text transform}); compact-review must block with this error."""
+            saved_plan = plan_path.read_bytes()
+            saved = {path: file.read_bytes() for path, file in draft_files.items()}
+            try:
+                if callable(mutate):
+                    changed = json.loads(saved_plan)
+                    mutate(changed)
+                    plan_path.write_text(json.dumps(changed), encoding="utf-8")
+                else:
+                    for path, edit in mutate.items():
+                        draft_files[path].write_text(edit(draft_files[path].read_text(encoding="utf-8")), encoding="utf-8")
+                result = command("compact-review")
+            finally:
+                plan_path.write_bytes(saved_plan)
+                for path, content in saved.items():
+                    draft_files[path].write_bytes(content)
+            assert result["status"] == "blocked" and any(expected in error for error in result.get("errors", [result.get("reason", "")])), (expected, result)
+
+        first_item = lambda value: value["review"]["items"][0]
+        blocked("quote not found in item", lambda value: first_item(value).update(quote="keep Postgres as the storage engine"))
+        blocked("claim item requires a quote", lambda value: first_item(value).pop("quote"))
+        blocked("claim items cannot be grouped under ids: decision", lambda value: first_item(value).update(ids=[first_item(value).pop("id")]))
+        blocked(f"project claim must target a brief or decision_ledger: {topic}", lambda value: first_item(value)["targets"].append(topic))
+        blocked("ledger 확인 needs 3 independent sessions", {observations: lambda body: body.replace("| 가설 |", "| 확인 |")})
+        blocked("ledger 독립 세션 differs from the tool count", {observations: lambda body: body.replace("| 2 <!--", "| 3 <!--")})
+        blocked(f"brief headings missing or out of order: {brief}", {brief: lambda body: body.replace("## 미뤄진 것", "## Later")})
+        blocked(f"brief 유효한 결정 lists a non-valid entry: {brief}: D-002", {brief: lambda body: body.replace("| D-001 | 2026-01-01 | Keep SQLite storage", "| D-002 | 2026-01-01 | Keep SQLite storage")})
+        blocked(f"profile 확인된 선호 lists a non-confirmed entry: {profile}: U-001", {profile: lambda body: body.replace("## 확인된 선호\n\n-", "## 확인된 선호\n\n| U-001 | x |\n|---|---|")})
+        blocked("ledger 날짜 invalid", {decisions: lambda body: body.replace("2026-01-02", "yesterday")})
+        blocked(f"doc source invalid: {decisions}: doc:20_Projects/Demo/missing.md", {decisions: lambda body: re.sub(r"(retry budget\? \| 미정 \| - )<!-- pvg-src: item:[0-9a-f]{16} -->", r"\1<!-- pvg-src: doc:20_Projects/Demo/missing.md -->", body)})
+
+        # A changed typed item (here: the proposed entry) invalidates exactly that item's recorded review.
+        recorded = command("compact-review", "--record")
+        assert recorded["semantic_review"] == "recorded" and command("compact-review")["semantic_review"] == "reusable"
+        saved_plan = plan_path.read_bytes()
+        changed = json.loads(saved_plan)
+        first_item(changed)["entry"] = {"id": "D-001", "type": "결정", "status": "보류"}
+        plan_path.write_text(json.dumps(changed), encoding="utf-8")
+        assert command("compact-review")["review_binding"]["review_required_ids"] == [first_item(changed)["id"]]
+        plan_path.write_bytes(saved_plan)
+        for path, file in draft_files.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_bytes(file.read_bytes())
+        for name in ("r1", "r2"):
+            (root / raw_paths[name]).unlink()
+        applied = command("compact-check")
+        assert applied["status"] == "ok" and applied["curation"] == curation and applied["provenance"]["unmarked_items"] == 0, applied
+        assert command("compact-check", "--brief-cap", "50")["status"] == "blocked"
+        status = {line[3:] for line in git("status", "--porcelain=v1", "-uall").decode().splitlines() if ".tmp/" not in line}
+        assert status == set(kinds) | {raw_paths["r1"], raw_paths["r2"]}, status
+        git("add", "30_Conversations", "20_Projects", "10_User")
+        git("commit", "-qm", "Curation 1")
+
+        # --- Curation 2 (on the applied result): a supersession flips a base row, a third session confirms the inference.
+        plan_path = staging / "plan2.json"
+        preview = run("compact-plan", "--before", "2026-02-01", "--output", str(plan_path))["selected"]
+        assert preview["subagent_items"] == 2 and preview["create_targets"] == [] and preview["source_paths"] == [raw_paths["r3"], raw_paths["r4"]]
+        assert [(entry["create"], entry["adopt"]) for entry in preview["ledgers"]] == [(False, False)] * 4 and not any("template" in entry for entry in preview["ledgers"])
+        assert {entry["kind"]: entry["next_id"] for entry in preview["ledgers"] if "next_id" in entry} == {"decision_ledger": "D-004", "user_ledger": "U-002"}
+        assert {entry["kind"]: entry["rows"] for entry in preview["ledgers"] if "rows" in entry} == {"decision_ledger": 3, "user_ledger": 1}
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        ids = {node["locator"]: node["id"] for node in plan["selected"]["graph"]["nodes"] if node["type"] == "raw_item"}
+        live = lambda path: core.markdown_body((root / path).read_text(encoding="utf-8"))
+        decision_body = live(decisions).replace("| 유효 | Keep SQLite as the storage engine | 단순함 | -", "| 대체됨 | Keep SQLite as the storage engine | 단순함 | D-004").rstrip("\n") + \
+            "\n| D-004 | 2026-01-03 | 대체 | 유효 | Replace SQLite with Postgres for storage | 교체 | - |"
+        brief_body = "\n\n".join([
+            "# Demo 브리프", "## 현재 목표\n\nPostgres 기반 저장소로 전환한다. (D-004)",
+            "## 유효한 결정\n\n| id | 날짜 | 결정 | 이유 |\n|---|---|---|---|\n| D-004 | 2026-01-03 | Use Postgres storage | 교체 |",
+            "## 미뤄진 것\n\n| id | 무엇 | 왜 | 재개 조건 |\n|---|---|---|---|\n| D-002 | Caching layer postponed | 트래픽 적음 | 트래픽 증가 |",
+            "## 대체된 것\n\n| 원래(id) | → 지금(id) | 언제·왜 |\n|---|---|---|\n| D-001 | → D-004 | Replaced SQLite storage on 2026-01-03 |",
+            "## 열린 질문\n\n- D-003 Open retry budget question", "## 최근 변화\n\n- 2026-01-03 저장소 교체",
+        ])
+        profile_body = profile_body.replace("## 확인된 선호\n\n-", "## 확인된 선호\n\n| id | 날짜 | 선호 | 근거 |\n|---|---|---|---|\n| U-001 | 2026-01-03 | Wants answers in Korean | 세 세션 |") \
+            .replace("- Likely wants Korean answers (U-001)", "-")
+        drafts = {decisions: decision_body, brief: brief_body, observations: live(observations).replace("| 가설 |", "| 확인 |"), profile: profile_body}
+        review(
+            plan,
+            {"id": "e9", "disposition": "supersession", "targets": [decisions, brief], "quote": "Replace SQLite with Postgres",
+             "anchors": {decisions: ["Replace SQLite with Postgres for storage", "Keep SQLite as the storage engine"], brief: ["Use Postgres storage", "Replaced SQLite storage"]}},
+            {"id": "e10", "disposition": "user_preference", "targets": [observations, profile], "quote": "Korean answers please",
+             "anchors": {observations: "Wants answers in Korean", profile: "Wants answers in Korean"}},
+            {"id": "sa#result", "disposition": "already-covered", "targets": [topic]},
+            deleted=[raw_paths["r3"], raw_paths["r4"]],
+        )
+        stage(plan, drafts)
+        draft_files = {path: root / plan["review"]["drafts"][path] for path in drafts}
+        assert command("compact-annotate")["annotated"] == {decisions: 2, brief: 2, observations: 1, profile: 1}
+        annotated = {path: file.read_bytes() for path, file in draft_files.items()}
+        row = next(line for line in annotated[observations].decode().splitlines() if "Wants answers" in line)
+        assert "| 확인 |" in row and "| 3 <!-- pvg-src:" in row and row.count("sess:") == 3 and row.count("item:") == 3, row
+        reviewed = command("compact-review")
+        assert reviewed["status"] == "ok" and reviewed["warnings"] == [], reviewed
+        assert reviewed["curation"]["ledger_rows"] == {decisions: 4, observations: 1} and reviewed["curation"]["superseded_rows"] == {decisions: 1}
+
+        item_of = lambda value, locator: next(entry for entry in value["review"]["items"] if entry["id"] == ids[locator])
+        blocked("subagent item may only be knowledge, already-covered, discard or hold", lambda value: item_of(value, "sa#result").update(disposition="decision", targets=[decisions], quote="schema is fine"))
+        blocked("quote not found in item", lambda value: item_of(value, "e9").update(quote="Replace Postgres with SQLite"))
+        blocked(f"ledger row deleted: {decisions}: D-003", {decisions: lambda body: re.sub(r"\| D-003 [^\n]*\n", "", body)})
+        blocked(f"ledger row changed outside its mutable columns: {decisions}: D-002", {decisions: lambda body: body.replace("Postpone the caching layer", "Postpone caching")})
+        blocked(f"ledger 대체됨 requires 후속: {decisions}: D-001", {decisions: lambda body: re.sub(r"\| D-004( <!-- pvg-src: item:[0-9a-f]{16} item:[0-9a-f]{16} -->) \|", r"| -\1 |", body, count=1)})
+        blocked(f"ledger row lost provenance: {decisions}: D-001", {decisions: lambda body: re.sub(r"(\| D-001 [^\n]*\| D-004 )<!-- pvg-src:[^>]*-->", r"\1<!-- pvg-src: " + ids["e9"] + " -->", body)})
+        blocked(f"curator document kind changed: {decisions}", {decisions: lambda body: body.replace("kind: decision_ledger", "kind: note")})
+        blocked(f"ledger 독립 세션 differs from the tool count: {observations}: U-001", {observations: lambda body: body.replace("| 3 <!--", "| 4 <!--")})
+        blocked(f"ledger 확인 needs 3 independent sessions: {observations}: U-001", {observations: lambda body: re.sub(r" sess:[0-9a-f]{8}", "", body, count=1).replace("| 3 <!--", "| 2 <!--")})
+        applied_texts = {path: file.read_bytes() for path, file in draft_files.items()}
+        for path, content in applied_texts.items():
+            (root / path).write_bytes(content)
+        for name in ("r3", "r4"):
+            (root / raw_paths[name]).unlink()
+        applied = command("compact-check")
+        assert applied["status"] == "ok" and applied["warnings"] == [] and applied["provenance"]["unmarked_items"] == 0, applied
+        status = {line[3:] for line in git("status", "--porcelain=v1", "-uall").decode().splitlines() if ".tmp/" not in line}
+        assert status == {decisions, brief, observations, profile, raw_paths["r3"], raw_paths["r4"]}, status
+        assert core.markdown_body(applied_texts[decisions].decode()) == live(decisions)
+    print("compaction ledgers: typed review, annotate, tool-counted sessions, supersession, --brief-cap and mutation matrix passed")
+
+
 def index_lock_checks() -> None:
     if sys.platform == "win32":
         return
@@ -479,6 +1033,10 @@ def index_lock_checks() -> None:
 def main() -> None:
     efficiency_checks()
     workflow_checks()
+    provenance_checks()
+    brief_cap_argument_checks()
+    annotate_checks()
+    ledger_workflow_checks()
     index_lock_checks()
     disputed = document_metadata("20_Projects/Demo/disputed.md", """---
 id: kn_disputed
@@ -608,6 +1166,7 @@ Two claims remain unresolved after their raw sources were consolidated.
         assert result["approval"] == "not_checked" and result["semantic_review"] == "required"
         assert result["index_verification"] == "not_checked"
         assert result["integrity"]["new_errors"] == []
+        assert result["provenance"]["unmarked_items"] == 1  # unanchored legacy plans still pass; markers are a warning for now
         grouped = deepcopy(plan)
         for entry in grouped["review"]["items"]:
             entry["ids"] = [entry.pop("id")]

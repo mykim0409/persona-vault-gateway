@@ -21,8 +21,8 @@ The Vault is a Git repository of Markdown files. Follow [metadata.md](metadata.m
 | Directory | Purpose | Edited by |
 | --- | --- | --- |
 | `00_Inbox/` | Unsorted notes | Person |
-| `10_User/` | Collaboration rules (`WORKING_AGREEMENT.md`), user records | Person, approved Curator |
-| `20_Projects/` | Project goals and decisions | Person, approved Curator |
+| `10_User/` | Collaboration rules (`WORKING_AGREEMENT.md`), user brief and ledger (`PROFILE.md`, `OBSERVATIONS.md`), user records | Person, approved Curator |
+| `20_Projects/` | Project status (`BRIEF.md`), decision ledger (`DECISIONS.md`), topic documents | Person, approved Curator |
 | `30_Conversations/raw/` | Raw agent conversations (by date) | Agent (the only path the Gateway writes) |
 | `30_Conversations/summaries/` | Conversation summaries | Person, Curator |
 | `50_Knowledge/` | Verified, reusable knowledge | Person, Curator |

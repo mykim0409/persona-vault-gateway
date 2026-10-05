@@ -139,10 +139,11 @@ Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway pa
 
 - 설치는 `docs/setup.md`, 호스팅은 `docs/hosting.md`, 운영은 `docs/operations.md`, Wiki 정리 protocol은 `docs/CURATOR.md`입니다.
   `docs/operations.md`는 릴리스 bundle에 포함되어야 합니다(`scripts/build_release_bundle.py` ALLOWLIST).
-- 문서는 영어(기본 `.md`)와 한국어(`.ko.md`)로 짝을 이룹니다. 짝이 있는 문서는 같은 변경에서 함께 고치세요. 릴리스 bundle에
-  들어가는 문서는 `.ko.md`도 ALLOWLIST에 있어야 합니다. 에이전트용 템플릿(`docs/CURATOR.md`, `docs/WORKING_AGREEMENT.md` 등)은
-  영어 원본이 기준이고 한국어 문서는 읽는 사람을 위한 번역입니다. 런타임이 읽는 경로, 템플릿 download URL, `CURATOR.md`
-  정식 파일명은 영어 그대로 둡니다.
+- 문서는 영어(기본 `.md`)와 한국어(`.ko.md`)로 짝을 이룹니다. 예외는 `docs/CURATOR.md`로, 결정에 따라 영어판만 둡니다.
+  Curator LLM이 읽는 문서라 사람이 읽을 일이 없고 한국어 짝은 어긋나기만 하기 때문입니다. 짝이 있는 문서는 같은 변경에서
+  함께 고치세요. 릴리스 bundle에 들어가는 문서는 `.ko.md`도 ALLOWLIST에 있어야 합니다(`docs/CURATOR.md`만 예외).
+  `docs/WORKING_AGREEMENT.md`는 영어 원본이 기준이고 한국어 문서는 읽는 사람을 위한 번역입니다. 런타임이 읽는 경로,
+  템플릿 download URL, `CURATOR.md` 정식 파일명은 영어 그대로 둡니다.
 - 기본 배포는 keyword 검색입니다. semantic 검색은 명시적으로 켠 경우(`EMBEDDING_PROVIDER=cloudflare` +
   `COMPOSE_PROFILES=semantic`)에만 쓰이며 API `v3`는 의미 검색 정확도를 보장하는 계약이 아닙니다.
 - 알려진 QA 공백: Windows launcher는 CI에서 PowerShell 5.1/7 회귀 검증을 통과했지만, 실제 데스크톱·agent host 통합과 공개 전 전체 QA는 모두 끝나지 않았고 보안 점검도 끝나지 않았습니다.

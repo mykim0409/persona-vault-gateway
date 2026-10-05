@@ -75,8 +75,9 @@ The path and the authenticated author take precedence over what the document dec
 | `30_Conversations/summaries/` | `derived_view` with source IDs and hashes, at most `supporting` |
 | `30_Conversations/important/` | `derived_view` for backward compatibility with earlier versions, at most `supporting` |
 | `10_User/WORKING_AGREEMENT.md` | `canonical`, `primary`: global collaboration rules approved by a human |
+| `10_User/` documents with `kind: user_profile` or `user_ledger` | `canonical`, `primary`: the user brief and observation ledger maintained by the approved Curator |
 | Other documents in `10_User/` | Detailed user records maintained by a human and searched when needed |
-| `20_Projects/`, `50_Knowledge/` | `canonical`, `primary`, approved by a human or the Curator |
+| `20_Projects/`, `50_Knowledge/` | `canonical`, `primary`, approved by a human or the Curator. Project `BRIEF.md` (`kind: brief`) and `DECISIONS.md` (`kind: decision_ledger`) live here |
 | Invalid or uninterpretable metadata | `unknown`, `unreviewed`, time fields omitted, `evidence` |
 | Missing provenance | `provenance_mode: reported`, `provenance_defaulted: true` |
 | Missing or unsupported outcome | `outcome: unknown` |
@@ -96,7 +97,7 @@ An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When 
 | `pv_schema` | Version of the metadata contract. The current value is `1` |
 | `id` | Stable identifier of the document |
 | `memory_type` | Knowledge role, one of `transcript`, `episode`, `candidate`, `canonical`, `derived_view` |
-| `kind` | Content type such as `debugging`, `procedure`, `decision`, `lesson`, `handoff` |
+| `kind` | Content type such as `debugging`, `procedure`, `decision`, `lesson`, `handoff`. The Curator also uses `brief` and `decision_ledger` (project status board and decision ledger) and `user_profile` and `user_ledger` (user brief and observation ledger) |
 | `capture_kind` | `conversation` or `agent_note`, as recorded by the v3 raw writer |
 | `note_type` | Lifecycle role of a note: `observation`, `proposal`, `handoff` |
 | `note_kind` | More specific free-form content classification of a note. Preserved in the API input and the raw context |
@@ -128,3 +129,22 @@ An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When 
 | `repository_sources` | `repo_id`, `path`, `commit`, and an optional `anchor` for facts whose origin is a repository |
 
 `source_hashes` is used to judge whether a derived view is stale because a source changed, and it does not raise authority. Do not put remote credentials or local absolute paths in `repository_sources`.
+
+## Curator documents and provenance markers
+
+The Curator keeps four fixed-shape documents. They are found by `kind`, not by file name, and the `kind` must sit under the directory shown. Headings and table headers are Korean; [CURATOR.md](CURATOR.md) explains them.
+
+| Path | `kind` | Shape |
+| --- | --- | --- |
+| `20_Projects/<Project>/BRIEF.md` | `brief` | Status board with fixed `##` headings. Rewritten every curation. Body at most 8,000 characters, markers not counted |
+| `20_Projects/<Project>/DECISIONS.md` | `decision_ledger` | One table of rows `D-###`. Rows are appended and never deleted |
+| `10_User/PROFILE.md` | `user_profile` | User brief with fixed `##` headings. Rewritten every curation. Same cap as `BRIEF.md` |
+| `10_User/OBSERVATIONS.md` | `user_ledger` | One table of rows `U-###`. Rows are appended and never deleted |
+
+A claim written from raw ends with a provenance marker, an HTML comment such as `<!-- pvg-src: item:<16 hex> -->`. One marker can hold several space-separated tokens:
+
+- `item:<16 hex>` is a one-way hash of a raw item's path and locator. It holds no path or quote.
+- `sess:<8 hex>` is a one-way hash of a session id. Only user-ledger rows carry it.
+- `doc:<path>#<heading>` points at an existing document. It is typed by hand, and only in the one-time migration from topic documents.
+
+The marker sits at the end of the claim line, inside the last cell of a table row. It is hidden in the Obsidian reading view. It is part of the Markdown body, so it counts in the active characters and is indexed. The Curator tools write `item:` and `sess:` tokens; do not edit them by hand. Only `doc:` tokens are typed by hand.

@@ -75,8 +75,9 @@ applicability:
 | `30_Conversations/summaries/` | source ID와 hash를 가진 `derived_view`, 최대 `supporting` |
 | `30_Conversations/important/` | 이전 버전 호환용 `derived_view`, 최대 `supporting` |
 | `10_User/WORKING_AGREEMENT.md` | 사람이 승인한 전역 협업 규칙인 `canonical`, `primary` |
+| `kind: user_profile` 또는 `user_ledger`인 `10_User/` 문서 | 승인된 Curator가 관리하는 사용자 브리프와 관찰 장부인 `canonical`, `primary` |
 | `10_User/`의 다른 문서 | 사람이 관리하며 필요할 때 검색하는 사용자 세부 기록 |
-| `20_Projects/`, `50_Knowledge/` | 사람 또는 Curator가 승인한 `canonical`, `primary` |
+| `20_Projects/`, `50_Knowledge/` | 사람 또는 Curator가 승인한 `canonical`, `primary`. 프로젝트의 `BRIEF.md`(`kind: brief`)와 `DECISIONS.md`(`kind: decision_ledger`)가 여기에 있음 |
 | 잘못되었거나 해석 불가한 metadata | `unknown`, `unreviewed`, 시간 필드 생략, `evidence` |
 | provenance 누락 | `provenance_mode: reported`, `provenance_defaulted: true` |
 | outcome 누락 또는 미지원 값 | `outcome: unknown` |
@@ -96,7 +97,7 @@ Gateway raw와 legacy agent root는 frontmatter에 `canonical`, `human_accepted`
 | `pv_schema` | metadata 계약 버전. 현재 값은 `1` |
 | `id` | 문서의 안정적인 식별자 |
 | `memory_type` | `transcript`, `episode`, `candidate`, `canonical`, `derived_view` 중 지식 역할 |
-| `kind` | `debugging`, `procedure`, `decision`, `lesson`, `handoff` 같은 내용 종류 |
+| `kind` | `debugging`, `procedure`, `decision`, `lesson`, `handoff` 같은 내용 종류. Curator는 `brief`와 `decision_ledger`(프로젝트 현황판과 결정 장부), `user_profile`과 `user_ledger`(사용자 브리프와 관찰 장부)도 사용 |
 | `capture_kind` | v3 raw writer가 기록한 `conversation` 또는 `agent_note` |
 | `note_type` | note의 수명주기 역할인 `observation`, `proposal`, `handoff` |
 | `note_kind` | note의 더 구체적인 자유 형식 내용 분류. API 입력과 raw context에 보존 |
@@ -128,3 +129,22 @@ Gateway raw와 legacy agent root는 frontmatter에 `canonical`, `human_accepted`
 | `repository_sources` | repository가 원본인 사실의 `repo_id`, `path`, `commit`과 선택적 `anchor` |
 
 `source_hashes`는 source 변경으로 derived view가 stale인지 판단하는 용도이며 권한을 높이지 않습니다. `repository_sources`에는 원격 credential이나 로컬 절대 경로를 넣지 않습니다.
+
+## Curator 문서와 출처 marker
+
+Curator는 형식이 고정된 문서 네 개를 관리합니다. 파일명이 아니라 `kind`로 찾으며, `kind`는 표시한 디렉토리 아래에 있어야 합니다. 제목과 표 머리글은 한국어이고, [CURATOR.md](CURATOR.md)(영문)가 설명합니다.
+
+| 경로 | `kind` | 형식 |
+| --- | --- | --- |
+| `20_Projects/<Project>/BRIEF.md` | `brief` | 고정된 `##` 제목을 가진 현황판. 매 정리마다 다시 씀. 본문 최대 8,000자, marker는 세지 않음 |
+| `20_Projects/<Project>/DECISIONS.md` | `decision_ledger` | `D-###` 행으로 이루어진 표 하나. 행은 추가만 하고 지우지 않음 |
+| `10_User/PROFILE.md` | `user_profile` | 고정된 `##` 제목을 가진 사용자 브리프. 매 정리마다 다시 씀. `BRIEF.md`와 같은 상한 |
+| `10_User/OBSERVATIONS.md` | `user_ledger` | `U-###` 행으로 이루어진 표 하나. 행은 추가만 하고 지우지 않음 |
+
+raw에서 가져온 주장은 `<!-- pvg-src: item:<16 hex> -->` 같은 HTML 주석인 출처 marker로 끝납니다. marker 하나에 공백으로 구분한 token 여러 개를 담을 수 있습니다.
+
+- `item:<16 hex>`는 raw item의 경로와 locator의 단방향 hash입니다. 경로나 인용은 담지 않습니다.
+- `sess:<8 hex>`는 세션 id의 단방향 hash입니다. 사용자 장부의 행만 가집니다.
+- `doc:<path>#<heading>`는 기존 문서를 가리킵니다. 사람이 직접 쓰며, 주제 문서에서 한 번 옮기는 migration에서만 씁니다.
+
+marker는 주장 줄의 끝에 두며, 표 행에서는 마지막 칸 안에 둡니다. Obsidian 읽기 보기에서는 보이지 않습니다. Markdown 본문의 일부이므로 active 문자 수에 포함되고 색인됩니다. `item:`과 `sess:` token은 Curator 도구가 쓰므로 직접 고치지 않습니다. 직접 쓰는 것은 `doc:` token뿐입니다.

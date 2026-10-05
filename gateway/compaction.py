@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import date
 from hashlib import sha256
@@ -10,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import core
-from .wiki import _review_items
+from .wiki import MARKED_DISPOSITIONS, _SRC_RE, _cells, _review_items
 
 
 def digest(value: Any) -> str:
@@ -117,6 +118,85 @@ def concurrent_raw_captures(vault: Path, plan: dict, before: list[dict], current
     return list(live.values()), concurrent
 
 
+def draft_file(vault: Path, target: str, draft: Any) -> Path:
+    if not knowledge_path(target) or not isinstance(draft, str) or Path(draft).is_absolute():
+        raise ValueError("draft requires a knowledge target and a Vault-relative staging path")
+    path = staging_path(vault, vault / draft)
+    if path.suffix != ".md":
+        raise ValueError("draft must be a Markdown file")
+    return path
+
+
+def annotate_drafts(vault: Path, plan: dict) -> dict[str, int]:
+    """Write `pvg-src` markers for review anchors into staged drafts only; additive, idempotent, all-or-nothing."""
+    review = plan["review"]
+    drafts = review.get("drafts", {})
+    if not isinstance(drafts, dict):
+        raise ValueError("review.drafts must map reviewed target paths to staged Markdown files")
+    nodes = plan["selected"]["graph"]["nodes"]
+    sessions = {node["path"]: node.get("session", "") for node in nodes if node["type"] == "source_file"}
+    item_session = {node["id"]: sessions.get(node["path"], "") for node in nodes if node["type"] == "raw_item"}
+
+    def quotes_of(value: Any) -> list[str] | None:
+        """One quote or a list of quotes per target, so one item can mark several rows; None if malformed."""
+        quotes = [value] if isinstance(value, str) else value
+        return quotes if isinstance(quotes, list) and quotes and all(isinstance(q, str) and q.strip() for q in quotes) else None
+
+    marks: dict[str, dict[str, set[str]]] = {}
+    for entry in _review_items(review["items"]):
+        anchors = entry.get("anchors")
+        if anchors is None:
+            continue
+        if (
+            entry["disposition"] not in MARKED_DISPOSITIONS or entry["id"] not in item_session
+            or not isinstance(anchors, dict) or not set(anchors) <= set(entry["targets"]) & set(drafts)
+            or any(quotes_of(value) is None for value in anchors.values())
+        ):
+            raise ValueError(f"anchors require a claim item of this plan and draft targets: {entry['id']}")
+        for target, value in anchors.items():
+            for quote in quotes_of(value):
+                marks.setdefault(target, {}).setdefault(quote, set()).add(entry["id"])
+    written, lines_marked = {}, {}
+    for target, quotes in marks.items():
+        path = draft_file(vault, target, drafts[target])
+        text = path.read_bytes().decode("utf-8")  # not read_text: universal newlines would rewrite every CRLF
+        body = core.markdown_body(text)  # frontmatter stays untouched
+        user = core.document_metadata(target, text).get("kind") == "user_ledger"
+        lines, marked, fenced = body.split("\n"), set(), False
+        # Quotes match visible text only: not inside fenced code, and not inside an existing marker.
+        visible = []
+        for line in lines:
+            fenced ^= line.lstrip().startswith(("```", "~~~"))
+            visible.append("" if fenced else _SRC_RE.sub("", line))
+        for quote, ids in quotes.items():
+            hits = [index for index, line in enumerate(visible) if quote in line]
+            # A heading would leak the marker into markdown_title().
+            if len(hits) != 1 or lines[hits[0]].lstrip().startswith("#"):
+                raise ValueError(f"anchor must match exactly one non-heading body line in {target}: {quote!r}")
+            found: set[str] = set()
+            line = _SRC_RE.sub(lambda match: found.update(match.group(1).split()) or "", lines[hits[0]]).rstrip()
+            # sess: tokens (hash of the source session id) make the row's 독립 세션 count tool-written and cumulative.
+            tokens = found | ids | ({item_session[item_id] for item_id in ids} - {""} if user else set())
+            marker = f"<!-- pvg-src: {' '.join(sorted(tokens))} -->"
+            cells = _cells(line)
+            if user and not (cells and len(cells) == 7 and re.fullmatch(r"U-\d{3,}", cells[0])):
+                raise ValueError(f"user_ledger anchor must be a 7-cell U-### row in {target}: {quote!r}")
+            if cells is None:
+                line = f"{line} {marker}"
+            else:
+                # In a table row the marker sits inside the last cell, so the row still ends with its closing pipe.
+                head = line[:-1].rstrip()
+                if user:
+                    head = f"{head.rpartition('|')[0]}| {sum(token.startswith('sess:') for token in tokens)}"
+                line = f"{head} {marker} |"
+            lines[hits[0]] = line + "\r" * lines[hits[0]].endswith("\r")
+            marked.add(hits[0])
+        written[path], lines_marked[target] = text[: len(text) - len(body)] + "\n".join(lines), len(marked)
+    for path, text in written.items():
+        path.write_text(text, encoding="utf-8", newline="")
+    return lines_marked
+
+
 def projected_documents(vault: Path, plan: dict, before: list[dict]) -> list[dict]:
     """Read staged full-file targets and project approved operations in memory only."""
     review = plan["review"]
@@ -127,12 +207,7 @@ def projected_documents(vault: Path, plan: dict, before: list[dict]) -> list[dic
         raise ValueError("review.drafts must map reviewed target paths to staged Markdown files")
     documents = {doc["path"]: doc for doc in before}
     for target, draft in drafts.items():
-        if not knowledge_path(target) or not isinstance(draft, str) or Path(draft).is_absolute():
-            raise ValueError("draft requires a knowledge target and a Vault-relative staging path")
-        path = staging_path(vault, vault / draft)
-        if path.suffix != ".md":
-            raise ValueError("draft must be a Markdown file")
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = draft_file(vault, target, draft).read_text(encoding="utf-8", errors="replace")
         documents[target] = {
             **core.document_metadata(target, text), "path": target, "text": core.markdown_body(text),
             "document_hash": sha256(text.encode()).hexdigest(),

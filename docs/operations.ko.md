@@ -16,13 +16,13 @@
 ## Vault 구조
 
 Vault는 Markdown 파일의 Git 저장소입니다. 형식은 [metadata.ko.md](metadata.ko.md), 정리 절차는
-[CURATOR.ko.md](CURATOR.ko.md)를 따릅니다.
+[CURATOR.md](CURATOR.md)(영문)를 따릅니다.
 
 | 디렉토리 | 용도 | 수정 주체 |
 | --- | --- | --- |
 | `00_Inbox/` | 미분류 메모 | 사람 |
-| `10_User/` | 협업 규칙(`WORKING_AGREEMENT.md`), 사용자 기록 | 사람, 승인된 Curator |
-| `20_Projects/` | 프로젝트 목표·결정 | 사람, 승인된 Curator |
+| `10_User/` | 협업 규칙(`WORKING_AGREEMENT.md`), 사용자 브리프와 장부(`PROFILE.md`, `OBSERVATIONS.md`), 사용자 기록 | 사람, 승인된 Curator |
+| `20_Projects/` | 프로젝트 현황(`BRIEF.md`), 결정 장부(`DECISIONS.md`), 주제 문서 | 사람, 승인된 Curator |
 | `30_Conversations/raw/` | agent 원본 대화(날짜별) | agent (Gateway가 쓰는 유일한 경로) |
 | `30_Conversations/summaries/` | 대화 요약 | 사람, Curator |
 | `50_Knowledge/` | 검증된 재사용 지식 | 사람, Curator |
@@ -116,7 +116,7 @@ CLOUDFLARE_API_TOKEN=<workers-ai-token>
   [Windows 안내](https://github.com/mykim0409/persona-vault-gateway/blob/main/plugins/persona-vault/skills/persona-vault/references/windows.md)입니다.
 
 Curator(`pvg-wiki`)는 계획을 제안만 하며 승인·apply·commit·push는 사람이 합니다. 절차 전체는
-[CURATOR.ko.md](CURATOR.ko.md)를 따르세요. CLI는 소스 checkout에서 `uv sync --frozen` 후 `uv run pvg-wiki ...`로
+[CURATOR.md](CURATOR.md)(영문)를 따르세요. CLI는 소스 checkout에서 `uv sync --frozen` 후 `uv run pvg-wiki ...`로
 실행합니다.
 
 CLI와 직접 실행하는 Python은 `EMBEDDING_PROVIDER`가 없으면 `cloudflare`가 기본입니다(Gateway 서비스 기본은 `none`).

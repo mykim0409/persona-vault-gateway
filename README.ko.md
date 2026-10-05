@@ -173,7 +173,7 @@ embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.
   프로세스 간에 공유되지 않습니다. forwarded 헤더는 정확히 신뢰하도록 설정한 proxy에서만 반영되고(wildcard
   금지) CSRF 보호는 그대로입니다. 암호화된 경로나 TLS와 접근 제어 뒤에서 비공개로 운영하세요.
 - **정리에는 사람이 필요합니다.** 모든 plan은 사람이 승인하며 raw 삭제의 원자성은 보장되지
-  않습니다. [Curator protocol](docs/CURATOR.ko.md)을 보세요.
+  않습니다. [Curator protocol (영문)](docs/CURATOR.md)을 보세요.
 
 이 베타는 보안 점검을 마치지 않았습니다. [SECURITY.ko.md](SECURITY.ko.md)를 보세요.
 
@@ -187,7 +187,7 @@ embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
 | [docs/gpt-actions.ko.md](docs/gpt-actions.ko.md) | plugin 대신 쓰는 Custom GPT Actions |
 | [docs/metadata.ko.md](docs/metadata.ko.md) | Markdown metadata 계약 |
-| [docs/CURATOR.ko.md](docs/CURATOR.ko.md) | Curator protocol |
+| [docs/CURATOR.md](docs/CURATOR.md) | Curator protocol (영문) |
 | [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md), [SECURITY.ko.md](SECURITY.ko.md) | 개발과 보안 정책 |
 
 [MIT License](LICENSE)로 배포됩니다.
