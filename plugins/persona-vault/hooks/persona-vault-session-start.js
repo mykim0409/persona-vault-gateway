@@ -15,6 +15,8 @@ function commandExists(command) {
   return paths.some((dir) => fs.existsSync(path.join(dir, command)));
 }
 
+const MCP_GUIDANCE = '- If the `pvg_search` and `pvg_memo` MCP tools are listed, use them; otherwise use the helper commands below. Every rule below about `pvg-rag-search` and `pvg-agent-memo` applies to the matching MCP tool. The MCP tools run the plugin\'s own client, so they need no helper commands on PATH.';
+
 const BASE_CONTEXT = [
   '- Completed main-agent and subagent turns are captured automatically as temporary raw conversation evidence.',
   '- Use `pvg-agent-memo` only when the user explicitly asks to save, log, record, or hand off information. A submitted note is raw evidence, not approved knowledge.',
@@ -51,15 +53,17 @@ function captureNotice() {
   }
 }
 
-function buildContext(ready, agreement, platform = process.platform, notice = '') {
+function buildContext(ready, agreement, platform = process.platform, notice = '', missingHelpers = []) {
   const windows = platform === 'win32';
   const search = windows ? '& "$HOME\\.local\\bin\\pvg-rag-search.ps1" --view' : 'pvg-rag-search --view';
   let context = [
     'PERSONAVAULT:',
+    MCP_GUIDANCE,
     windows
       ? '- This hook runs on native Windows. Use PowerShell and the .ps1 helpers in $HOME\\.local\\bin, even when that directory is missing from PATH. Memo help: & "$HOME\\.local\\bin\\pvg-agent-memo.ps1" --help. Pipe memo bodies and special-character queries on stdin. Do not probe Unix commands or Unix config paths here.'
       : '- This hook runs on macOS/Linux. Use the POSIX helpers; if missing from PATH, use $HOME/.local/bin/pvg-rag-search or pvg-agent-memo.',
     `- Use \`${search} current\` for compacted current knowledge, \`${search} evidence\` for raw sources, and \`${search} history\` for chronology.`,
+    ...(missingHelpers.length ? [`- Helper commands not found: ${missingHelpers.join(', ')}. This is only a hint: the MCP tools work without them. To add the helpers, run the PersonaVault installer (see the persona-vault skill).`] : []),
     ...BASE_CONTEXT,
   ].join('\n');
   if (agreement) {
@@ -100,10 +104,9 @@ async function main() {
 
   const config = gatewayConfig();
   const extension = process.platform === 'win32' ? '.ps1' : '';
-  const memoReady = commandExists(`pvg-agent-memo${extension}`);
-  const ragReady = commandExists(`pvg-rag-search${extension}`);
+  const missing = ['pvg-agent-memo', 'pvg-rag-search'].map((name) => `${name}${extension}`).filter((name) => !commandExists(name));
   const context = buildContext(
-    Boolean(config) && memoReady && ragReady, await fetchWorkingAgreement(config), process.platform, captureNotice(),
+    Boolean(config), await fetchWorkingAgreement(config), process.platform, captureNotice(), missing,
   );
 
   if (process.env.PLUGIN_DATA) {

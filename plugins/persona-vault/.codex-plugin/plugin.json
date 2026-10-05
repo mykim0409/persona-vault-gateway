@@ -1,12 +1,13 @@
 {
   "name": "persona-vault",
-  "version": "0.7.3+codex.20260921123406",
+  "version": "0.7.4+codex.20261005041709",
   "description": "Load approved user rules, capture raw evidence, search PersonaVault, and submit requested notes.",
   "author": {
     "name": "mykim0409"
   },
   "skills": "./skills/",
   "hooks": "./hooks/codex-hooks.json",
+  "mcpServers": "./.codex-mcp.json",
   "interface": {
     "displayName": "Persona Vault",
     "shortDescription": "Capture sessions and search durable knowledge",

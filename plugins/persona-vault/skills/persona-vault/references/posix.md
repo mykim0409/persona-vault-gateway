@@ -3,6 +3,7 @@
 Use this only when the helper actually runs in a POSIX shell, including an explicitly selected WSL environment.
 Helpers are installed in `$HOME/.local/bin`; use that full path when PATH does not include it.
 Config is `${XDG_CONFIG_HOME:-$HOME/.config}/persona-vault-gateway/env`. Let helpers load it; do not print it.
+The helpers are the fallback when the `pvg_search` and `pvg_memo` MCP tools are not listed; the installer is still how this config is created.
 
 ```bash
 "$HOME/.local/bin/pvg-rag-search" --view current 'what is the current policy for this project?'

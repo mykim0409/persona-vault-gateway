@@ -115,6 +115,8 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 raw note(승인된 지식 아님)를 저장하고 다시 찾습니다. 새 Vault에서는 `--view current`가 비어 있을 수 있습니다.
 Windows PowerShell 버전: [docs/setup.ko.md](docs/setup.ko.md).
 
+plugin에는 `pvg_search`, `pvg_memo` 두 도구를 가진 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.
+
 ## 동작 방식
 
 1. **기록.** hook이 세션을 Gateway로 보내고, Gateway는 `30_Conversations/raw/` 아래에만 씁니다.

@@ -130,8 +130,8 @@ Language: skills and references, agent-facing templates, source comments and doc
 
 ## Versions
 
-The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.3`
-(the Codex one includes a build suffix), and the API is `v3`. Do not bump versions in ordinary changes.
+The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.4`
+(the Codex one includes a build suffix), and the API is `v3`. Do not bump versions in ordinary changes; bump the plugin when its contract changes, as it did here.
 
 ## Docs and known limitations
 

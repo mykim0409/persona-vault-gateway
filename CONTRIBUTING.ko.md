@@ -132,8 +132,8 @@ Vault 내용을 영어로 써야 한다는 뜻은 아니며, 번역된 README·�
 
 ## 버전
 
-Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.3`
-(Codex는 build suffix 포함), API `v3`입니다. 일반 변경에서 버전을 올리지 않습니다.
+Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.4`
+(Codex는 build suffix 포함), API `v3`입니다. 일반 변경에서 버전을 올리지 않으며, plugin 계약이 바뀔 때 plugin 버전을 올립니다(이번 변경이 그 경우입니다).
 
 ## 문서와 알려진 한계
 
