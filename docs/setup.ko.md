@@ -129,3 +129,5 @@ Windows PowerShell:
 
 memo 명령은 저장된 `path`(`30_Conversations/raw/` 아래)를 포함한 JSON을 출력하고, 검색에는 같은 메모가 나와야 합니다. 이는 Vault에 raw note를
 쓰는 것이며 승인된 지식이 아니므로, 새 Vault에서는 `--view current`가 비거나 abstain하는 것이 정상일 수 있습니다.
+
+plugin에는 `pvg_search`, `pvg_memo` 두 도구를 가진 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.

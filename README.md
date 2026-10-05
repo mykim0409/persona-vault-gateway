@@ -117,6 +117,8 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 This saves a raw note (not approved knowledge) and finds it again; `--view current` may legitimately be empty on a new Vault.
 Windows PowerShell version: [docs/setup.md](docs/setup.md#3-set-up-the-agent-plugin-on-each-pc).
 
+The plugin also ships a small MCP server with two tools, `pvg_search` and `pvg_memo`. Agents call them instead of the helper commands. They read the same token config, so the installer is still required and the helpers remain the fallback. In Claude Code they are named `mcp__plugin_persona-vault_pvg__pvg_search` and `mcp__plugin_persona-vault_pvg__pvg_memo`: allowlist only `pvg_search` if you want searches without an approval prompt, and keep `pvg_memo` prompting, because a note is saved only when you explicitly ask.
+
 ## How it works
 
 1. **Capture.** Hooks send sessions to the Gateway, which writes them only under

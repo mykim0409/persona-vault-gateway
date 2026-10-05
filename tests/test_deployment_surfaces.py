@@ -201,7 +201,8 @@ class RenderBlueprintTests(unittest.TestCase):
 
     def test_env_and_setup_token_are_never_literal(self):
         env = dict(re.findall(r"(?m)^      - key: (\w+)\n        value: (\S+)$", self.code))
-        self.assertEqual(env, {**DATA_ENV, "EMBEDDING_PROVIDER": "none", "PVG_SECURE_COOKIES": '"true"'})  # quoted: not a YAML boolean
+        self.assertEqual(env, {**DATA_ENV, "EMBEDDING_PROVIDER": "none", "PVG_SECURE_COOKIES": '"true"',
+                               "PVG_TRUSTED_PROXY_HOPS": '"1"'})  # quoted: not a YAML boolean or int
         self.assertNotIn("FORWARDED_ALLOW_IPS", self.code)
         self.assertRegex(self.code, r"(?m)^      - key: PVG_SETUP_TOKEN\n        generateValue: true$")
         for forbidden in ("ADMIN_PASSWORD", "CLOUDFLARE", "QDRANT", "VAULT_REPO_SSH_URL", "FORWARDED_ALLOW_IPS"):
@@ -244,7 +245,8 @@ class RailwayIacTests(unittest.TestCase):
     def test_env_matches_the_contract_and_leaves_the_setup_token_out(self):
         block = re.search(r"env: \{(.*?)\}", self.code, re.S).group(1)
         env = dict(re.findall(r'(\w+): "([^"]*)"', block))
-        self.assertEqual(env, {"PORT": "8000", **DATA_ENV, "EMBEDDING_PROVIDER": "none", "PVG_SECURE_COOKIES": "true"})
+        self.assertEqual(env, {"PORT": "8000", **DATA_ENV, "EMBEDDING_PROVIDER": "none", "PVG_SECURE_COOKIES": "true",
+                               "PVG_TRUSTED_PROXY_HOPS": "1"})
         self.assertNotIn("FORWARDED_ALLOW_IPS", self.code)
         self.assertNotIn("PVG_SETUP_TOKEN", self.code)  # only the header comment may mention it
         self.assertIn("PVG_SETUP_TOKEN", self.raw)

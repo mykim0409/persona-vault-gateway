@@ -21,6 +21,10 @@ Gateway는 어디에 올려도 같은 방식으로 설치됩니다. 같은 image
 - 플랫폼이 HTTPS를 종단하고 앞단 주소를 모르므로 Railway·Render 설정은 `PVG_SECURE_COOKIES=true`를 둡니다(forwarded 헤더를 신뢰하지
   않고 Secure cookie만 강제하므로 HTTPS로만 접속해야 로그인됩니다). Compose는 기본 `false`입니다.
   [operations.ko.md](operations.ko.md#원격-접근)를 보세요.
+- 플랫폼 proxy 뒤에서는 모든 방문자의 연결 주소가 같으므로 Railway·Render 설정은 `PVG_TRUSTED_PROXY_HOPS=1`도 둡니다. 그러면 admin login과 setup 제한이
+  proxy가 `X-Forwarded-For`에 덧붙인 client 주소 기준으로 집계되어, 다른 방문자의 실패 시도 때문에 운영자가 잠기지 않습니다. Render와 Railway는 `1`,
+  Compose와 loopback은 `0`(기본값)을 씁니다. 이 값은 해당 제한의 집계 기준에만 영향을 주며 cookie나 `FORWARDED_ALLOW_IPS`에는 영향이 없습니다.
+  [operations.ko.md](operations.ko.md#원격-접근)를 보세요.
 - TLS와 접근 제어는 플랫폼 또는 운영자 책임입니다. 이 저장소는 proxy, 인증서, DDNS를 제공하지 않습니다.
 
 ## 비교

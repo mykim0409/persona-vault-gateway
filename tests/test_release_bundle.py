@@ -197,6 +197,8 @@ class ContentTests(BundleCase):
         docs = [rel for rel in rb.ALLOWLIST if rel.endswith(".md") and not rel.endswith(".ko.md")]
         self.assertTrue(docs)
         for rel in docs:
+            if rel == "docs/CURATOR.md":  # English-only by user decision
+                continue
             with self.subTest(doc=rel):
                 self.assertIn(rel[: -len(".md")] + ".ko.md", shipped)
         for rel in (r for r in rb.ALLOWLIST if r.endswith(".ko.md")):
@@ -209,8 +211,9 @@ class ContentTests(BundleCase):
         archive, _ = rb.build_bundle(ROOT, f"gateway-v{version}", image, self.out)
         files = {n.split("/", 1)[1] for n, d in members(archive).items() if d is not None}
         for rel in ("SECURITY.ko.md", "docs/setup.ko.md", "docs/hosting.ko.md", "docs/operations.ko.md",
-                    "docs/CURATOR.ko.md", "docs/metadata.ko.md"):
+                    "docs/metadata.ko.md"):
             self.assertIn(rel, files)
+        self.assertNotIn("docs/CURATOR.ko.md", files)
         self.assertFalse([n for n in files if "WORKING_AGREEMENT" in n])
 
     def test_real_tree_bundle_does_not_ship_obsolete_files(self):

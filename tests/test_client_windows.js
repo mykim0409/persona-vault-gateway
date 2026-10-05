@@ -113,6 +113,39 @@ async function exerciseShell(shell, requests, setFailure, url) {
   }
 }
 
+// The MCP server (pvg-mcp.js) on native Windows: handshake, tool list and one search through the shared helper.
+async function exerciseMcp(requests, url) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pvg mcp 한글 '));
+  try {
+    const appdata = path.join(root, 'AppData', 'Roaming');
+    fs.mkdirSync(path.join(appdata, 'persona-vault-gateway'), { recursive: true });
+    fs.writeFileSync(path.join(appdata, 'persona-vault-gateway', 'env.json'),
+      JSON.stringify({ PERSONA_VAULT_GATEWAY_URL: url, PERSONA_VAULT_TOKEN: TOKEN }));
+    const env = { ...process.env, HOME: root, USERPROFILE: root, APPDATA: appdata, XDG_CONFIG_HOME: path.join(root, 'xdg'), NO_PROXY: '127.0.0.1' };
+    const input = [
+      { id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'ci', version: '1' } } },
+      { id: 2, method: 'tools/list' },
+      { id: 3, method: 'tools/call', params: { name: 'pvg_search', arguments: { query: '한글 query', view: 'current' } } },
+    ].map((message) => `${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`).join('');
+    const before = requests.length;
+    const result = await run(process.execPath, [path.join(SCRIPTS, 'pvg-mcp.js')], env, input); // exits once stdin closes
+    assert.strictEqual(result.status, 0, `mcp: exit ${result.status}\n${result.stderr}`);
+    assert.strictEqual(result.stderr, '');
+    const reply = (id) => JSON.parse(result.stdout.split(/\r?\n/).filter(Boolean).find((line) => JSON.parse(line).id === id));
+    assert.strictEqual(reply(1).result.protocolVersion, '2025-06-18');
+    assert.deepStrictEqual(reply(2).result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo']);
+    assert.deepStrictEqual(reply(3).result, {
+      content: [{ type: 'text', text: 'Answer state: answered (test)\nwindows search result' }], isError: false,
+    });
+    assert.strictEqual(requests.length, before + 1);
+    assert.deepStrictEqual([requests.at(-1).path, requests.at(-1).authorization, requests.at(-1).body.query, requests.at(-1).body.view],
+      ['/gateway/v3/search', `Bearer ${TOKEN}`, '한글 query', 'current']);
+    console.log('windows mcp server: ok');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   if (process.platform !== 'win32') {
     console.log('SKIPPED: test_client_windows.js needs native Windows (powershell.exe / pwsh); this is not a Windows pass.');
@@ -146,6 +179,7 @@ async function main() {
     assert(available.includes('powershell.exe'), 'Windows PowerShell 5.1 (powershell.exe) is required on a Windows runner');
     if (!available.includes('pwsh')) console.log('SKIPPED: pwsh (PowerShell 7) not installed; only 5.1 was exercised.');
     for (const shell of available) await exerciseShell(shell, requests, (query) => { failing = query; }, url);
+    await exerciseMcp(requests, url);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

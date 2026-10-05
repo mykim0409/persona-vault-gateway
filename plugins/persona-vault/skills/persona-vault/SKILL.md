@@ -7,6 +7,16 @@ description: Search PersonaVault Gateway and submit user-requested raw notes. Us
 
 Use PersonaVault Gateway as the read/search path for compacted knowledge and raw evidence.
 
+## Prefer the MCP Tools
+
+If the session lists the PersonaVault MCP tools `pvg_search` and `pvg_memo` (Claude Code names them
+`mcp__plugin_persona-vault_pvg__pvg_search` and `..._pvg_memo`), call them instead of the helper commands.
+They follow the same rules and use the same token config. Their arguments are the helper flags with
+underscores (`view`, `limit`, `note_type` for `--type`, `session_id`, `evidence`, `tags`), and the memo body is the
+`body` argument instead of stdin, so the OS reference is not needed to call them. `pvg_search` never refreshes the index.
+If they are not listed, use the helpers exactly as below. If a tool reports missing config, a rejected token, or
+`client_upgrade_required`, follow the installer and upgrade steps in the matching OS reference.
+
 ## Choose the Execution Environment First
 
 Both OS surfaces run the same helper behavior with the same `--long-flags` (`--view`, `--project`, `--help`);
@@ -29,8 +39,8 @@ does not mean the token is missing. Do not scan the filesystem or try both OS in
 - Never write directly to the vault repo.
 - Keep PersonaVault context with the main agent. Give subagents only task-specific facts and constraints, and delegate PersonaVault search explicitly when needed.
 - Trusted hooks automatically capture completed turns as temporary raw conversation evidence.
-- Use `pvg-rag-search` when the user asks about prior notes, memory, project history, decisions, or context that may already exist in PersonaVault.
-- Use `pvg-agent-memo` only when the current user explicitly asks to save, log, record, remember, or hand off information. Do not infer a save request from usefulness.
+- Use `pvg_search` (or `pvg-rag-search`) when the user asks about prior notes, memory, project history, decisions, or context that may already exist in PersonaVault.
+- Use `pvg_memo` (or `pvg-agent-memo`) only when the current user explicitly asks to save, log, record, remember, or hand off information. Do not infer a save request from usefulness.
 - Treat an explicit note as raw evidence for later curation, never as approved or canonical knowledge.
 - If the helper is absent at its installation path or reports missing config, give the installer from the selected OS reference. Do not switch shells as a recovery loop.
 - Never print or paste the config file: it contains the token. Check existence only, then let the helper load it.
