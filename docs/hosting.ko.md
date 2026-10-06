@@ -39,8 +39,26 @@ Gateway는 어디에 올려도 같은 방식으로 설치됩니다. 같은 image
 
 ## Docker Compose
 
-[setup.ko.md](setup.ko.md#1-gateway-시작)의 명령 그대로입니다. 다른 PC에서 쓰려면 SSH tunnel 같은 암호화된 사설 경로나 운영 중인
-TLS endpoint를 쓰고 평문 공개 HTTP는 쓰지 마세요.
+[setup.ko.md](setup.ko.md#1-gateway-시작-서버에서)의 명령 그대로입니다. 다른 PC에서 쓰려면 HTTPS 호스트 이름(아래 [도메인·DDNS 접속](#도메인ddns-접속))이나 운영 중인
+TLS endpoint를 쓰세요. [SSH tunnel](setup.ko.md#선택-ssh-tunnel)은 선택 사항입니다. 평문 공개 HTTP는 쓰지 마세요.
+
+## 도메인·DDNS 접속
+
+SSH tunnel은 선택 사항입니다. Compose 서버에 HTTPS가 되는 호스트 이름이 있으면 그것을 Gateway URL로 씁니다. DDNS는
+호스트 이름을 바뀌는 공인 IP에 연결할 뿐이며 HTTPS를 켜 주지 않습니다. 나머지는 직접 준비하고 구성합니다.
+
+1. 호스트 이름이 서버의 공인 IP를 가리키게 합니다. IP가 바뀐다면 선택한 DDNS 제공자의 안내에 따라 서버나 공유기에 갱신을 설정합니다.
+2. 이미 쓰는 HTTPS reverse proxy를 구성하고 그 호스트 이름의 유효한 인증서를 설정합니다.
+3. 공개 443 포트가 proxy에 닿게 합니다(가정에서는 공유기 NAT에서 proxy로 포트 포워딩). CGNAT 환경은 DDNS만으로 해결되지 않습니다.
+4. proxy가 Gateway를 가리키게 합니다.
+
+| proxy 실행 위치 | Upstream |
+| --- | --- |
+| Compose 호스트 | `http://127.0.0.1:18080` |
+| Compose network의 컨테이너 | `http://persona-vault-gateway:8000`(컨테이너 안의 `127.0.0.1`은 호스트가 아니라 컨테이너 자신입니다) |
+
+Gateway의 `18080`과 Qdrant는 비공개로 두고, HTTPS는 proxy를 통해 노출합니다. 예를 들어 `https://vault.example.com/setup`을 열고, plugin 설치 프로그램에는 `https://vault.example.com`을 넣습니다. 예시의 호스트 이름은 자신의 주소로 바꾸세요.
+Secure cookie, proxy 신뢰, login 제한은 [operations.ko.md](operations.ko.md#원격-접근)를 보세요.
 
 ## Railway
 
