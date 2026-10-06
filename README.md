@@ -60,17 +60,16 @@ docker compose up -d
 docker compose logs                        # one-time setup code
 ```
 
-By default Compose binds the port only to the server's `127.0.0.1`. From another PC, first open an SSH tunnel and keep it running,
-including whenever the plugin is used later (replace `user` with your server login and `SERVER_IP` with its address):
+By default Compose binds the port only to the server's `127.0.0.1`. Choose the Gateway URL that matches how you reach it:
 
-```bash
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
-```
+| How you reach it | Gateway URL |
+| --- | --- |
+| Hosted service or an existing HTTPS hostname | That HTTPS URL, for example `https://vault.example.com` |
+| Your own domain or DDNS hostname with an HTTPS reverse proxy you configured | `https://vault.example.com`, see [docs/hosting.md](docs/hosting.md#domain-or-ddns-access) |
+| The server is this PC | `http://127.0.0.1:18080` |
+| No HTTPS address (optional) | [SSH tunnel](docs/setup.md#optional-ssh-tunnel), then `http://127.0.0.1:18080` |
 
-Then `http://127.0.0.1:18080` is your Gateway URL. No tunnel is needed if the server is this PC; a hosted service or an
-already configured encrypted address uses its own HTTPS URL.
-
-Open `/setup` on the Gateway URL (for example `http://127.0.0.1:18080/setup`), claim it with the setup code and choose an admin password, enter the
+Open `/setup` on that base URL (for example `https://vault.example.com/setup`), and give the plugin installer the same base URL without `/setup`. Claim it with the setup code and choose an admin password, enter the
 GitHub repository SSH URL, register the shown **public** deploy key on the Vault repository with write
 access, then connect (retry if needed) and issue agent tokens. Until setup finishes, `/healthz` is 200 but
 `/readyz` is 503 and search and capture are off. The connection step does not prove write access.

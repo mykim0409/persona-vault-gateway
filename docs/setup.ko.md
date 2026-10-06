@@ -31,18 +31,14 @@ docker compose logs                    # one-time setup code
 
 ## 2. 브라우저에서 설정 (내 PC에서)
 
-Compose는 기본적으로 포트를 서버의 `127.0.0.1`에만 게시하므로, 서버가 아닌 PC에서는 SSH tunnel을 쓸 수 있습니다. PC에서 아래 명령을
-실행하고 열어 둡니다(출력은 없습니다).
+Compose는 기본적으로 포트를 서버의 `127.0.0.1`에만 게시합니다. 접속 방식에 맞는 Gateway URL(base URL)을 쓰세요.
 
-```bash
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
-```
+- 호스팅 서비스 또는 이미 있는 HTTPS 호스트 이름: 해당 HTTPS URL(예: `https://vault.example.com`).
+- 내 도메인 또는 DDNS 주소 + 직접 구성한 HTTPS reverse proxy: `https://vault.example.com`. [hosting.ko.md](hosting.ko.md#도메인ddns-접속)를 보세요.
+- 서버가 이 PC: `http://127.0.0.1:18080`.
+- 아직 HTTPS 주소가 없을 때: 아래 [선택 사항인 SSH tunnel](#선택-ssh-tunnel) 후 `http://127.0.0.1:18080`.
 
-`user`는 서버의 로그인 이름, `SERVER_IP`는 서버의 주소나 호스트 이름입니다. tunnel이 열려 있는 동안 `http://127.0.0.1:18080`이
-브라우저와 plugin 설치 프로그램의 Gateway URL이며, 나중에 plugin을 쓸 때도 tunnel을 열어 두어야 합니다.
-서버가 이 PC라면 tunnel은 필요 없습니다. 호스팅 서비스나 이미 구성된 암호화 주소는 해당 HTTPS URL을 Gateway URL로 씁니다.
-
-Gateway URL의 `/setup`(예: `http://127.0.0.1:18080/setup`)을 엽니다. 설정을 마치기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과 capture는 꺼져 있습니다.
+Gateway URL의 `/setup`(예: `https://vault.example.com/setup` 또는 `http://127.0.0.1:18080/setup`)을 엽니다. plugin 설치 프로그램에는 나중에 `/setup` 없이 같은 base URL을 넣습니다. 설정을 마치기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과 capture는 꺼져 있습니다.
 
 1. setup code와 admin 비밀번호(16~128자)를 입력해 **Claim this Gateway**.
 2. **Repository SSH URL**에 `git@github.com:OWNER/REPO.git`을 입력하고 **Generate deploy key**.
@@ -53,11 +49,25 @@ Gateway URL의 `/setup`(예: `http://127.0.0.1:18080/setup`)을 엽니다. 설�
 연결 단계는 쓰기 권한을 증명하지 않습니다. 권한이 없으면 이후 sync의 push가 거부되고 Vault sync 화면에 표시됩니다.
 setup code는 채팅에 붙여 넣지 마세요.
 
-Compose는 포트를 서버의 `127.0.0.1`에만 게시합니다(네이티브 서버는 `0.0.0.0`, 호스팅 서비스는 공개 HTTPS라 loopback이 아닙니다).
 평문 HTTP를 공개하지 마세요. token과 admin 비밀번호가 노출됩니다. [operations.ko.md](operations.ko.md#원격-접근)를 보세요.
 
 주의: read token은 `90_Private/`를 포함한 Vault 전체를 읽고, 자동 수집은 대화 내용을 평문으로 Gateway와
 Git에 저장합니다. [SECURITY.ko.md](../SECURITY.ko.md)를 읽으세요.
+
+### 선택: SSH tunnel
+
+<details>
+<summary>HTTPS 주소 없이 다른 PC에서 loopback 포트에 접속</summary>
+
+PC에서 아래 명령을 실행하고 열어 둡니다(출력은 없습니다). `user`는 서버의 로그인 이름, `SERVER_IP`는 서버의 주소나 호스트 이름입니다.
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
+```
+
+tunnel이 열려 있는 동안 `http://127.0.0.1:18080`이 브라우저와 plugin 설치 프로그램의 Gateway URL이며, 나중에 plugin을 쓸 때도 tunnel을 열어 두어야 합니다.
+
+</details>
 
 ## 3. Agent Plugin 설정 (각 PC에서)
 

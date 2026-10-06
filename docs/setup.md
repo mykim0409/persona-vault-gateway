@@ -32,18 +32,14 @@ To run from source, clone the repository and run `docker compose -f compose.yml 
 
 ## 2. Configure in the browser (on your PC)
 
-By default Compose publishes the port only on the server's `127.0.0.1`, so a PC that is not the server can use an SSH tunnel. Run this on the PC
-and leave it open (it prints nothing):
+By default Compose publishes the port only on the server's `127.0.0.1`. Use the Gateway URL (base URL) that matches how you reach it:
 
-```bash
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
-```
+- A hosted service or an existing HTTPS hostname: that HTTPS URL, for example `https://vault.example.com`.
+- Your own domain or DDNS hostname with an HTTPS reverse proxy you configured: `https://vault.example.com`. See [hosting.md](hosting.md#domain-or-ddns-access).
+- The server is this PC: `http://127.0.0.1:18080`.
+- No HTTPS address yet: an [optional SSH tunnel](#optional-ssh-tunnel) below, then `http://127.0.0.1:18080`.
 
-`user` is your login name on the server and `SERVER_IP` is its address or hostname. While the tunnel is open, `http://127.0.0.1:18080` is the
-Gateway URL in the browser and in the plugin installer, and the tunnel must stay open whenever the plugin is used later.
-If the server is this PC, no tunnel is needed. A hosted service or an already configured encrypted address uses its own HTTPS URL as the Gateway URL.
-
-Open `/setup` on your Gateway URL (for example `http://127.0.0.1:18080/setup`). Until setup is finished, only `/healthz` returns 200, `/readyz` returns 503, and search and capture are off.
+Open `/setup` on your Gateway URL (for example `https://vault.example.com/setup` or `http://127.0.0.1:18080/setup`). The plugin installer later takes the same base URL, without `/setup`. Until setup is finished, only `/healthz` returns 200, `/readyz` returns 503, and search and capture are off.
 
 1. Enter the setup code and an admin password (16 to 128 characters), then **Claim this Gateway**.
 2. Enter `git@github.com:OWNER/REPO.git` in **Repository SSH URL** and **Generate deploy key**.
@@ -58,6 +54,21 @@ Never expose plain HTTP publicly: it exposes tokens and the admin password. See 
 
 Note: a read token reads the whole Vault including `90_Private/`, and automatic capture stores conversation content as plaintext in the Gateway and
 in Git. Read [SECURITY.md](../SECURITY.md).
+
+### Optional: SSH tunnel
+
+<details>
+<summary>Reach the loopback port from another PC without an HTTPS address</summary>
+
+Run this on the PC and leave it open (it prints nothing). `user` is your login name on the server and `SERVER_IP` is its address or hostname:
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
+```
+
+While the tunnel is open, `http://127.0.0.1:18080` is the Gateway URL in the browser and in the plugin installer, and the tunnel must stay open whenever the plugin is used later.
+
+</details>
 
 ## 3. Set up the agent plugin (on each PC)
 
