@@ -59,17 +59,16 @@ docker compose up -d
 docker compose logs                        # 일회용 setup code
 ```
 
-Compose는 기본적으로 포트를 서버의 `127.0.0.1`에만 바인딩합니다. 다른 PC에서는 먼저 SSH tunnel을 열고, 나중에 plugin을 쓸 때도
-계속 실행해 두세요(`user`는 서버 로그인 이름, `SERVER_IP`는 서버 주소로 바꿉니다).
+Compose는 기본적으로 포트를 서버의 `127.0.0.1`에만 바인딩합니다. 접속 방식에 맞는 Gateway URL을 고르세요.
 
-```bash
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 user@SERVER_IP
-```
+| 접속 방식 | Gateway URL |
+| --- | --- |
+| 호스팅 서비스 또는 이미 있는 HTTPS 호스트 이름 | 해당 HTTPS URL(예: `https://vault.example.com`) |
+| 내 도메인 또는 DDNS 주소 + 직접 구성한 HTTPS reverse proxy | `https://vault.example.com`, [docs/hosting.ko.md](docs/hosting.ko.md#도메인ddns-접속) 참고 |
+| 서버가 이 PC | `http://127.0.0.1:18080` |
+| HTTPS 주소가 없을 때(선택) | [SSH tunnel](docs/setup.ko.md#선택-ssh-tunnel) 후 `http://127.0.0.1:18080` |
 
-그러면 `http://127.0.0.1:18080`이 Gateway URL입니다. 서버가 이 PC라면 tunnel은 필요 없고, 호스팅 서비스나 이미 구성된 암호화
-주소는 해당 HTTPS URL을 씁니다.
-
-Gateway URL의 `/setup`(예: `http://127.0.0.1:18080/setup`)을 열어 setup code로 claim하고 admin 비밀번호를 정한 뒤 GitHub 저장소 SSH URL을
+이 base URL의 `/setup`(예: `https://vault.example.com/setup`)을 열고, plugin 설치 프로그램에는 `/setup` 없이 같은 base URL을 넣습니다. setup code로 claim하고 admin 비밀번호를 정한 뒤 GitHub 저장소 SSH URL을
 입력하고, 화면의 **public** deploy key를 Vault 저장소에 쓰기 권한으로 등록합니다. 그다음 연결(필요하면
 재시도)하고 agent token을 발급합니다. 설정이 끝나기 전에는 `/healthz`만 200이고 `/readyz`는 503이며 검색과
 capture는 꺼져 있습니다. 연결 단계는 쓰기 권한을 증명하지 못합니다.

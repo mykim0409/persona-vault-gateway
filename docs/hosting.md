@@ -39,8 +39,26 @@ with no per-platform runtime fork. The setup procedure is in [setup.md](setup.md
 
 ## Docker Compose
 
-Exactly the commands in [setup.md](setup.md#1-start-the-gateway). To use it from other PCs, use an encrypted private path such as an SSH tunnel, or a TLS endpoint you already
-operate, and do not use plain public HTTP.
+Exactly the commands in [setup.md](setup.md#1-start-the-gateway-on-the-server). To use it from other PCs, use an HTTPS hostname ([Domain or DDNS access](#domain-or-ddns-access) below) or a TLS endpoint you already
+operate. An [SSH tunnel](setup.md#optional-ssh-tunnel) is optional. Do not use plain public HTTP.
+
+## Domain or DDNS access
+
+An SSH tunnel is optional. If the Compose server has a hostname with HTTPS, use that as the Gateway URL. DDNS
+keeps a hostname mapped to a changing public IP; it does not enable HTTPS. You provide and configure the rest:
+
+1. Point your hostname to the server's public IP. If the IP changes, configure updates on the server or router following your DDNS provider's instructions.
+2. Configure an HTTPS reverse proxy you already use, with a valid certificate for that hostname.
+3. Make public port 443 reach the proxy (at home, forward it on the router NAT to the proxy). Behind CGNAT, DDNS alone cannot solve this.
+4. Point the proxy at the Gateway:
+
+| Proxy runs | Upstream |
+| --- | --- |
+| On the Compose host | `http://127.0.0.1:18080` |
+| In a container on the Compose network | `http://persona-vault-gateway:8000` (inside a container, `127.0.0.1` is the container itself, not the host) |
+
+Keep the Gateway's `18080` and Qdrant private, and expose HTTPS through the proxy. For example, open `https://vault.example.com/setup` and give the plugin installer `https://vault.example.com`, replacing the example hostname with yours.
+For Secure cookies, proxy trust, and the login limiter, see [operations.md](operations.md#remote-access).
 
 ## Railway
 
