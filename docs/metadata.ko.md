@@ -90,6 +90,23 @@ Gateway raw와 legacy agent root는 frontmatter에 `canonical`, `human_accepted`
 
 명시적인 `provenance_mode: reported`는 `provenance_defaulted: false`입니다. provenance가 없어서 fallback이 적용된 경우에는 정규화 결과와 사용자 표시에서 반드시 `reported (default)`로 구분하며, 직접 관찰이나 사람 검토로 승격하지 않습니다.
 
+## 검색 응답의 안전 판정
+
+검색 후보가 자동으로 답변 근거가 되지는 않습니다. 응답 전용 `answer_relevance`는
+`candidate`, `semantic_candidate`, `grounded`, `related_claim`을 구분합니다.
+질의 단어의 일치 범위, 명시적 식별자, 보수적인 인물·승인 표현 검사를 사용합니다.
+일반적인 의미 추론 검증기는 아니므로 `supported`여도 인용한 주장의 귀속·범위·부정을
+읽어야 합니다. 프로젝트 이름이 같다는 것만으로는 증거가 아닙니다.
+의미 검색만으로 찾은 후보도 반환하지만 자동으로 `supported`를 주지는 않습니다.
+대신 `answer_state=evidence`, `reason=semantic_candidates_require_verification`으로 표시합니다.
+질문의 명시적 조건에 어긋나는 후보는 답변 근거가 되지 않습니다.
+
+미해결 충돌은 근거와 같은 `subject_id`나 명시적 관계로 연결될 때만 답변을 보류합니다.
+단순히 키워드가 겹친 결과의 충돌은 전파하지 않습니다. `subject_id`는 프로젝트 전체가
+아닌 같은 주장 단위로 유지해야 합니다. 안전 판정은 응답 `limit`을 적용하기 전에 하며,
+표시할 결과에서 관련 근거가 생략되면 `index.results_truncated`로 알립니다.
+이 응답 필드나 판정 때문에 기존 Markdown을 변경하거나 재색인할 필요는 없습니다.
+
 ## 필드
 
 | 필드 | 의미 |

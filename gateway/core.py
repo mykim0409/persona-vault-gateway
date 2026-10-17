@@ -1013,7 +1013,7 @@ def search_vault(
         if existing.get("match") != item.get("match"):
             existing["match"] = "hybrid"
 
-    candidate_limit = max(20, max_results * 6)
+    candidate_limit = 120  # Independent of the presentation limit; changing limit must not change the safety gate.
     for query_filter in qdrant_bundle_filters(bundle) if query_vector is not None else []:
         request_body: dict[str, Any] = {
             "query": query_vector,
@@ -1086,7 +1086,7 @@ def search_vault(
     if filtered:
         index["semantic_filtered"] = filtered
 
-    for item in keyword_matches(settings, terms, candidate_limit, bundle, context or {}, documents):
+    for item in keyword_matches(settings, terms, None, bundle, context or {}, documents):
         add_result(item)
 
     candidates = list(scored.values())
@@ -1112,24 +1112,25 @@ def search_vault(
             continue
         seen_documents.add(document_id)
         results.append(item)
-        if len(results) >= max_results:
-            break
-
-    # Only evidence seeds related context; an unrelated semantic filler must not pull in its own neighbours.
-    expanded = expand_bundle_results(results, documents, bundle, terms, context or {}, evidence_items(results))
+    evidence = query_evidence(query, results, documents)
+    # Candidate retrieval is not proof of the question. Only grounded evidence seeds claim expansion.
+    expanded = expand_bundle_results(results, documents, bundle, terms, context or {}, evidence)
+    for item in expanded:
+        if item.get("answer_relevance") != "grounded" and claim_linked(item, evidence):
+            item["answer_relevance"] = "related_claim"
     if analysis:
         by_id = analysis["by_id"]
         expanded = [{**item, **result_analysis_fields(by_id.get(item["document_id"], {}))} for item in expanded]
     # Safety is judged on everything found; the cap below only limits what is returned.
-    answer_state = rag_answer_state(expanded, bundle)
+    answer_state = rag_answer_state(expanded, bundle, evidence)
     omitted = 0
+    expanded.sort(key=lambda item: item.get("answer_relevance") not in {"grounded", "related_claim"})
     results = expanded
     if len(expanded) > max_results:
         # Evidence, related context, and anything about the same claim outrank unrelated semantic fillers.
-        anchors = evidence_items(expanded)
-        required = {id(item) for item in expanded if item["match"] == "related" or claim_linked(item, anchors)}
-        omitted = max(0, len(required) - max_results)
-        results = sorted(expanded, key=lambda item: id(item) not in required)[:max_results]
+        required = sum(item.get("answer_relevance") in {"grounded", "related_claim"} for item in expanded)
+        omitted = max(0, required - max_results)
+        results = expanded[:max_results]
         if omitted:
             index["results_truncated"] = omitted
     if analysis:
@@ -1172,9 +1173,61 @@ def prioritize_experience_results(results: list[dict[str, Any]]) -> list[dict[st
     return prioritized
 
 
-def evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    lexical = [item for item in results if item.get("match") in {"keyword", "hybrid"}]
-    return lexical or results[:3]
+def evidence_term(term: str) -> str:
+    # Surface normalization, not a translation or entailment model.
+    if re.search(r"[가-힣]", term):
+        stem = re.sub(r"(?:에서는|으로|에서|에게|에는|은|는|이|가|을|를|의|에|와|과)$", "", term)
+        if len(stem) >= 2:
+            return stem
+    return term
+
+
+def query_evidence(query: str, results: list[dict[str, Any]], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select answer anchors separately from retrieval, leaving all candidates available to the reader."""
+    by_id = {doc["document_id"]: doc for doc in documents}
+    terms = {evidence_term(term) for term in keyword_terms(query)} - {"", "기록", "관련", "내용", "여부"}
+    # Literal identifiers are constraints, not words a semantic neighbour may silently substitute.
+    literals = {term for term in terms if any(c.isdigit() for c in term)}
+    literals.update(
+        evidence_term(word.lower()) for word in TOKEN_RE.findall(query)
+        if re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
+    )
+    actors = re.findall(r"([가-힣]{2,}(?:님)?)(?:이|가)\s+", query)
+    actors += re.findall(r"\b(?:[Bb]y|[Dd]id)\s+([A-Z][\w-]*)\b", query)
+    actors += re.findall(r"\b([A-Z][\w-]*)\s+(?:approved|authorized|decided|adopted)\b", query)
+    # shortcut: lexical guards do not prove arbitrary claims; add an evaluated verifier before claiming entailment.
+    # Approval is not established by a test or a proposal, nor by a different person's action.
+    approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
+    if not approval:
+        actors = []
+    scored = []
+    for item in results:
+        doc = by_id.get(item["document_id"], item)
+        text = str(doc.get("text") or item.get("snippet") or "")
+        search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
+        literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
+        eligible = all(term_in(term, literal_text) for term in literals)
+        if approval:
+            clauses = re.split(r"[\n.!?。;]+|\b(?:but|while)\b|하지만", text, flags=re.I)
+            eligible = eligible and any(
+                all(term_in(actor.lower(), clause.lower()) for actor in actors)
+                and all(term_in(term, clause.lower()) for term in literals)
+                and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
+                and re.search(r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b", clause, re.I)
+                and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
+                for clause in clauses
+            )
+        coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
+        item["answer_relevance"] = "candidate"
+        if eligible and item.get("match") == "semantic":
+            item["answer_relevance"] = "semantic_candidate"
+        if coverage and item.get("match") in {"keyword", "hybrid"}:
+            scored.append((coverage, item))
+    best = max((coverage for coverage, _ in scored), default=0)
+    evidence = [item for coverage, item in scored if coverage == best and coverage >= min(2, len(terms))]
+    for item in evidence:
+        item["answer_relevance"] = "grounded"
+    return evidence
 
 
 def claim_linked(item: dict[str, Any], anchors: list[dict[str, Any]]) -> bool:
@@ -1193,10 +1246,13 @@ def claim_linked(item: dict[str, Any], anchors: list[dict[str, Any]]) -> bool:
     )
 
 
-def rag_answer_state(results: list[dict[str, Any]], bundle: str) -> dict[str, str]:
+def rag_answer_state(results: list[dict[str, Any]], bundle: str, evidence: list[dict[str, Any]]) -> dict[str, str]:
     if not results:
         return {"state": "abstain", "reason": "no_relevant_evidence"}
-    evidence = evidence_items(results)
+    if not evidence:
+        if any(item.get("answer_relevance") == "semantic_candidate" for item in results):
+            return {"state": "evidence", "reason": "semantic_candidates_require_verification"}
+        return {"state": "abstain", "reason": "insufficient_or_mismatched_evidence"}
     # A semantic-only result that contradicts or shares a claim with the evidence must still gate it;
     # unrelated semantic fillers must not.
     linked = [item for item in results if claim_linked(item, evidence)]
@@ -1206,6 +1262,8 @@ def rag_answer_state(results: list[dict[str, Any]], bundle: str) -> dict[str, st
         item.get("memory_type") == "canonical"
         and item.get("review_state") == "human_accepted"
         and item.get("temporal_state") == "current"
+        and item.get("metadata_valid", True)
+        and float((item.get("ranking") or {}).get("applicability") or 0) >= 0
         for item in evidence
     ):
         return {"state": "supported", "reason": "current_human_accepted_knowledge"}
@@ -1478,6 +1536,7 @@ def render_rag_context(item: dict[str, Any]) -> str:
             "provenance_family_ids",
             "conflict_state",
             "retrieval_state",
+            "answer_relevance",
         )
         if item.get(key) not in (None, "", [], {})
     }
@@ -1496,7 +1555,7 @@ def expand_bundle_results(
     context: dict[str, Any],
     seeds: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    if bundle not in {"current", "history", "conflicts"} or not results:
+    if bundle not in {"auto", "current", "history", "conflicts"} or not results:
         return results
     seeds = results if seeds is None else seeds
     selected = {item["document_id"] for item in results}
@@ -1507,15 +1566,14 @@ def expand_bundle_results(
         relations = item.get("relations") if isinstance(item.get("relations"), dict) else {}
         related_ids.update(reference_ids(relations.get("contradicts")))
         related_ids.update(reference_ids(relations.get("supersedes")))
-    if bundle == "conflicts":
-        for document in documents:
-            relations = document.get("relations") if isinstance(document.get("relations"), dict) else {}
-            if seed_ids & set(reference_ids(relations.get("contradicts"))):
-                related_ids.add(document["document_id"])
+    for document in documents:
+        relations = document.get("relations") if isinstance(document.get("relations"), dict) else {}
+        if seed_ids & set(reference_ids(relations.get("contradicts"))):
+            related_ids.add(document["document_id"])
     for document in documents:
         same_subject = document.get("subject_id") and document.get("subject_id") in subjects
         include = document["document_id"] in related_ids
-        if bundle == "current":
+        if bundle in {"auto", "current"}:
             include = (include or bool(same_subject)) and bundle_accepts(document, "current")
         elif bundle == "history" and same_subject:
             include = document.get("temporal_state") in {
@@ -1608,7 +1666,7 @@ def searchable_text(document: dict[str, Any], chunk: str) -> str:
 def keyword_matches(
     settings: Settings,
     terms: list[str],
-    limit: int,
+    limit: int | None,
     bundle: str = "auto",
     context: dict[str, Any] | None = None,
     documents: list[dict[str, Any]] | None = None,

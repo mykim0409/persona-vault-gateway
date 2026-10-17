@@ -90,6 +90,23 @@ permission.
 
 An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When a fallback is applied because provenance is missing, the normalized result and the user-facing display must distinguish it as `reported (default)`, and it is not promoted to direct observation or human review.
 
+## Search response safety
+
+Search candidates are not automatically answer evidence. Response-only `answer_relevance`
+distinguishes `candidate`, `semantic_candidate`, `grounded`, and `related_claim`.
+Grounding uses query-term coverage, explicit identifiers, and conservative actor/approval guards.
+It is not a general entailment checker: `supported` still requires reading the cited claim,
+including its attribution, scope, and negation. A shared project name alone is not proof.
+Semantic-only candidates remain available with `answer_state=evidence` and
+`reason=semantic_candidates_require_verification`, not automatic `supported`.
+Candidates that violate explicit question constraints do not become answer evidence.
+
+Unresolved conflicts gate the answer only when linked to grounded evidence by the same
+`subject_id` or explicit relations, not merely because a result shares a keyword.
+Keep `subject_id` claim-specific, not project-wide. Safety runs before the response `limit`;
+`index.results_truncated` warns when related evidence was omitted from the displayed results.
+Neither this response field nor its computation changes stored Markdown or requires reindexing.
+
 ## Fields
 
 | Field | Meaning |

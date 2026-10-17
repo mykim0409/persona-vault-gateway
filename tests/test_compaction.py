@@ -251,7 +251,7 @@ def workflow_checks() -> None:
                 ] if query in {"Scoped knowledge", "Historical knowledge"} else []
                 return {
                     "index": {"stale": False}, "results": results,
-                    "answer_state": rag_answer_state(results, kwargs["bundle"]),
+                    "answer_state": rag_answer_state(results, kwargs["bundle"], results),
                 }
 
             with patch.object(core, "qdrant_index_current", side_effect=lambda _s, **kwargs: current or kwargs.get("allow_stale", False)), patch.object(
@@ -1047,7 +1047,8 @@ conflict_state: unresolved
 ---
 Two claims remain unresolved after their raw sources were consolidated.
 """)
-    assert rag_answer_state([{**disputed, "match": "keyword"}], "current")["state"] == "review_required"
+    disputed_results = [{**disputed, "match": "keyword"}]
+    assert rag_answer_state(disputed_results, "current", disputed_results)["state"] == "review_required"
     with TemporaryDirectory(prefix="pvg-compaction-") as temporary:
         root = Path(temporary)
 

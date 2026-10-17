@@ -319,6 +319,7 @@ def run_semantic_disabled_checks() -> None:
         assert "pvg-src" not in core.searchable_text({"subject_id": "s"}, core.chunk_text(f"x {marker}")[0])
         public = app_module.search_response(current, "current")
         assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results"}
+        assert public["results"][0]["answer_relevance"] == "grounded"
         assert search_vault(settings, reader, "no-such-token-anywhere", 5, True)["answer_state"]["state"] == "abstain"
 
         # Index stats/commands and wiki health are explicit no-ops.
@@ -1123,7 +1124,7 @@ def run_search_regression_checks() -> None:
             assert "20_Projects/groceries.md" not in paths(natural), paths(natural)
             assert item_for(natural, "20_Projects/rollback.md")["match"] == "semantic"
             assert item_for(natural, "20_Projects/deployment-log.md")["match"] in {"keyword", "hybrid"}
-            assert natural["answer_state"]["state"] == "supported", natural["answer_state"]
+            assert natural["answer_state"] == {"state": "evidence", "reason": "semantic_candidates_require_verification"}, natural["answer_state"]
             assert natural["index"].get("fallback_reason") is None and not natural["index"]["stale"]
             # A valid but weak semantic candidate (cosine 1/sqrt(6) < 0.5) is kept, after all lexical matches.
             partial = item_for(natural, "20_Projects/partial.md")
