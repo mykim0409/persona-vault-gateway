@@ -26,6 +26,7 @@ uv run --frozen python tests/test_core.py
 uv run --frozen python tests/test_admin.py
 uv run --frozen python tests/test_sync.py
 uv run --frozen python tests/test_rag_benchmark.py
+uv run --frozen python tests/test_search_evidence.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
 uv run --frozen python tests/test_bootstrap.py
@@ -41,7 +42,7 @@ uv run --frozen python tests/test_capture_integration.py
 | 핵심·auth·path 정책 | `test_core.py` |
 | admin 화면·login limiter | `test_admin.py` |
 | Compose smoke 보조 로직(skip 규칙, backup·restore, 테스트 전용 transport)과 네이티브 `gateway.server` 첫 사용 흐름 | `test_sync.py` |
-| RAG 검색 | `test_rag_benchmark.py` |
+| RAG 검색·질문/주장 안전성 | `test_rag_benchmark.py`, `test_search_evidence.py` |
 | wiki·compaction | `test_wiki.py`, `test_compaction.py` |
 | SSH deploy key·known_hosts 보조 함수(`gateway.bootstrap`) | `test_bootstrap.py` |
 | 릴리스 설치 bundle(번역 문서 쌍 포함) | `test_release_bundle.py` |

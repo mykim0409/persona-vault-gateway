@@ -153,6 +153,7 @@ SEARCH_RESULT_FIELDS = (
     "review_state",
     "temporal_state",
     "conflict_state",
+    "answer_relevance",
 )
 
 
