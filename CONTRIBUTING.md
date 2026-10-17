@@ -26,6 +26,7 @@ uv run --frozen python tests/test_core.py
 uv run --frozen python tests/test_admin.py
 uv run --frozen python tests/test_sync.py
 uv run --frozen python tests/test_rag_benchmark.py
+uv run --frozen python tests/test_search_evidence.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
 uv run --frozen python tests/test_bootstrap.py
@@ -41,7 +42,7 @@ uv run --frozen python tests/test_capture_integration.py
 | Core, auth, and path policy | `test_core.py` |
 | Admin screens and login limiter | `test_admin.py` |
 | Compose smoke helper logic (skip rules, backup and restore, test-only transport) and the native `gateway.server` first-use flow | `test_sync.py` |
-| RAG search | `test_rag_benchmark.py` |
+| RAG search and question/claim safety | `test_rag_benchmark.py`, `test_search_evidence.py` |
 | Wiki and compaction | `test_wiki.py`, `test_compaction.py` |
 | SSH deploy key and known_hosts helpers (`gateway.bootstrap`) | `test_bootstrap.py` |
 | Release install bundle (including localized doc pairs) | `test_release_bundle.py` |
