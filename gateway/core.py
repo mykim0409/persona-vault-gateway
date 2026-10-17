@@ -1192,14 +1192,20 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         evidence_term(word.lower()) for word in TOKEN_RE.findall(query)
         if re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
     )
-    actors = re.findall(r"([가-힣]{2,}(?:님)?)(?:이|가)\s+", query)
+    subject_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:이|가|은|는|께서)(?=\s)"
+    actors = [
+        match[1] for match in re.finditer(subject_pattern, query)
+        if not match[0].endswith(("다는", "라는", "하는"))
+    ]
+    actors += re.findall(
+        r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:인가(?:요)?|인지|입니까)(?=$|[\s?!.])", query
+    )
     actors += re.findall(r"\b(?:[Bb]y|[Dd]id)\s+([A-Z][\w-]*)\b", query)
     actors += re.findall(r"\b([A-Z][\w-]*)\s+(?:approved|authorized|decided|adopted)\b", query)
+    actors = {actor.casefold() for actor in actors} - {"사람", "승인자", "담당자", "주체", "인물"}
     # shortcut: lexical guards do not prove arbitrary claims; add an evaluated verifier before claiming entailment.
     # Approval is not established by a test or a proposal, nor by a different person's action.
     approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
-    if not approval:
-        actors = []
     scored = []
     for item in results:
         doc = by_id.get(item["document_id"], item)
@@ -1208,15 +1214,33 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
         eligible = all(term_in(term, literal_text) for term in literals)
         if approval:
-            clauses = re.split(r"[\n.!?。;]+|\b(?:but|while)\b|하지만", text, flags=re.I)
-            eligible = eligible and any(
-                all(term_in(actor.lower(), clause.lower()) for actor in actors)
-                and all(term_in(term, clause.lower()) for term in literals)
-                and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
-                and re.search(r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b", clause, re.I)
-                and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
-                for clause in clauses
-            )
+            # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
+            eligible = eligible and len(actors) == 1
+            approval_found = False
+            clauses = re.split(r"[\n.!?。;]+|\b(?:but|while)\b|하지만", text, flags=re.I) if eligible else []
+            for clause in clauses:
+                verb = re.search(r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b", clause, re.I)
+                if not verb:
+                    continue
+                # Bind the approval to its subject, not to another participant elsewhere in the sentence.
+                subjects = re.findall(subject_pattern, clause[:verb.start()])
+                if subjects:
+                    source_actor = subjects[-1]
+                else:
+                    english_actor = re.match(r"\s+by\s+([A-Za-z][\w-]*)\b", clause[verb.end():], re.I) or re.search(
+                        r"\b([A-Za-z][\w-]*)\s+(?:(?:has|had)\s+)?$", clause[:verb.start()], re.I
+                    )
+                    source_actor = english_actor[1] if english_actor else ""
+                if source_actor.casefold() not in actors:
+                    continue
+                if (
+                    all(term_in(term, clause.lower()) for term in literals)
+                    and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
+                    and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
+                ):
+                    approval_found = True
+                    break
+            eligible = eligible and approval_found
         coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
         item["answer_relevance"] = "candidate"
         if eligible and item.get("match") == "semantic":

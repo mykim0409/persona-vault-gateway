@@ -56,10 +56,66 @@ class SearchEvidenceTests(unittest.TestCase):
                 self.note("trial", body)
                 self.assertEqual(self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "abstain")
 
+    def test_korean_approval_actor_question_variants(self):
+        self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
+        for actor, expected in (("홍길동", "abstain"), ("김민수", "supported")):
+            questions = (
+                f"{actor}은 ExampleMiner FP16 도입을 최종 승인했나?",
+                f"{actor}는 ExampleMiner FP16 도입을 최종 승인했나?",
+                f"{actor}님께서 ExampleMiner FP16 도입을 최종 승인했나?",
+                f"{actor}님이 ExampleMiner FP16 도입을 최종 승인했나?",
+                f"ExampleMiner FP16 도입을 최종 승인한 사람은 {actor}인가?",
+                f"ExampleMiner FP16 도입을 최종 승인한 사람은 {actor}인가요?",
+                f"ExampleMiner FP16 도입을 최종 승인한 사람은 {actor}인지 확인해줘",
+                f"ExampleMiner FP16 도입을 최종 승인자는 {actor}입니까?",
+            )
+            for question in questions:
+                for limit in (1, 4, 20):
+                    with self.subTest(question=question, limit=limit):
+                        self.assertEqual(self.search(question, limit)["answer_state"]["state"], expected)
+
+    def test_approval_actor_must_be_linked_to_the_verb(self):
+        for body in (
+            "김민수가 ExampleMiner FP16 도입을 최종 승인했고 홍길동은 실험에 참여했다.",
+            "홍길동은 실험에 참여했고 김민수가 ExampleMiner FP16 도입을 최종 승인했다.",
+        ):
+            self.note("approval", body)
+            for actor, expected in (("홍길동", "abstain"), ("김민수", "supported")):
+                with self.subTest(body=body, actor=actor):
+                    result = self.search(f"ExampleMiner FP16 도입을 최종 승인한 사람은 {actor}인가?")
+                    self.assertEqual(result["answer_state"]["state"], expected)
+
+    def test_unparsed_or_ambiguous_approval_actor_cannot_pass(self):
+        self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
+        for question in (
+            "ExampleMiner FP16 도입 최종 승인 기록",
+            "ExampleMiner FP16 도입 최종 승인: 홍길동?",
+            "홍길동(검토자) ExampleMiner FP16 도입을 최종 승인했나?",
+            "홍길동이 ExampleMiner FP16 도입을 최종 승인한 사람이 김민수인가?",
+        ):
+            with self.subTest(question=question):
+                result = self.search(question)
+                self.assertTrue(result["results"])
+                self.assertEqual(result["answer_state"]["state"], "abstain")
+
     def test_english_attribution(self):
-        self.note("approval", "Alice approved ProjectX FP16 adoption. Bob ran the trial.")
-        self.assertEqual(self.search("Did Bob approve ProjectX FP16 adoption?")["answer_state"]["state"], "abstain")
-        self.assertEqual(self.search("Did Alice approve ProjectX FP16 adoption?")["answer_state"]["state"], "supported")
+        for body in (
+            "Alice approved ProjectX FP16 adoption. Bob ran the trial.",
+            "Alice has approved ProjectX FP16 adoption and Bob ran the trial.",
+            "ProjectX FP16 adoption was approved by Alice. Bob ran the trial.",
+        ):
+            with self.subTest(body=body):
+                self.note("approval", body)
+                self.assertEqual(self.search("Did Bob approve ProjectX FP16 adoption?")["answer_state"]["state"], "abstain")
+                self.assertEqual(self.search("Did Alice approve ProjectX FP16 adoption?")["answer_state"]["state"], "supported")
+
+    def test_unparsed_actor_does_not_become_provisional_semantic_evidence(self):
+        self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다.")
+        documents = core.vault_documents(self.settings)
+        result = {**documents[0], "match": "semantic"}
+        evidence = core.query_evidence("ExampleMiner FP16 도입 최종 승인: 홍길동?", [result], documents)
+        self.assertEqual(result["answer_relevance"], "candidate")
+        self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "abstain")
 
     def test_approval_of_another_project_or_a_trial_is_not_adoption(self):
         for body in (

@@ -95,6 +95,9 @@ An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When 
 Search candidates are not automatically answer evidence. Response-only `answer_relevance`
 distinguishes `candidate`, `semantic_candidate`, `grounded`, and `related_claim`.
 Grounding uses query-term coverage, explicit identifiers, and conservative actor/approval guards.
+Approval queries require one identifiable actor linked to the approval verb in the source.
+Missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
+an empty actor extraction is never treated as a match, even for actor-free approval queries.
 It is not a general entailment checker: `supported` still requires reading the cited claim,
 including its attribution, scope, and negation. A shared project name alone is not proof.
 Semantic-only candidates remain available with `answer_state=evidence` and
