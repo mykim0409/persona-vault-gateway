@@ -95,6 +95,9 @@ Gateway raw와 legacy agent root는 frontmatter에 `canonical`, `human_accepted`
 검색 후보가 자동으로 답변 근거가 되지는 않습니다. 응답 전용 `answer_relevance`는
 `candidate`, `semantic_candidate`, `grounded`, `related_claim`을 구분합니다.
 질의 단어의 일치 범위, 명시적 식별자, 보수적인 인물·승인 표현 검사를 사용합니다.
+승인 질의는 인물 한 명을 식별하고 원문의 승인 행위 주체와 연결할 수 있어야 합니다.
+인물이 없거나 모호하거나 지원하지 않는 표현이면 후보는 유지하되 `abstain`을 반환합니다.
+인물을 지정하지 않은 승인 질의도 빈 인물 추출 결과를 조건 충족으로 간주하지 않습니다.
 일반적인 의미 추론 검증기는 아니므로 `supported`여도 인용한 주장의 귀속·범위·부정을
 읽어야 합니다. 프로젝트 이름이 같다는 것만으로는 증거가 아닙니다.
 의미 검색만으로 찾은 후보도 반환하지만 자동으로 `supported`를 주지는 않습니다.
