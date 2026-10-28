@@ -107,6 +107,9 @@ same block; shared project names and dates cannot replace the entire requested t
 alternatives, not a claim that every operation succeeded. English property questions using `cover`,
 `contain`, `include`, `describe`, or `what/which is ... of/in/for ...` require their named Latin terms
 in that block. Loose keyword lookups still permit cross-language wording and explicit metadata aliases.
+Korean `확정`/`미정` state queries also bind the named object and its state within one clause.
+A generic purchase discussion cannot establish purchase of a different object. Negated, tentative,
+or future finalization is not affirmative evidence; explicit negative and open-status queries remain searchable.
 Approval/adoption queries and claims that someone confirmed or verified something require one identifiable
 actor linked to that action in the source.
 English `adopt/adopted` claims check the full named person or organization, the actual adoption action,
@@ -143,9 +146,15 @@ Semantic-only candidates remain available with `answer_state=evidence` and
 `reason=semantic_candidates_require_verification`, not automatic `supported`.
 Candidates that violate explicit question constraints do not become answer evidence.
 
-An unresolved conflict on a grounded document still gates the answer. Other conflicts gate it
+An unresolved conflict on a grounded document normally gates the answer. Other conflicts gate it
 when linked by the same `subject_id` or explicit relations, not merely by a shared keyword.
-This does not localize document-level conflict metadata to individual paragraphs.
+For a well-formed `decision_ledger`, `이관됨` rows remain retrieval candidates and provenance/navigation,
+not independent answer anchors. A ledger with explicitly localized dispute clauses can return response-only
+`answer_conflict_state` for the query while preserving its original document-wide `conflict_state`.
+Unrelated disputed subjects do not block valid decisions. Same-subject disputes (including different numeric
+values), explicit claim relations, unknown scope, malformed ledgers, and broad row-only queries remain gated.
+This is conservative lexical scoping, not a general conflict resolver; ordinary prose documents keep their
+document-level gate. It does not modify source rows, origin markers, metadata, or the vector index.
 Keep `subject_id` claim-specific, not project-wide. Safety runs before the response `limit`;
 `index.results_truncated` warns when related evidence was omitted from the displayed results.
 Neither this response field nor its computation changes stored Markdown or requires reindexing.
