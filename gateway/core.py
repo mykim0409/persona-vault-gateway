@@ -1182,6 +1182,35 @@ def evidence_term(term: str) -> str:
     return term
 
 
+def numeric_evidence_literals(text: str) -> set[str]:
+    """Keep whole quantities and digit-bearing identifiers out of the lossy keyword tokenizer."""
+    literals: set[str] = set()
+    atoms = re.findall(
+        r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?[a-z가-힣_%]*|"
+        r"(?:[0-9a-z가-힣_]+|\.\d+)(?:[.-][0-9a-z가-힣_]+)*%?)",
+        text.lower(),
+    )
+    for atom in atoms:
+        if not any(char.isdigit() for char in atom):
+            continue
+        atom = evidence_term(atom)
+        if re.match(r"[+-]?(?:\d|\.\d)", atom):
+            atom = re.sub(r"(?:보다|이며|만|이었다|였다|이다|이고)$", "", atom)
+        number = re.fullmatch(r"([+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))([a-z가-힣_%]*)", atom)
+        if number:
+            # String normalization preserves every digit without float rounding or a precision limit.
+            integer, _, fraction = number[1].replace(",", "").lstrip("+-").partition(".")
+            value = (integer.lstrip("0") or "0") + (("." + fraction.rstrip("0")) if fraction.rstrip("0") else "")
+            if number[1].startswith("-") and value != "0":
+                value = "-" + value
+            literals.update((value, value + number[2]))
+        else:
+            literals.add(atom)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", atom):
+                literals.update((atom[:4], atom[5:]))
+    return literals
+
+
 def normalize_evidence_dates(text: str) -> str:
     """Normalize calendar notation without changing dates or inventing a missing year."""
     def replace(match: re.Match[str]) -> str:
@@ -1292,11 +1321,12 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
     query = normalize_evidence_dates(query)
     terms = {evidence_term(term) for term in keyword_terms(query)} - {"", "기록", "관련", "내용", "여부"}
     # Literal identifiers are constraints, not words a semantic neighbour may silently substitute.
-    literals = {term for term in terms if any(c.isdigit() for c in term)}
-    literals.update(
+    numbers = numeric_evidence_literals(query)
+    literals = {
         evidence_term(word.lower()) for word in TOKEN_RE.findall(query)
-        if re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
-    )
+        if not any(char.isdigit() for char in word)
+        and re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
+    }
     # Tokenization drops single-letter flags and their sign; keep explicit options as constraints.
     literals.update(re.findall(r"(?<![\w+-])[+-][a-zA-Z](?![a-zA-Z0-9_-])", query.lower()))
     subject_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:이|가|은|는|께서)(?=\s)"
@@ -1342,7 +1372,7 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             text = normalize_evidence_dates(block)
             search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
             literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
-            eligible = all(term_in(term, literal_text) for term in literals)
+            eligible = (not numbers or numbers <= numeric_evidence_literals(literal_text)) and all(term_in(term, literal_text) for term in literals)
             if approval or confirmation or decision:
                 # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
                 eligible = eligible and len(actors) == 1
@@ -1351,10 +1381,16 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                 row = text.splitlines()[-1]
                 ledger_decision = decision and doc.get("kind") == "decision_ledger" and bool(re.search(r"\|\s*(?:결정|decision)\s*\|", row, re.I))
                 pattern = action_pattern + (r"|재확인(?:했다|하였음|함)(?![가-힣])" if ledger_decision else "")
-                clauses = re.split(r"[\n.!。;]+|\b(?:but|while)\b|하지만", row if ledger_decision else text, flags=re.I) if eligible else []
+                clauses = re.split(r"[\n!。;]+|\.(?!\d)|\b(?:but|while)\b|하지만", row if ledger_decision else text, flags=re.I) if eligible else []
                 for clause in clauses:
                     verb = re.search(pattern, clause, re.I)
                     if not verb:
+                        continue
+                    # shortcut: numeric attribution in multi-action clauses needs finer binding; abstain for now.
+                    if numbers and len(re.findall(
+                        r"(?:승인|확인|검증|결정|선택)(?:했|하였|하셨|함|됐|되었|됨)|"
+                        r"\b(?:approved|authorized|confirmed|verified|decided|chose)\b", clause, re.I,
+                    )) > 1:
                         continue
                     # Bind the action to its subject, not another participant elsewhere in the sentence.
                     subjects = re.findall(subject_pattern, clause[:verb.start()])
@@ -1370,7 +1406,7 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     if confirmation:
                         # Do not combine a confirmed object with completion words from another clause.
                         scope = clause[:verb.start()] if verb[0].startswith(("확인", "검증")) else clause[verb.end():]
-                        if not confirmation_terms or not all(
+                        if (numbers and not numbers <= numeric_evidence_literals(scope)) or not confirmation_terms or not all(
                             term_in(term, (clause[:verb.start()] if term == "personally" else scope).lower())
                             for term in confirmation_terms
                         ):
@@ -1382,7 +1418,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     if decision and re.search(r"\b(?:안|못|not|never)\s+(?:personally\s+)?$", clause[:verb.start()], re.I):
                         continue
                     if (
-                        all(term_in(term, (text if ledger_decision else clause).lower()) for term in literals)
+                        (not numbers or numbers <= numeric_evidence_literals(text if ledger_decision else clause))
+                        and all(term_in(term, (text if ledger_decision else clause).lower()) for term in literals)
                         and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
                         and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", negation_text, re.I)
                     ):
