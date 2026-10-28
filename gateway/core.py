@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any
 
-from .wiki import _SRC_RE
+from .wiki import _SRC_RE, _cells, ledger_entries
 
 
 SCHEMA = """
@@ -1237,7 +1237,7 @@ def normalize_evidence_dates(text: str) -> str:
     return text
 
 
-def evidence_blocks(text: str) -> list[str]:
+def evidence_blocks(text: str, *, kind: str = "") -> list[str]:
     """Keep paragraphs, list items and table rows separate with their local parent context."""
     text = _SRC_RE.sub("", text).rstrip()
     blocks: list[str] = []
@@ -1314,6 +1314,10 @@ def evidence_blocks(text: str) -> list[str]:
             flush()
             table_header = line
         elif table_header and "|" in line:
+            cells = _cells(line)
+            if kind == "decision_ledger" and cells and len(cells) == 7 and cells[3] == "이관됨":
+                # A retained origin is navigation/provenance, not an independent current assertion.
+                continue
             blocks.append("\n".join(context() + [table_header, line]))
         else:
             table_header = ""
@@ -1392,12 +1396,21 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         [re.compile(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", re.I) for term in group.lower().split("/")]
         for group in re.findall(r"(?<![\w/])[A-Za-z][A-Za-z_-]+(?:/[A-Za-z][A-Za-z_-]+)+(?![A-Za-z_/-])", query)
     ]
+    finalization = bool(re.search(r"확정|미정", query))
+    negative_state = re.compile(r"미확정|미정|않|못|없|아니|보류")
+    state_lookup = bool(re.search(r"여부|상태", query))
+    finalization_terms = {
+        term for term in terms
+        if not re.match(r"(?:미)?확정|미정|없음$|않음$", term) and term not in {"상태", "아님"}
+    }
     scored = []
     for item in results:
+        item.pop("answer_conflict_state", None)
         doc = by_id.get(item["document_id"], item)
-        blocks = evidence_blocks(str(doc.get("text") or item.get("snippet") or ""))
+        blocks = evidence_blocks(str(doc.get("text") or item.get("snippet") or ""), kind=str(doc.get("kind") or ""))
         best_coverage = 0
         best_text = ""
+        best_blocks: list[str] = []
         semantic_eligible = False
         for block in blocks:
             text = normalize_evidence_dates(block)
@@ -1462,21 +1475,82 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                 eligible = eligible and action_found
             if property_query:
                 eligible = eligible and all(pattern.search(search_text) for pattern in lexical_patterns.values())
+            if finalization:
+                # Bind the named object and its state in one clause, not shared project/purchase words.
+                headings = "\n".join(line for line in text.splitlines() if re.match(r"^\s*#{1,6} ", line)).lower()
+                state_found = False
+                for clause in re.split(r"[\n!。;]+|\.(?!\d)|\bbut\b|하지만", text, flags=re.I):
+                    if not re.search(r"확정|미정", clause):
+                        continue
+                    if not all(term_in(term, headings + "\n" + clause.lower()) for term in finalization_terms):
+                        continue
+                    if not state_lookup:
+                        if bool(negative_state.search(query)) != bool(negative_state.search(clause)):
+                            continue
+                        if not negative_state.search(query) and re.search(r"\?|여부|미확인|추정|가정|예정|계획|예상", clause):
+                            continue
+                    state_found = True
+                    break
+                eligible = eligible and state_found
             coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
             semantic_eligible |= eligible
             if coverage > best_coverage:
                 best_coverage, best_text = coverage, block
+                best_blocks = [block]
+            elif coverage and coverage == best_coverage:
+                best_blocks.append(block)
         item["answer_relevance"] = "candidate"
         if semantic_eligible and item.get("match") == "semantic":
             item["answer_relevance"] = "semantic_candidate"
         if best_coverage and item.get("match") in {"keyword", "hybrid"}:
             scored.append((best_coverage, item))
             item["snippet"] = rag_snippet(best_text, list(terms))
+            if doc.get("kind") == "decision_ledger" and doc.get("conflict_state") == "unresolved":
+                item["answer_conflict_state"] = ledger_answer_conflict(doc, best_blocks, terms)
     best = max((coverage for coverage, _ in scored), default=0)
     evidence = [item for coverage, item in scored if coverage == best and coverage >= min(2, len(terms))]
-    for item in evidence:
-        item["answer_relevance"] = "grounded"
+    for coverage, item in scored:
+        if coverage == best and coverage >= min(2, len(terms)):
+            item["answer_relevance"] = "grounded"
+        else:
+            item.pop("answer_conflict_state", None)
     return evidence
+
+
+def ledger_answer_conflict(document: dict[str, Any], blocks: list[str], terms: set[str]) -> str:
+    """Localize an aggregate ledger flag only when its disputed subjects are explicit."""
+    text = str(document.get("text") or "")
+    rows, problems = ledger_entries(text, path=str(document.get("path") or ""))
+    selected = {_cells(block.splitlines()[-1])[0] for block in blocks if _cells(block.splitlines()[-1])}
+    relations = document.get("relations") or {}
+    if (problems or not selected or not selected <= {row["id"] for row in rows}
+            or document.get("subject_id") or relations.get("contradicts")
+            or any(row["status"] != "유효" for row in rows if row["id"] in selected)):
+        return "unresolved"
+    dispute = re.compile(r"미해결|충돌|불일치|상충|\bunresolved\b|\bdisput\w*|\bconflict\w*", re.I)
+    clauses = [
+        (row["id"], clause) for row in rows if row["status"] != "이관됨"
+        for cell in row["cells"][4:6]
+        for clause in re.split(r"[;!。]+|\.(?!\d)", cell)
+        if dispute.search(clause)
+    ]
+    # No localized dispute (or a prose-level one) leaves the original safety gate intact.
+    if not clauses or any(dispute.search(line) for line in text.splitlines() if not _cells(line)):
+        return "unresolved"
+    if any(row_id in selected and re.search(
+        r"이\s+(?:결정|계약)|그\s|해당|상기|\b(?:this|that|it|same|above)\b", clause, re.I,
+    ) for row_id, clause in clauses):
+        return "unresolved"
+    context = "\n".join(line for line in text.splitlines() if re.match(r"^\s*#{1,6} ", line))
+    context += "\n" + " ".join(row["id"] for row in rows)
+    context_terms = {evidence_term(term) for term in keyword_terms(context)}
+    specific = terms - context_terms - {"충돌", "미해결", "상태", "내용", "계약", "unresolved", "conflict", "disputed"}
+    specific = {term for term in specific if len(term) > 1 and not re.fullmatch(r"\d+(?:분|초|시간)?", term)}
+    if not specific:
+        return "unresolved"
+    # Any shared subject is enough to keep a dispute; do not require its numeric value to agree.
+    # shortcut: literal subjects cannot resolve arbitrary paraphrased disputes; keep explicit relations authoritative.
+    return "unresolved" if any(term_in(term, clause.lower()) for _, clause in clauses for term in specific) else "none"
 
 
 def claim_linked(item: dict[str, Any], anchors: list[dict[str, Any]]) -> bool:
@@ -1505,7 +1579,9 @@ def rag_answer_state(results: list[dict[str, Any]], bundle: str, evidence: list[
     # A semantic-only result that contradicts or shares a claim with the evidence must still gate it;
     # unrelated semantic fillers must not.
     linked = [item for item in results if claim_linked(item, evidence)]
-    if bundle == "conflicts" or any(item.get("conflict_state") == "unresolved" for item in linked):
+    if bundle == "conflicts" or any(
+        item.get("answer_conflict_state", item.get("conflict_state")) == "unresolved" for item in linked
+    ):
         return {"state": "review_required", "reason": "unresolved_conflict"}
     if bundle == "current" and any(
         item.get("memory_type") == "canonical"
@@ -1784,6 +1860,7 @@ def render_rag_context(item: dict[str, Any]) -> str:
             "provenance_mode",
             "provenance_family_ids",
             "conflict_state",
+            "answer_conflict_state",
             "retrieval_state",
             "answer_relevance",
         )
