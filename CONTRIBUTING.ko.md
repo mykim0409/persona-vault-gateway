@@ -58,6 +58,16 @@ uv run --frozen python tests/test_capture_integration.py
 - 개인 Vault, 실제 token, `.env`, 설치된 agent 설정에 대해 테스트를 실행하지 마세요. 실제 Cloudflare
   API를 호출하는 테스트도 두지 않습니다.
 
+오프라인 검색 비교 실험은 신뢰할 수 있는 변경 전 `gateway/core.py` 사본을 전달합니다.
+
+```bash
+uv run --frozen python tests/benchmark_search_evidence.py --baseline /path/to/baseline_core.py
+```
+
+합성 데이터에서 기존 방식, 문단·표 행 단위 근거 선택, 테스트용 BM25 재정렬을 비교합니다.
+안전성 사례, 지연 시간, CPU 시간, Python 최대 메모리 할당량(process RSS가 아님), 응답 크기
+(토큰 사용량이 아님)를 출력합니다. BM25는 운영 경로에 적용하지 않으며, 실제 임베딩 품질 벤치마크는 아닙니다.
+
 ## Compose smoke (Docker 필요)
 
 위 목록과 별개이며 Docker CLI, Compose v2 plugin(`docker compose`), 실행 중인 Docker daemon, 이미지
