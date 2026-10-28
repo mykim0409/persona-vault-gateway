@@ -242,6 +242,46 @@ class SearchEvidenceTests(unittest.TestCase):
             with self.subTest(body=body, query=query):
                 self.assertEqual(self.search(query)["answer_state"]["state"], expected)
 
+    def test_decision_scope_subject_is_not_a_person(self):
+        self.note(
+            "scope", "# ExampleLab 결정 장부\n\n"
+            "| id | 날짜 | 유형 | 내용 | 근거 |\n| --- | --- | --- | --- | --- |\n"
+            "| D-016 | 2026-10-21 | 결정 | Google 표시 이름을 key로 쓰지 않는다. "
+            "profile scope 제거까지 뜻하지는 않는다. edge/Argo scope 제거를 되돌린다. | "
+            "사용자가 name 식별자 사용에 대한 범위를 교정했다. |",
+            kind="decision_ledger",
+        )
+        for query, expected in (
+            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "supported"),
+            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정은 profile scope 제거까지 뜻했나?", "supported"),
+            ("2026-10-21 ExampleLab D-016 김민수의 결정이 profile scope 제거까지 뜻했나?", "abstain"),
+            ("2026-10-21 ExampleLab D-016 김민수가 Google 표시 이름을 key로 쓰지 않기로 결정했나?", "abstain"),
+            ("2026-10-21 ExampleLab D-999 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "abstain"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertEqual(result["answer_state"]["state"], expected)
+                    if expected == "supported":
+                        self.assertIn("profile scope 제거까지 뜻하지는 않는다", result["results"][0]["snippet"])
+
+    def test_field_units_and_totals_are_not_inferred(self):
+        self.note(
+            "metrics", "# ExampleLab\n\n## 2026-10-21\n\n"
+            "gpusystem-40 DCGM liveness를 initialDelaySeconds: 180으로 변경했다. "
+            "40/50/52의 GPU metric은 10/2/2이며 up==0은 빈 배열이었다.",
+        )
+        for query, expected in (
+            ("2026-10-21 ExampleLab gpusystem-40 DCGM liveness 180초 패치 뒤 14 GPU metric과 up==0 결과는?", "abstain"),
+            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 180 뒤 14 GPU metric 결과", "abstain"),
+            ("2026-10-21 ExampleLab DCGM liveness 180초 뒤 GPU metric 10/2/2 결과", "abstain"),
+            ("2026-10-21 ExampleLab gpusystem-40 DCGM initialDelaySeconds 180 GPU metric 40/50/52=10/2/2 up==0 결과", "supported"),
+            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 181 GPU metric 10/2/2 결과", "abstain"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
+
     def test_wrong_actor_does_not_inherit_approval(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
         for limit in (1, 4, 20):
