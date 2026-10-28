@@ -1316,6 +1316,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
     decision = not (approval or confirmation) and bool(re.search(r"결정|\bdecid(?:e|ed)\b", query, re.I))
     if decision:
         actors.update(re.findall(r"(?<!\w)([가-힣]{2,})의\s+결정", query))
+        # In a scope question, "the decision" is a subject, not an attributed person.
+        actors.discard("결정")
         decision = bool(actors)
     action_pattern = r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b"
     if decision:
