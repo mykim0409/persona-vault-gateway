@@ -1176,10 +1176,29 @@ def prioritize_experience_results(results: list[dict[str, Any]]) -> list[dict[st
 def evidence_term(term: str) -> str:
     # Surface normalization, not a translation or entailment model.
     if re.search(r"[가-힣]", term):
-        stem = re.sub(r"(?:에서는|으로|에서|에게|에는|은|는|이|가|을|를|의|에|와|과)$", "", term)
-        if len(stem) >= 2:
+        stem = re.sub(r"(?:에서는|으로|에서|에게|에는|은|는|이|가|을|를|의|에|와|과|로)$", "", term)
+        if len(stem) >= 2 or re.fullmatch(r"[a-zA-Z0-9_]", stem):
             return stem
     return term
+
+
+def normalize_evidence_dates(text: str) -> str:
+    """Normalize calendar notation without changing dates or inventing a missing year."""
+    def replace(match: re.Match[str]) -> str:
+        year = int(match[1]) if match[1] else None
+        month, day = int(match[2]), int(match[3])
+        try:
+            datetime(year if year is not None else 2000, month, day)
+        except ValueError:
+            return match[0]
+        return (f"{year:04d}-" if year is not None else "") + f"{month:02d}-{day:02d}"
+
+    for pattern in (
+        r"(?<![\w-])(\d{4})-(\d{1,2})-(\d{1,2})(?![\d-])",
+        r"(?<!\w)(?:(\d{4})년\s*)?(\d{1,2})월\s*(\d{1,2})일(?!\d)",
+    ):
+        text = re.sub(pattern, replace, text)
+    return text
 
 
 def evidence_blocks(text: str) -> list[str]:
@@ -1270,6 +1289,7 @@ def evidence_blocks(text: str) -> list[str]:
 def query_evidence(query: str, results: list[dict[str, Any]], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Select answer anchors separately from retrieval, leaving all candidates available to the reader."""
     by_id = {doc["document_id"]: doc for doc in documents}
+    query = normalize_evidence_dates(query)
     terms = {evidence_term(term) for term in keyword_terms(query)} - {"", "기록", "관련", "내용", "여부"}
     # Literal identifiers are constraints, not words a semantic neighbour may silently substitute.
     literals = {term for term in terms if any(c.isdigit() for c in term)}
@@ -1277,6 +1297,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         evidence_term(word.lower()) for word in TOKEN_RE.findall(query)
         if re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
     )
+    # Tokenization drops single-letter flags and their sign; keep explicit options as constraints.
+    literals.update(re.findall(r"(?<![\w+-])[+-][a-zA-Z](?![a-zA-Z0-9_-])", query.lower()))
     subject_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:이|가|은|는|께서)(?=\s)"
     actors = [
         match[1] for match in re.finditer(subject_pattern, query)
@@ -1291,7 +1313,13 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
     approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
     # A request to inspect a topic ("확인해줘") is not a claim that someone already verified it.
     confirmation = bool(re.search(r"(?:확인|검증)(?:했|하|한|함|됐|되|된|됨)|\b(?:confirm(?:ed)?|verify|verified)\b", query, re.I))
+    decision = not (approval or confirmation) and bool(re.search(r"결정|\bdecid(?:e|ed)\b", query, re.I))
+    if decision:
+        actors.update(re.findall(r"(?<!\w)([가-힣]{2,})의\s+결정", query))
+        decision = bool(actors)
     action_pattern = r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b"
+    if decision:
+        action_pattern = r"(?:결정|선택)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:decided|chose)\b"
     confirmation_terms: set[str] = set()
     if confirmation:
         action_pattern = r"(?:확인|검증)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:confirmed|verified)\b"
@@ -1308,17 +1336,22 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         best_coverage = 0
         best_text = ""
         semantic_eligible = False
-        for text in blocks:
+        for block in blocks:
+            text = normalize_evidence_dates(block)
             search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
             literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
             eligible = all(term_in(term, literal_text) for term in literals)
-            if approval or confirmation:
+            if approval or confirmation or decision:
                 # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
                 eligible = eligible and len(actors) == 1
                 action_found = False
-                clauses = re.split(r"[\n.!。;]+|\b(?:but|while)\b|하지만", text, flags=re.I) if eligible else []
+                # A decision ledger records the choice and its attribution in separate cells of one row.
+                row = text.splitlines()[-1]
+                ledger_decision = decision and doc.get("kind") == "decision_ledger" and bool(re.search(r"\|\s*(?:결정|decision)\s*\|", row, re.I))
+                pattern = action_pattern + (r"|재확인(?:했다|하였음|함)(?![가-힣])" if ledger_decision else "")
+                clauses = re.split(r"[\n.!。;]+|\b(?:but|while)\b|하지만", row if ledger_decision else text, flags=re.I) if eligible else []
                 for clause in clauses:
-                    verb = re.search(action_pattern, clause, re.I)
+                    verb = re.search(pattern, clause, re.I)
                     if not verb:
                         continue
                     # Bind the action to its subject, not another participant elsewhere in the sentence.
@@ -1342,10 +1375,14 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                             continue
                         if re.search(r"\?|여부|미확인|미완료|불확실|추정|가정|부인|실패|대기|계획|예상|\b안\s|\b(?:whether|unconfirmed|unverified|incomplete|unknown|uncertain|denied|assumed|estimated|failed|planned)\b", clause, re.I):
                             continue
+                    # Declining an operation is not the same as failing to make a decision.
+                    negation_text = clause[verb.end():] if decision else clause
+                    if decision and re.search(r"\b(?:안|못|not|never)\s+(?:personally\s+)?$", clause[:verb.start()], re.I):
+                        continue
                     if (
-                        all(term_in(term, clause.lower()) for term in literals)
+                        all(term_in(term, (text if ledger_decision else clause).lower()) for term in literals)
                         and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
-                        and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
+                        and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", negation_text, re.I)
                     ):
                         action_found = True
                         break
@@ -1353,7 +1390,7 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
             semantic_eligible |= eligible
             if coverage > best_coverage:
-                best_coverage, best_text = coverage, text
+                best_coverage, best_text = coverage, block
         item["answer_relevance"] = "candidate"
         if semantic_eligible and item.get("match") == "semantic":
             item["answer_relevance"] = "semantic_candidate"
