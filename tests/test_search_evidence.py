@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gateway import core
 from test_rag_benchmark import AGENT, FakeQdrant, no_network, write_note
+from benchmark_search_evidence import CASES, check_case, seed_case
 
 
 class SearchEvidenceTests(unittest.TestCase):
@@ -32,6 +33,34 @@ class SearchEvidenceTests(unittest.TestCase):
     def search(self, query, limit=4, bundle="current"):
         with no_network():
             return core.search_vault(self.settings, AGENT, query, limit=limit, bundle=bundle)
+
+    def test_evidence_unit_cases(self):
+        for case in CASES:
+            settings = replace(self.settings, vault_dir=self.settings.vault_dir / case["id"])
+            seed_case(settings, case)
+            for limit in (1, 4, 20):
+                with self.subTest(case=case["id"], limit=limit), no_network():
+                    result = core.search_vault(settings, AGENT, case["query"], limit, bundle="current")
+                    self.assertTrue(check_case(case, result), result)
+
+    def test_evidence_blocks_keep_local_context(self):
+        self.assertEqual(core.evidence_blocks(""), [])
+        self.assertEqual(core.evidence_blocks("# Snapshot101\n\n# FP16"), [])
+        blocks = core.evidence_blocks("# Root\n\n## First\n\nAlpha\ncontinued\n\n## Second\n\nBeta")
+        self.assertEqual(blocks, ["# Root\n## First\nAlpha\ncontinued", "# Root\n## Second\nBeta"])
+        blocks = core.evidence_blocks("# Root\n\nColumn | Status\n--- | ---\nAlpha | pending\nBeta | completed")
+        self.assertEqual(blocks, ["# Root\nColumn | Status\nAlpha | pending", "# Root\nColumn | Status\nBeta | completed"])
+
+    def test_fences_do_not_create_headings_or_table_rows(self):
+        code = "```text\n# Not a heading\n\n| A | B |\n| --- | --- |\n| C | D |\n```"
+        self.assertEqual(core.evidence_blocks("# Root\n\n" + code + "\n\nAfter"), ["# Root\n" + code, "# Root\nAfter"])
+
+    def test_evidence_blocks_strip_provenance_markers(self):
+        marker = "<!-- pvg-src: item:0123456789abcdef doc:Snapshot101 -->"
+        self.assertEqual(core.evidence_blocks(f"# Root {marker}\n\nFP16 claim line {marker}"), ["# Root \nFP16 claim line"])
+        self.note("marked", f"FP16 claim line {marker}")
+        self.assertNotIn("pvg-src", self.search("FP16")["results"][0]["snippet"])
+        self.assertEqual(self.search("Snapshot101 FP16")["answer_state"]["state"], "abstain")
 
     def test_unknown_project_abstains(self):
         self.note("actual", "ExampleMiner FP16 comparison", conflict_state="unresolved")
@@ -133,6 +162,116 @@ class SearchEvidenceTests(unittest.TestCase):
             self.assertEqual(result["answer_state"]["state"], "supported")
             self.assertEqual(result["results"][0]["document_id"], "comparison")
             self.assertIn('"answer_relevance": "grounded"', result["context"])
+
+    def test_reported_dns_and_unconfirmed_nfs_do_not_prove_combined_confirmation(self):
+        self.note("network", "사용자는 CoverageMiner LAN DNS A 레코드 일곱 개 등록을 보고했다.\n"
+                  "NFS 복구 완료와 showmount/mount 성공은 미확인이다. 김민수는 회의에 참여했다.")
+        query = "김민수가 CoverageMiner LAN DNS A 레코드 일곱 개와 NFS 복구 완료를 직접 확인했나?"
+        for limit in (1, 4, 20):
+            with self.subTest(limit=limit):
+                result = self.search(query, limit)
+                self.assertTrue(result["results"])
+                self.assertEqual(result["answer_state"]["state"], "abstain")
+
+    def test_confirmation_binds_actor_and_full_object_instead_of_document_words(self):
+        query = "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했나?"
+        for body in (
+            "이영희가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했다. 김민수는 회의에 참여했다.",
+            "이영희가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했고 김민수는 회의에 참여했다.",
+            "김민수가 ExampleMiner DNS 등록을 직접 확인했다. NFS 복구 완료는 미확인이다.",
+            "김민수가 ExampleMiner DNS 등록을 직접 확인했고 이영희가 NFS 복구 완료를 확인했다.",
+            "김민수가 ExampleMiner DNS 등록을 직접 확인했다. 김민수가 OtherProject NFS 복구 완료를 확인했다.",
+            "김민수가 ExampleMiner DNS 등록과 NFS 복구 계획을 직접 확인했다. 완료 여부는 미확인이다.",
+            "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료 여부를 직접 확인했다.",
+            "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료 보고를 전달받았다.",
+        ):
+            self.note("network", body)
+            with self.subTest(body=body):
+                self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+
+    def test_confirmation_negation_uncertainty_and_plans_are_not_completion(self):
+        for ending in (
+            "확인하지 않았다", "확인할 예정이다", "확인한 적이 없다", "확인했는지 알 수 없다",
+            "확인했다는 근거는 없다", "확인했다고 가정했다", "확인했다고 추정했다",
+            "확인했다는 보고는 미확인이다", "확인했다는 주장은 부인됐다",
+            "확인했다?", "확인한 것 같다",
+        ):
+            self.note("network", f"김민수가 ExampleMiner NFS 복구 완료를 직접 {ending}.")
+            with self.subTest(ending=ending):
+                self.assertEqual(self.search("김민수가 ExampleMiner NFS 복구 완료를 직접 확인했나?")["answer_state"]["state"], "abstain")
+
+    def test_confirmed_actor_and_compound_object_are_supported(self):
+        self.note("network", "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했다. 이영희는 회의에 참여했다.")
+        for query in (
+            "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했나?",
+            "김민수는 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했나?",
+            "김민수님께서 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인하셨나?",
+            "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 검증했나?",
+            "ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인한 사람은 김민수인가?",
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "supported")
+        self.note("network", "김민수가 ExampleMiner DNS 등록을 직접 확인했다. NFS 복구 완료는 미확인이다.")
+        self.assertEqual(self.search("김민수가 ExampleMiner DNS 등록을 직접 확인했나?")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("ExampleMiner NFS 복구 상태 확인해줘")["answer_state"]["state"], "supported")
+
+    def test_unparsed_confirmation_actor_and_semantic_candidates_cannot_pass(self):
+        self.note("network", "김민수가 ExampleMiner NFS 복구 완료를 직접 확인했다. 이영희는 회의에 참여했다.")
+        documents = core.vault_documents(self.settings)
+        for query in (
+            "이영희는 ExampleMiner NFS 복구 완료를 직접 확인했나?",
+            "이영희님께서 ExampleMiner NFS 복구 완료를 직접 확인하셨나?",
+            "이영희가 ExampleMiner NFS 복구 완료를 직접 검증했나?",
+            "ExampleMiner NFS 복구 완료를 직접 확인한 사람은 이영희인가?",
+            "ExampleMiner NFS 복구 완료를 직접 확인했나?",
+            "이영희(검토자) ExampleMiner NFS 복구 완료를 직접 확인했나?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+                result = {**documents[0], "match": "semantic"}
+                evidence = core.query_evidence(query, [result], documents)
+                self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "abstain")
+
+    def test_english_confirmation_attribution_and_scope(self):
+        for body, expected in (
+            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion.", "supported"),
+            ("Bob personally confirmed ProjectX DNS registration and NFS recovery completion. Alice attended.", "abstain"),
+            ("Alice personally confirmed ProjectX DNS registration. NFS recovery completion remains unconfirmed.", "abstain"),
+            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion is pending.", "abstain"),
+            ("Alice did not confirm ProjectX DNS registration and NFS recovery completion.", "abstain"),
+            ("Alice will confirm ProjectX DNS registration and NFS recovery completion.", "abstain"),
+        ):
+            self.note("network", body)
+            with self.subTest(body=body):
+                self.assertEqual(self.search("Did Alice personally confirm ProjectX DNS registration and NFS recovery completion?")["answer_state"]["state"], expected)
+
+    def test_confirmation_keeps_related_conflicts_across_limits(self):
+        self.note("network", "김민수가 ExampleMiner NFS 복구 완료를 직접 확인했다.")
+        self.note("objection", "Recovery is disputed.", memory_type="candidate", relations={"contradicts": ["network"]})
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("김민수가 ExampleMiner NFS 복구 완료를 직접 확인했나?", limit)["answer_state"]["state"], "review_required")
+
+    def test_original_confirmation_question_requires_each_object_qualifier(self):
+        query = "김민수가 CoverageMiner LAN DNS A 레코드 일곱 개와 NFS 복구 완료를 직접 확인했나?"
+        body = "김민수가 CoverageMiner LAN DNS A 레코드 일곱 개와 NFS 복구 완료를 직접 확인했다."
+        for text, expected in (
+            (body, "supported"),
+            (body.replace("일곱", "다섯"), "abstain"),
+            (body.replace("DNS A", "DNS CNAME"), "abstain"),
+            (body.replace("직접 ", ""), "abstain"),
+            (body.replace("완료", "미완료"), "abstain"),
+        ):
+            self.note("network", text)
+            for limit in (1, 4, 20):
+                with self.subTest(text=text, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
+
+    def test_approval_does_not_bypass_a_confirmation_claim(self):
+        self.note("approval", "김민수가 ExampleMiner FP16 도입을 승인했다.")
+        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "abstain")
+        self.note("approval", "김민수가 ExampleMiner FP16 도입 승인을 직접 확인했다.")
+        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "supported")
 
     def test_related_conflict_survives_all_limits_and_reverse_only_relation(self):
         self.note("comparison", "ExampleMiner FP16 comparison uses the same snapshot.")
