@@ -315,6 +315,44 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("metrics", "ExampleModel 측정 결과는 5.5% 기록이다.")
         self.assertEqual(self.search("ExampleModel 측정 결과 5.5배")["answer_state"]["state"], "abstain")
 
+    def test_numeric_suffixes_do_not_drop_units_or_korean_magnitudes(self):
+        for source, query_value, expected in (
+            ("0건이나", "0건", "supported"), ("2028년까지", "2028년", "supported"),
+            ("1만", "1", "abstain"), ("1만명", "1명", "abstain"),
+            ("2억4천만", "2억4천", "abstain"), ("2억4천만", "2억4천만", "supported"),
+            ("40", "gpusystem-40", "abstain"), ("s3-timing", "S3", "abstain"),
+        ):
+            self.note("metrics", f"ExampleModel 측정 결과: `{source}`.")
+            for limit in (1, 4, 20):
+                with self.subTest(source=source, query=query_value, limit=limit):
+                    self.assertEqual(self.search(f"ExampleModel 측정 결과 {query_value}", limit)["answer_state"]["state"], expected)
+
+    def test_suffixes_keep_ledger_refutation_and_roadmap_conflicts(self):
+        self.note(
+            "decisions", "# ExampleLab\n\n"
+            "| id | 날짜 | 내용 |\n| --- | --- | --- |\n"
+            "| D-018 | 2026-10-21 | generalize branch leak-check 45/45 통과는 site 값 0건이나 "
+            "Bitbucket push 완료를 뜻하지 않는다. 실제 site 값은 2,814/1,836건이다. |",
+            kind="decision_ledger",
+        )
+        self.note(
+            "roadmap", "# ExampleForms\n\n"
+            "assistant 회의록 초안의 로드맵은 2026년 Level 1, 다음 해 Level 2–3, 2028년까지 Level 4–5다. "
+            "KPI는 개발·배포 시간과 인건비다. GPU 서버 2대 약 2억4천만 원 재견적은 조직 채택이 아닌 제안이다.",
+            conflict_state="unresolved",
+        )
+        for query, expected, snippet in (
+            ("2026-10-21 ExampleLab D-018 generalize branch leak-check 45/45 통과가 site 값 0건과 Bitbucket push 완료를 뜻했나?",
+             "supported", "뜻하지 않는다"),
+            ("ExampleForms assistant 회의록 초안의 Level 1 2026년 Level 2~3 다음 해 Level 4~5 2028년 KPI 개발 배포 시간 인건비 GPU 서버 2대 약 2억4천만 원 재견적",
+             "review_required", "조직 채택이 아닌 제안"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertEqual(result["answer_state"]["state"], expected)
+                    self.assertIn(snippet, result["results"][0]["snippet"])
+
     def test_presentation_numeric_suffixes_keep_document_conflict_gate(self):
         self.note(
             "presentation", "# ExampleModel\n\n## 2026-10-22\n\n"

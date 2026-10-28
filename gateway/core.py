@@ -1194,8 +1194,15 @@ def numeric_evidence_literals(text: str) -> set[str]:
         if not any(char.isdigit() for char in atom):
             continue
         atom = evidence_term(atom)
+        korean_magnitude = bool(re.search(r"\d[십백천만억조]", atom))
         if re.match(r"[+-]?(?:\d|\.\d)", atom):
-            atom = re.sub(r"(?:보다|이며|만|이었다|였다|이다|이고)$", "", atom)
+            atom = re.sub(r"(?:보다|이며|이나|까지|이었다|였다|이다|이고)$", "", atom)
+            if not korean_magnitude:
+                atom = re.sub(r"만$", "", atom)
+        if korean_magnitude:
+            # A magnitude is part of the value: 1만 is not 1, and 2억4천만 must retain its final 만.
+            literals.add(atom)
+            continue
         number = re.fullmatch(r"([+-]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))([a-z가-힣_%]*)", atom)
         if number:
             # String normalization preserves every digit without float rounding or a precision limit.
