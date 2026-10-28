@@ -13,7 +13,7 @@ provenance_mode: human_asserted
 relations: {"supports":[],"contradicts":[],"supersedes":[]}
 retrieval_tier: primary
 privacy: normal
-protocol_version: 23
+protocol_version: 24
 ---
 
 # PersonaVault Curator Protocol
@@ -29,6 +29,7 @@ and all critical validation probes pass
 
 The character count is the total Markdown body size within the search scope, excluding `.git/`, `.obsidian/`, and `.tmp/`.
 Preserving the full context does not mean repeatedly preserving the original wording. It means preserving attribution, evidence, negation, exceptions, retractions, conflicts, timing, and conditions of applicability.
+The ownership-only procedure in section 4 is a narrow exception to the reduction target: it retires no raw and may add short redirects. Report its size delta honestly; do not count it as raw compaction.
 
 Operational results are measured by the amount of raw actually removed relative to the inflow and by the net decrease in active Markdown, not by the number of batches processed.
 In the final report, briefly state the applied reduction and the actually measured time for reading, consolidation, review, mechanical checks, and indexing.
@@ -46,6 +47,15 @@ Do not skip the semantic preservation, approval, or deletion gates because of de
 - Do not directly read or modify the inside of `.git/` or `.obsidian/`. Use Git commands for recovery and status checks.
 - Do not copy secrets into verbatim quotes or summaries. Privacy purges and history rewrites require separate approval.
 - The Curator chooses the next target even if the user does not specify a subject.
+
+### Common protocol and Vault-specific instructions
+
+Keep this `CURATOR.md` as the shared Gateway protocol. Do not mix personal operating preferences into it.
+At the start of a Curator task, read this file, then the optional Vault-root `CURATOR.local.md`, then the user's instructions for the current task.
+Use `CURATOR.local.md` for that owner's curation priorities, topic exclusions, terminology, writing style and reporting preferences. Keep it in the private Vault's Git history so the same instructions work across PCs; it is not a machine-local cache and is not distributed with the Gateway.
+The more specific instruction takes precedence for those preferences. It does not silently waive evidence preservation, exact approval, reference integrity or CLI validation. Surface a conflict instead of pretending a blocked operation passed.
+The CLI binds both policy paths, including an absent `CURATOR.local.md`, to review checkpoints. A policy addition/change requires a new Git base/plan and review before applying; never reuse an earlier approval for changed rules.
+Do not create a personal file when none is needed. Leave it untouched during a common-protocol update. `10_User/WORKING_AGREEMENT.md` remains the separately approved general agent agreement, not the Curator-specific configuration.
 
 | Path | Role |
 | --- | --- |
@@ -135,7 +145,7 @@ subagent results, and supplied material. Do not turn a whole session into a sing
 | `discard` | No lasting value, such as progress narration, repetition, temporary errors, help/smoke output, or plain copies. |
 | `hold` | Attribution, meaning, or scope of application cannot be judged safely. |
 
-`merge` and `replace` are still accepted in protocol 23 with a warning and are removed in 24; they cannot target `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` or `OBSERVATIONS.md`.
+`merge` and `replace` remain deprecated and accepted with a warning for existing raw plans; they cannot target `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` or `OBSERVATIONS.md`. Protocol 24 adds ownership transfer without removing these unrelated compatibility paths.
 
 Items with the same judgment, target, and evidence can be recorded as one entry in `review.items`.
 Use either a single `id` or a list of `ids`. Each ID must be included exactly once across the whole review.
@@ -156,7 +166,7 @@ A typed item (every disposition above except `already-covered`, `discard` and `h
 - `reason`.
 
 `compact-annotate` (section 5) writes the `<!-- pvg-src: item:... -->` marker at the end of each anchored line, inside the last cell of a table row. It holds only item IDs, which are one-way hashes of path and locator.
-Never type or edit a marker or an ID by hand. The one exception is the `doc:` source of the migration in section 8.
+Never fabricate or edit an `item:` or `sess:` token. The exceptions are the `doc:` sources in sections 4 and 8, and exact copying of existing tokens in a reviewed ownership transfer.
 
 ```jsonl
 {"id":"item:...","disposition":"decision","targets":["20_Projects/Project/DECISIONS.md","20_Projects/Project/BRIEF.md"],"quote":"retries stop after 3 attempts","entry":{"id":"D-014","type":"결정","status":"유효"},"anchors":{"20_Projects/Project/DECISIONS.md":"| D-014 | 2026-10-05 |","20_Projects/Project/BRIEF.md":"| D-014 | 2026-10-05 |"},"reason":"The user fixed the retry limit"}
@@ -186,7 +196,7 @@ Do not stop at appending raw after an existing project document; rewrite the cur
 - Do not decide truth just because something is newer or because it is written in the existing canonical. If opposing evidence of the same scope remains, preserve it as a conflict.
 - Review the existing meaning of the target together with the new evidence, and get approval for an exact patch that includes sentence merging, replacement, and removal. Do not reuse the existing approval state as approval of the new patch.
 - `delete_paths` in this CLI is for raw/legacy sources. Deleting or renaming a canonical file itself is not automatically allowed.
-- `DECISIONS.md` and `OBSERVATIONS.md` are never rewritten. Rows are appended. Only 상태 and 후속 (decision ledger) or 상태 and 독립 세션 (observation ledger) change. 날짜, 유형, 내용 and 이유/근거 are frozen; a human fixes typos in Obsidian between curations.
+- `DECISIONS.md` and `OBSERVATIONS.md` are not freely rewritten. Rows are appended. Only 상태 and 후속 (decision ledger) or 상태 and 독립 세션 (observation ledger) change. 날짜, 유형, 내용 and 이유/근거 are frozen, except for the exact decision-ledger ownership procedure below. It does not apply to the user ledger or authorize typo/factual corrections.
 - `BRIEF.md` and `PROFILE.md` are fully rewritten from the current ledger each curation. The tool blocks them above the body cap.
 
 Example: if new evidence corrects an existing "always use A" to "B is needed under condition X",
@@ -199,11 +209,72 @@ The templates fix the ledger headers and the `##` headings; do not rename or reo
 `BRIEF.md` has `현재 목표`, `유효한 결정`, `미뤄진 것`, `대체된 것`, `열린 질문`, `최근 변화`. `PROFILE.md` has `역할·맥락`, `확인된 선호`, `가설`, `제약`, `에이전트에 준 피드백`, `반례·철회`, `최근 변화`.
 
 - A new ledger row takes the id from `selected.ledgers[].next_id`. Ids only grow and are never reused.
-- `DECISIONS.md` has 7 columns: id, 날짜, 유형, 상태, 내용, 이유·근거, 후속. 유형: `결정`, `미룸`, `대체`, `목표변경`, `질문`. 상태: `유효`, `대체됨`, `보류`, `종결`.
-  후속 is `-` or the id of the row that replaced this one, and is required when 상태 is `대체됨`.
+- `DECISIONS.md` has 7 columns: id, 날짜, 유형, 상태, 내용, 이유·근거, 후속. 유형: `결정`, `미룸`, `대체`, `목표변경`, `질문`. 상태: `유효`, `대체됨`, `보류`, `종결`, or the non-authoritative ownership redirect `이관됨`.
+  후속 is `-`, a local row ID, or a qualified `20_Projects/Project/DECISIONS.md#D-###` reference (percent-encode spaces). It is required for `대체됨` and `이관됨`; only `이관됨` may list multiple destinations, separated by `, `.
 - `OBSERVATIONS.md` has 7 columns: id, 날짜, 유형, 상태, 내용, 근거, 독립 세션. The last cell is written by the tool.
 - 날짜 is `YYYY-MM-DD`, or `-` when unknown.
 - `유효한 결정` lists only rows whose 상태 is `유효`, and `확인된 선호` only rows whose 상태 is `확인`. Start each such row or bullet with its ledger id.
+
+### Project boundaries and reviewed ownership transfers
+
+Judge project ownership by independent purpose, users, repositories and operational lifecycle. A user's explicit "split this project" instruction is useful evidence, not a prerequisite.
+Label an inferred boundary as the Curator's inference; do not attribute it to the user. A naming or recognition date is not the project's start date.
+When a boundary or correction relates to existing canonicals, review the related earlier decisions, unresolved items, topic text and BRIEF as well. Do not stop at records after the correction date or audit unrelated projects.
+Separate mixed material by claim: common infrastructure may move while model-specific execution stays. Do not move a whole file merely because some rows belong elsewhere.
+
+Use a separate, scoped `ledger-transfer` plan for existing project knowledge. It changes classification, not historical facts or user intent.
+Include all affected ledgers, briefs, topic documents and inbound references in the explicit path list. Keep unrelated files unchanged.
+There is no raw selection, raw deletion, fabricated capture, receipt, new DB, or separate approval pipeline.
+
+```bash
+uv run pvg-wiki --vault . compact-plan --ledger-transfer \
+  20_Projects/Model/DECISIONS.md 20_Projects/Platform/DECISIONS.md \
+  20_Projects/Model/BRIEF.md 20_Projects/Platform/BRIEF.md \
+  20_Projects/Model/operations.md 20_Projects/Platform/operations.md \
+  --output .tmp/curating/ownership.json
+```
+
+The tool pins the Git base and lists scoped paths, source hashes and next row IDs. New destination paths are allowed.
+Keep `review.items` and `review.delete_paths` empty. Add the exact mapping to `review.ledger_transfers`, a logical Vault `repository_id` (not a URL or credential), drafts and probes.
+Each entry needs a source path, row ID and source-file SHA-256, ordered destination path/ID pairs, `basis: inferred|human_explicit`, the reason and existing `evidence_paths` also listed in `review.dependencies`.
+For `human_explicit`, cite the actual user's statement, not an agent's interpretation. These labels and the correctness of the boundary require independent semantic review; the CLI does not infer them.
+
+```json
+{
+  "repository_id": "persona-vault",
+  "ledger_transfers": [{
+    "source": {"path": "20_Projects/Model/DECISIONS.md", "id": "D-081", "sha256": "<source-file SHA-256 from the plan>"},
+    "destinations": [
+      {"path": "20_Projects/Platform/DECISIONS.md", "id": "D-008"},
+      {"path": "20_Projects/Model/DECISIONS.md", "id": "D-101"}
+    ],
+    "basis": "inferred",
+    "reason": "The shared build service has its own operational lifecycle; model CI remains with the model project.",
+    "evidence_paths": ["20_Projects/Model/DECISIONS.md"]
+  }]
+}
+```
+
+The IDs above are illustrative; allocate real IDs above each destination ledger's base maximum. One new row cannot receive two different sources in this operation.
+For a whole-row transfer, copy its content unchanged. For a mixed-row split, divide its content into ordered, contiguous, self-contained spans: joining the destination content cells with spaces must reproduce the original, ignoring whitespace only.
+Keep the original date, type, state and reason in every destination row. Keep supersession: when its successor is in the old project, qualify that reference with the old ledger path.
+Do not paraphrase under this exception. If splitting would lose an actor, negation, exception, uncertainty or applicability context, retain the row until a lossless split is possible; do not manufacture a new user decision to make it fit.
+
+- Preserve the original row ID as a redirect. Keep its date, type, reason and exact provenance tokens; set 상태 to `이관됨`, 내용 to exactly `Ownership transferred; follow destinations.`, and 후속 to the ordered, qualified destination references. It is not a valid decision, closure or supersession. Do not list it under the old BRIEF's `유효한 결정`.
+- Destination rows copy all original `item:`, `sess:` and `doc:` tokens exactly and add `doc:<source-ledger-path>#<original-ID>`. The CLI validates this ledger-source exception only for mapped destinations. Do not mint raw item IDs.
+- Preserve existing `repository_sources` on every changed document. Destination ledgers also carry the source ledger's repository sources and a pinned origin `{ "repo_id": "<Vault repository_id>", "path": "<source ledger>", "commit": "<full plan base>", "anchor": "<original-ID>" }` for each transferred row.
+- The original path/ID remains resolvable; the Git base and pinned origin recover the historical text. A redirect cannot be reactivated, rewritten or retargeted in a later curation. A later ownership change creates a redirect at the next owner, preserving the chain. Do not delete or rename the ledger file.
+- Rewrite the related BRIEFs and topics in the same patch. Remove duplicate authoritative descriptions, but preserve valid local decisions, open items, exceptions and counterevidence. Check affected inbound references; do not use a new project name to erase the old timeline.
+
+The validator checks the exact map, lossless content coverage, dates/states/reasons, supersession, origins, provenance, destination existence, new IDs and unplanned changes.
+All other ledger rows retain their existing frozen-column protection; in an ownership-only plan even their mutable status/follow-up fields must stay unchanged.
+It cannot prove correct semantic ownership or find every paraphrased duplicate. The independent reviewer must verify those, including actors, remaining uncertainty, related topics and the single authoritative owner for each transferred claim.
+Test discovery under both project names and verify that the old project-specific claims remain with the old owner. Do not use `forbid_paths` to reject an entire old ledger that still holds valid local knowledge.
+
+Use the existing section 5 review/approval/apply/finish sequence. `compact-annotate` is unnecessary: this mode copies existing markers, not new raw claims.
+`compact-review --record` binds the whole ownership patch, evidence and probes as one `ledger-transfer` review. Any mapped row, rationale, source, related draft or probe change invalidates that review.
+Only after independent review and exact human approval may the Curator apply the drafts. `compact-finish` then checks the applied patch and searches, incrementally indexing only if semantic search is enabled.
+Raw and user-profile changes cannot be mixed into this mode. The active-character delta is reported but need not decrease, because stable redirects and accurate ownership take precedence here; this is not permission to bypass the normal raw reduction gate.
 
 ### Writing style
 
@@ -268,7 +339,7 @@ This is reuse of review results, not authority to reuse the approval of earlier 
 
 Add `drafts` (changed target -> Vault-relative draft path) and `probes` to the existing `review`.
 Omit unchanged targets from `drafts`. Record the evidence and policy additionally used for the judgment as paths in `dependencies`.
-By default, the full source context, existing candidates, and the root CURATOR are bound to the hash.
+By default, the full source context, existing candidates, and the root `CURATOR.md` and optional `CURATOR.local.md` are bound to the hash.
 
 ```json
 {
@@ -305,7 +376,7 @@ It blocks without changing any draft if a quote matches no line or several lines
 - `quote` is a span of its raw item, and a subagent item has only `knowledge`, `already-covered`, `discard` or `hold`.
 - Claim coverage: the item's ID is in a marker of each of its targets. A missing marker is an error for `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` and `OBSERVATIONS.md`. For other targets it counts in `provenance.unmarked_items` (not an error yet); it will become an error after `compact-annotate` has been used on one real batch.
 - A new marker that no review of that target backs is an error.
-- Ledgers: unique ids; 유형 and 상태 from the vocabularies; `대체됨` has an existing 후속; no row deleted; the frozen columns of an existing row unchanged; marker tokens only grow; new ids above the base maximum; every new row has an `item:` or `doc:` marker; a user row's 독립 세션 equals its `sess:` count; a `선호(추론)` row that is new as `확인` or changes to `확인` needs 3 sessions.
+- Ledgers: unique ids; 유형 and 상태 from the vocabularies; `대체됨`/`이관됨` have existing 후속 references; no row deleted; frozen columns unchanged except the exact ownership redirect in section 4; marker tokens only grow (exact copies for transfers); new ids above the base maximum; every new row has an `item:` or `doc:` marker; a user row's 독립 세션 equals its `sess:` count; a `선호(추론)` row that is new as `확인` or changes to `확인` needs 3 sessions.
 - `BRIEF.md` and `PROFILE.md`: the fixed headings once each and in order; the body within the cap, markers not counted; every id under `유효한 결정` or `확인된 선호` is a row of the sibling ledger (`DECISIONS.md` in the same folder, `OBSERVATIONS.md` in `10_User/`) with the matching 상태, also when only the ledger changed. Warning: an id under `현재 목표` or `열린 질문` that is unknown or not `유효`.
 
 The summary reports `curation.brief_chars`, `curation.ledger_rows` and `curation.superseded_rows` per path and lists the `warnings`.
@@ -340,7 +411,7 @@ uv run pvg-wiki --vault . compact-finish .tmp/curating/plan.json
 
 Put the approved source deletion list in `review.delete_paths`, and `updated|unchanged` with the reason in `review.user_knowledge`.
 A source that was selected but is kept still gets its item judgments completed, and its content is left as is.
-This command checks coverage against the Git base, duplicate IDs, deferral preservation, targets, change scope, and character reduction,
+This command checks coverage against the Git base, duplicate IDs, deferral preservation, targets, change scope, and character reduction (or the section 4 ownership-only exception),
 and reports new metadata/reference/cycle errors and conflict changes in one pass through before/after Wiki analysis.
 After confirming that the applied content matches the reviewed draft, it calls the existing incremental indexing, and checks that the Qdrant points
 of the deleted paths are 0 and the paths and answer_state of all search probes. Each search uses `refresh=false`.
@@ -396,7 +467,7 @@ Do not create new receipt/conflict events.
 
 ## 7. Audit, recovery, and stop
 
-Include the target changes and the source deletion together in one approved single-parent compaction commit, and leave the following.
+Include the target changes and any approved source deletion together in one approved single-parent compaction commit, and leave the following. Ownership-only work has no source deletion and is reported as reclassification, not raw reduction.
 
 ```text
 PVG-Curation-Base: <full parent commit>

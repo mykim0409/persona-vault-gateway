@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import core
-from .wiki import MARKED_DISPOSITIONS, _SRC_RE, _cells, _review_items
+from .wiki import MARKED_DISPOSITIONS, _SRC_RE, _cells, _review_items, review_targets
 
 
 def digest(value: Any) -> str:
@@ -42,8 +42,8 @@ def concurrent_raw_captures(vault: Path, plan: dict, before: list[dict], current
     scoped = set(plan["selected"]["source_paths"])
     scoped.update(node["path"] for node in plan["selected"]["graph"]["nodes"] if "sha256" in node)
     scoped.update(plan["review"].get("dependencies", []))
-    scoped.update(target for item in _review_items(plan["review"]["items"]) for target in item["targets"])
-    scoped.add("CURATOR.md")
+    scoped.update(review_targets(plan))
+    scoped.update(("CURATOR.md", "CURATOR.local.md"))
     concurrent: dict[str, int] = {}
 
     def native(path: str, content: str) -> tuple[dict, str, list[dict], str] | None:
@@ -200,8 +200,7 @@ def annotate_drafts(vault: Path, plan: dict) -> dict[str, int]:
 def projected_documents(vault: Path, plan: dict, before: list[dict]) -> list[dict]:
     """Read staged full-file targets and project approved operations in memory only."""
     review = plan["review"]
-    entries = _review_items(review["items"])
-    targets = {path for item in entries for path in item["targets"]}
+    targets = review_targets(plan)
     drafts = review.get("drafts", {})
     if not isinstance(drafts, dict) or not set(drafts) <= targets:
         raise ValueError("review.drafts must map reviewed target paths to staged Markdown files")
@@ -250,7 +249,7 @@ def review_binding(plan: dict, before: list[dict], after: list[dict]) -> dict:
     if not isinstance(dependencies, list) or any(not isinstance(path, str) or path not in original for path in dependencies):
         raise ValueError("review.dependencies must list existing evidence/policy paths")
     context_paths.update(dependencies)
-    context_paths.add("CURATOR.md")
+    context_paths.update(("CURATOR.md", "CURATOR.local.md"))
     context = {path: original.get(path) for path in sorted(context_paths)}
     fingerprints = {}
     for entry in _review_items(review["items"]):
@@ -260,6 +259,12 @@ def review_binding(plan: dict, before: list[dict], after: list[dict]) -> dict:
             "context": context, "target_patch": patch,
             "item": {key: value for key, value in entry.items() if key != "ids"},
             "user_knowledge": review["user_knowledge"], "probes": probes,
+        })
+    if plan.get("mode") == "ledger-transfer":
+        # Ownership is one reviewed patch, including the related briefs/topics, not a collection of raw claims.
+        fingerprints["ledger-transfer"] = digest({
+            "context": context, "review": review,
+            "target_patch": {path: [original.get(path), current.get(path)] for path in sorted(review_targets(plan))},
         })
     recorded = plan.get("review_checkpoint", {})
     if not isinstance(recorded, dict):
@@ -316,12 +321,13 @@ def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) ->
             core.index_vault(settings)
         if not core.qdrant_index_current(settings):
             raise RuntimeError("final index is not current; retry after indexing is available")
-        count = core.qdrant_json(
-            settings, "POST", f"/collections/{settings.qdrant_collection}/points/count",
-            {"exact": True, "filter": {"must": [{"key": "path", "match": {"any": plan["review"]["delete_paths"]}}]}},
-        )["result"]["count"]
-        if type(count) is not int or count != 0:
-            raise RuntimeError("retired sources remain in Qdrant")
+        if plan["review"]["delete_paths"]:
+            count = core.qdrant_json(
+                settings, "POST", f"/collections/{settings.qdrant_collection}/points/count",
+                {"exact": True, "filter": {"must": [{"key": "path", "match": {"any": plan["review"]["delete_paths"]}}]}},
+            )["result"]["count"]
+            if type(count) is not int or count != 0:
+                raise RuntimeError("retired sources remain in Qdrant")
     expected_checks = [{"query": probe["query"], "passed": True, "answer_state": probe["answer_state"]} for probe in probes]
     if indexed and checkpoint.get("binding") == binding and checkpoint.get("probes") == expected_checks:
         return {**checkpoint, "reused": True}

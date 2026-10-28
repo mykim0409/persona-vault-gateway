@@ -15,7 +15,7 @@ from typing import Any
 
 from .compaction import annotate_drafts, concurrent_raw_captures, finish_search, projected_documents, review_binding, staging_path
 from .core import RAG_EXCLUDED_DIRS, Settings, document_metadata, markdown_body, qdrant_compaction_neighbors, vault_documents
-from .wiki import BRIEF_CAP, analyze_documents, build_compaction_plan, check_compaction, health_report
+from .wiki import BRIEF_CAP, analyze_documents, build_compaction_plan, build_transfer_plan, check_compaction, health_report, review_targets
 
 
 def plan_brief_cap(plan: dict, args) -> int:
@@ -105,6 +105,7 @@ def parser() -> argparse.ArgumentParser:
     compact.add_argument("--deferrals", help="Local JSON list of hash-bound source deferrals.")
     compact.add_argument("--output", help="Save the full plan to a new JSON file inside Vault .tmp/curating/.")
     compact.add_argument("--full", action="store_true", help="Print the full plan instead of the compact preview.")
+    compact.add_argument("--ledger-transfer", nargs="+", metavar="PATH", help="Plan a reviewed ownership transfer of these project ledgers/briefs/topics, without raw deletion.")
     check = commands.add_parser("compact-check", help="Check applied Markdown against an annotated plan; does not authorize changes.")
     check.add_argument("plan", help="Saved compact-plan JSON with its review section completed.")
     annotate = commands.add_parser("compact-annotate", help="Write pvg-src provenance markers from review anchors into staged drafts only.")
@@ -184,15 +185,15 @@ def plan_output(plan: dict[str, Any], args: argparse.Namespace, vault: Path) -> 
         return plan
     selected = plan.get("selected")
     return {
-        **{key: plan[key] for key in ("status", "revision", "before", "eligible_sources", "excluded", "invalidated_deferrals") if key in plan},
+        **{key: plan[key] for key in ("status", "mode", "revision", "before", "eligible_sources", "excluded", "invalidated_deferrals") if key in plan},
         "plan_file": str(output) if output else None,
         "queue_components": len(plan.get("queue", [])),
         "deferred_sources": len(plan.get("deferred", [])),
         "selected": {
             **{key: selected[key] for key in (
                 "component_id", "routing", "source_paths", "source_items", "source_characters",
-                "character_budget", "oversized_source", "remaining_source_files", "semantic", "ledgers", "subagent_items",
-            )},
+                "character_budget", "oversized_source", "remaining_source_files", "semantic", "ledgers", "subagent_items", "transfer_paths",
+            ) if key in selected},
             "target_candidates": [
                 node["path"] for node in selected["graph"]["nodes"] if node["type"] == "canonical_candidate"
             ],
@@ -240,7 +241,7 @@ def run_compaction(args: argparse.Namespace, settings: Settings, documents: list
             original, current = hashes(before), hashes(after)
             changed = {p for p in original.keys() | current.keys() if original.get(p) != current.get(p)}
             deleted = set(plan["review"]["delete_paths"])
-            targets = {p for item in plan["review"]["items"] for p in item["targets"]}
+            targets = review_targets(plan)
             if (
                 (changed | (snapshot["dirty_paths"] - concurrent_raw.keys())) - deleted - targets
                 or any(p in current and current[p] != original.get(p) for p in deleted)
@@ -259,7 +260,7 @@ def run_compaction(args: argparse.Namespace, settings: Settings, documents: list
             return {**result, "timings": timings}
         review = plan["review"]
         deleted = set(review["delete_paths"])
-        targets = {target for item in review["items"] for target in item["targets"]}
+        targets = review_targets(plan)
         if snapshot["dirty_paths"] - concurrent_raw.keys() - deleted - targets:
             return {"status": "blocked", "reason": "unplanned_git_changes"}
         if args.command != "compact-review" and any(
@@ -338,6 +339,11 @@ def run(argv: list[str] | None = None) -> dict[str, Any]:
         if snapshot["dirty_paths"]:
             return {"status": "blocked", "reason": "dirty_markdown", "paths": sorted(snapshot["dirty_paths"])}
         try:
+            if args.ledger_transfer:
+                if args.deferrals:
+                    raise ValueError("ledger-transfer does not use raw deferrals")
+                plan = build_transfer_plan(documents, args.ledger_transfer, revision=snapshot["revision"], before=args.before, brief_cap=args.brief_cap)
+                return plan_output(plan, args, settings.vault_dir)
             plan = build_compaction_plan(
                 documents,
                 before=args.before,
