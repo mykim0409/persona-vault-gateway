@@ -111,6 +111,9 @@ A decision query naming an actor also checks that attribution. In a `decision_le
 decision row can carry the choice and its reaffirmation in separate cells; other rows and mere
 participants cannot supply its actor. Choosing not to perform an operation is distinct from not
 having made a decision. Actor-free decision lookups remain ordinary retrieval.
+The noun `결정` in a decision-scope question is not a person; any explicitly named actor is still checked.
+The guards do not infer units from field names or calculate totals from per-node counts. Query the recorded
+fields and values when those inferences are needed to interpret the evidence.
 For approval/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
 an empty actor extraction is never treated as a match, even for actor-free approval queries.
 Confirmation claims also require all requested objects and qualifiers in the same affirmative
