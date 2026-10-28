@@ -102,8 +102,15 @@ parent's introductory paragraph, not sibling content. This is a conservative blo
 a complete CommonMark parser. Unrelated paragraphs, sibling sections, list items, and table
 rows cannot pool their words into one anchor. Keyword/hybrid snippets come from the best
 eligible block rather than the first matching part of the document. Provenance markers remain hidden.
-Approval queries and claims that someone confirmed or verified something require one identifiable
+An explicit slash-separated technical topic such as `mount/read` requires at least one member in the
+same block; shared project names and dates cannot replace the entire requested topic. This permits
+alternatives, not a claim that every operation succeeded. English property questions using `cover`,
+`contain`, `include`, `describe`, or `what/which is ... of/in/for ...` require their named Latin terms
+in that block. Loose keyword lookups still permit cross-language wording and explicit metadata aliases.
+Approval/adoption queries and claims that someone confirmed or verified something require one identifiable
 actor linked to that action in the source.
+English `adopt/adopted` claims check the full named person or organization, the actual adoption action,
+and its requested objects in one clause; an assistant draft or another organization's action is not adoption evidence.
 Date notation and Korean particles on technical identifiers are normalized for matching (for example,
 `10월 20일` and `10-20`, or `+t를` and `+t`); source snippets are not rewritten. Explicit years,
 numeric values, and option names remain constraints. This does not add an as-of-date interpretation.
@@ -121,9 +128,9 @@ numeric-leading expressions, including unit suffixes in `0건이나` and `2028�
 `1만` and `2억4천만` remain intact without numeric conversion; their `만` is not a particle.
 Dates and digit-bearing identifiers remain intact. Decimal points do not split
 actor/action clauses. This changes response validation only, not retrieval, stored text, or the index.
-Numeric attribution across multiple approval/confirmation/decision actions in one clause remains `abstain`;
-the lexical guard cannot safely bind each quantity there yet.
-For approval/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
+Attribution across multiple approval/adoption/confirmation/decision actions in one clause remains `abstain`;
+the lexical guard cannot safely bind each object or quantity there yet.
+For approval/adoption/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
 an empty actor extraction is never treated as a match, even for actor-free approval queries.
 Confirmation claims also require all requested objects and qualifiers in the same affirmative
 clause. Words from separate confirmations, another person's report, or an unconfirmed completion
