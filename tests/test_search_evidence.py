@@ -350,6 +350,22 @@ class SearchEvidenceTests(unittest.TestCase):
                 with self.subTest(body=body, limit=limit):
                     self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
 
+    def test_numeric_attribution_does_not_pool_multiple_actions(self):
+        for body, query in (
+            ("Alice confirmed ExampleModel speed 6.5 and Bob confirmed ExampleModel speed 5.5.",
+             "Did Alice confirm ExampleModel speed 5.5?"),
+            ("Alice confirmed ExampleModel speed 6.5 and Bob approved ExampleModel speed 5.5.",
+             "Did Alice confirm ExampleModel speed 5.5?"),
+            ("김민수가 ExampleModel 속도 6.5배 도입을 승인했고 이영희가 ExampleModel 속도 5.5배 도입을 승인했다.",
+             "김민수가 ExampleModel 속도 5.5배 도입을 승인했나?"),
+            ("김민수가 ExampleModel 속도 6.5배 도입을 승인했고 이영희가 ExampleModel 속도 5.5배를 확인했다.",
+             "김민수가 ExampleModel 속도 5.5배 도입을 승인했나?"),
+        ):
+            self.note("metrics", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+
     def test_wrong_actor_does_not_inherit_approval(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
         for limit in (1, 4, 20):

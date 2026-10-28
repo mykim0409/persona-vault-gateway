@@ -1386,6 +1386,12 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     verb = re.search(pattern, clause, re.I)
                     if not verb:
                         continue
+                    # shortcut: numeric attribution in multi-action clauses needs finer binding; abstain for now.
+                    if numbers and len(re.findall(
+                        r"(?:승인|확인|검증|결정|선택)(?:했|하였|하셨|함|됐|되었|됨)|"
+                        r"\b(?:approved|authorized|confirmed|verified|decided|chose)\b", clause, re.I,
+                    )) > 1:
+                        continue
                     # Bind the action to its subject, not another participant elsewhere in the sentence.
                     subjects = re.findall(subject_pattern, clause[:verb.start()])
                     if subjects:
