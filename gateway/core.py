@@ -1183,28 +1183,52 @@ def evidence_term(term: str) -> str:
 
 
 def evidence_blocks(text: str) -> list[str]:
-    """Keep paragraphs and table rows separate, retaining their local heading/header context."""
-    text = _SRC_RE.sub("", text).strip()
+    """Keep paragraphs, list items and table rows separate with their local parent context."""
+    text = _SRC_RE.sub("", text).rstrip()
     blocks: list[str] = []
     headings: list[tuple[int, str]] = []
     paragraph: list[str] = []
     table_header = ""
     fence = ""
+    items: list[tuple[int, list[str]]] = []
+
+    def context() -> list[str]:
+        return [heading for _, heading in headings] + [line for _, parent in items for line in parent]
 
     def flush() -> None:
         if paragraph:
-            blocks.append("\n".join([heading for _, heading in headings] + paragraph))
+            blocks.append("\n".join(context() + paragraph))
+            if items and not items[-1][1]:
+                items[-1][1].extend(paragraph)
             paragraph.clear()
 
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        local = expanded[items[-1][0]:] if items and indent >= items[-1][0] else expanded
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", local)
         if fence:
             paragraph.append(line)
             if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
                 fence = ""
                 flush()
             continue
+        item = re.match(r"^ *(?:[-+*]|[0-9]{1,9}[.)])(?: +|$)", expanded)
+        if item:
+            flush()
+            while items and indent < items[-1][0]:
+                items.pop()
+            items.append((item.end(), []))
+            table_header = ""
+            paragraph.append(line)
+            marker = re.match(r"^(`{3,}|~{3,})", expanded[item.end():])
+            fence = marker[1] if marker else ""
+            continue
+        # An unindented soft wrap stays in its item; a new outdented block does not.
+        if not paragraph and line.strip():
+            while items and indent < items[-1][0]:
+                items.pop()
         if marker:
             flush()
             table_header = ""
@@ -1215,6 +1239,12 @@ def evidence_blocks(text: str) -> list[str]:
         if heading:
             flush()
             table_header = ""
+            while items and indent < items[-1][0]:
+                items.pop()
+            if items:
+                # Local list headings must not become context for later sibling items.
+                paragraph.append(line)
+                continue
             level = len(heading[1])
             headings = [(depth, value) for depth, value in headings if depth < level]
             headings.append((level, line))
@@ -1229,7 +1259,7 @@ def evidence_blocks(text: str) -> list[str]:
             flush()
             table_header = line
         elif table_header and "|" in line:
-            blocks.append("\n".join([heading for _, heading in headings] + [table_header, line]))
+            blocks.append("\n".join(context() + [table_header, line]))
         else:
             table_header = ""
             paragraph.append(line)

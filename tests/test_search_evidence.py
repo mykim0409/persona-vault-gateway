@@ -62,6 +62,70 @@ class SearchEvidenceTests(unittest.TestCase):
         self.assertNotIn("pvg-src", self.search("FP16")["results"][0]["snippet"])
         self.assertEqual(self.search("Snapshot101 FP16")["answer_state"]["state"], "abstain")
 
+    def test_list_siblings_cannot_pool_evidence(self):
+        for first, second in (("-", "-"), ("*", "*"), ("+", "+"), ("1.", "2."), ("1)", "2)"), ("- [x]", "- [ ]"), ("  -", "  -"), ("\t-", "\t-")):
+            for separator in ("\n", "\n\n"):
+                self.note("network", f"{first} ExampleMiner DNS is active.{separator}{second} OtherProject NFS is active.")
+                for limit in (1, 4, 20):
+                    with self.subTest(first=first, separator=separator, limit=limit):
+                        result = self.search("ExampleMiner NFS", limit)
+                        self.assertEqual(result["answer_state"]["state"], "abstain")
+                        self.assertTrue(all(item["answer_relevance"] == "candidate" for item in result["results"]))
+
+    def test_list_item_continuations_and_parent_context(self):
+        for body in (
+            "- ExampleMiner NFS is active.\n- OtherProject DNS is active.",
+            "1. ExampleMiner\n   NFS is active.\n2. OtherProject DNS is active.",
+            "- ExampleMiner\nNFS is active.\n- OtherProject DNS is active.",
+            "- ExampleMiner:\n\n  NFS is active.\n- OtherProject DNS is active.",
+            "- ExampleMiner\n  storage services:\n  - DNS is active.\n  - NFS is active.\n- OtherProject:\n  - DNS is pending.",
+            "10. ExampleMiner:\n    1) NFS is active.\n    2) DNS is pending.\n11. OtherProject:\n    1) DNS is active.",
+            "- Platform:\n  - ExampleMiner:\n    - NFS is active.\n  - OtherProject:\n    - DNS is active.",
+            "- ExampleMiner:\n\n  | Service | Status |\n  | --- | --- |\n  | NFS | active |\n  | DNS | pending |\n- OtherProject DNS is active.",
+        ):
+            self.note("network", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    result = self.search("ExampleMiner NFS", limit)
+                    self.assertEqual(result["answer_state"]["state"], "supported")
+                    self.assertIn("NFS", result["results"][0]["snippet"])
+                    self.assertNotIn("OtherProject", result["results"][0]["snippet"])
+
+    def test_list_parent_context_does_not_leak(self):
+        for body in (
+            "- ExampleMiner:\n  - DNS is active.\n- OtherProject:\n  - NFS is active.",
+            "- Platform:\n  - ExampleMiner:\n    - DNS is active.\n  - OtherProject:\n    - NFS is active.",
+            "- ExampleMiner:\n  - DNS is active.\n\nOtherProject NFS is active.",
+            "- ExampleMiner:\n  - DNS is active.\n\n## OtherProject\n\nNFS is active.",
+            "- Services:\n  ## ExampleMiner\n\n  DNS is active.\n- OtherProject NFS is active.",
+        ):
+            self.note("network", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "abstain")
+
+    def test_list_blocks_preserve_fences_and_markers(self):
+        code = "```text\n- ExampleMiner\n1. OtherProject\n```"
+        self.assertEqual(core.evidence_blocks(code), [code])
+        nested = "- ExampleMiner:\n\n  ```text\n  - DNS\n  - NFS\n  ```\n- OtherProject"
+        self.assertEqual(core.evidence_blocks(nested), ["- ExampleMiner:", "- ExampleMiner:\n  ```text\n  - DNS\n  - NFS\n  ```", "- OtherProject"])
+        ordered = "10. ExampleMiner:\n\n    ```text\n    - DNS\n    - NFS\n    ```\n11. OtherProject"
+        self.assertEqual(core.evidence_blocks(ordered), ["10. ExampleMiner:", "10. ExampleMiner:\n    ```text\n    - DNS\n    - NFS\n    ```", "11. OtherProject"])
+        inline = "- ```text\n  - Not a sibling\n  ```\n- OtherProject"
+        self.assertEqual(core.evidence_blocks(inline), ["- ```text\n  - Not a sibling\n  ```", "- OtherProject"])
+        marker = "<!-- pvg-src: item:0123456789abcdef -->"
+        blocks = core.evidence_blocks(f"# Services\n\n- ExampleMiner NFS {marker}\n- OtherProject DNS")
+        self.assertEqual(blocks, ["# Services\n- ExampleMiner NFS ", "# Services\n- OtherProject DNS"])
+
+    def test_list_conflicts_remain_claim_scoped(self):
+        self.note("network", "- ExampleMiner NFS is active.\n- OtherProject DNS is active.")
+        self.note("objection", "- ExampleMiner DNS is active.\n- OtherProject NFS is active.", conflict_state="unresolved")
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "supported")
+        self.note("objection", "- That claim is disputed.", memory_type="candidate", relations={"contradicts": ["network"]})
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "review_required")
+
     def test_unknown_project_abstains(self):
         self.note("actual", "ExampleMiner FP16 comparison", conflict_state="unresolved")
         self.assertEqual(self.search("없는프로젝트QZV981")["answer_state"]["state"], "abstain")

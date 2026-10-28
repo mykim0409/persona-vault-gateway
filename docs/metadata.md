@@ -95,8 +95,11 @@ An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When 
 Search candidates are not automatically answer evidence. Response-only `answer_relevance`
 distinguishes `candidate`, `semantic_candidate`, `grounded`, and `related_claim`.
 Grounding uses query-term coverage, explicit identifiers, and conservative actor/action guards.
-Coverage is evaluated per paragraph or Markdown table row, with enclosing ATX headings and
-table headers retained as local context. Unrelated paragraphs, sibling sections, and table
+Coverage is evaluated per paragraph, list item, or Markdown table row, with enclosing ATX headings,
+list-item introductions, and table headers retained as local context. Sibling list items stay
+separate even without blank lines; wrapped lines stay with their item. Nested items inherit their
+parent's introductory paragraph, not sibling content. This is a conservative block splitter, not
+a complete CommonMark parser. Unrelated paragraphs, sibling sections, list items, and table
 rows cannot pool their words into one anchor. Keyword/hybrid snippets come from the best
 eligible block rather than the first matching part of the document. Provenance markers remain hidden.
 Approval queries and claims that someone confirmed or verified something require one identifiable
