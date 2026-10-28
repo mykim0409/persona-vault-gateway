@@ -203,6 +203,8 @@ raw에서 가져온 주장은 `<!-- pvg-src: item:<16 hex> -->` 같은 HTML 주�
 
 - `item:<16 hex>`는 raw item의 경로와 locator의 단방향 hash입니다. 경로나 인용은 담지 않습니다.
 - `sess:<8 hex>`는 세션 id의 단방향 hash입니다. 사용자 장부의 행만 가집니다.
-- `doc:<path>#<heading>`는 기존 문서를 가리킵니다. 사람이 직접 쓰며, 주제 문서에서 한 번 옮기는 migration에서만 씁니다.
+- `doc:<path>#<heading>`는 topic 이관 시 기존 문서를 가리킵니다. 검토된 프로젝트 장부 이관에서는 `doc:<원본 장부 경로>#D-###`와 Git commit에 고정된 `repository_sources` 원본도 함께 사용합니다.
+
+결정 장부의 ID는 유지합니다. 검토된 귀속 이관에서는 원본 행을 비권위적인 `이관됨` 안내로 바꾸고, 경로와 ID로 목적지 행을 가리킵니다. 일반 행의 불변 필드 및 삭제 금지 규칙은 유지합니다. 무손실 분리 형식과 승인 절차는 [CURATOR.md](CURATOR.md#project-boundaries-and-reviewed-ownership-transfers)를 따릅니다. 기존 metadata의 migration은 필요 없습니다.
 
 marker는 주장 줄의 끝에 두며, 표 행에서는 마지막 칸 안에 둡니다. Obsidian 읽기 보기에서는 보이지 않습니다. Markdown 본문의 일부이므로 active 문자 수에 포함되고 색인됩니다. `item:`과 `sess:` token은 Curator 도구가 쓰므로 직접 고치지 않습니다. 직접 쓰는 것은 `doc:` token뿐입니다.

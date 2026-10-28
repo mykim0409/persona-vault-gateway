@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import date
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 
 __all__ = [
@@ -42,7 +42,7 @@ BRIEF_CAP = 8000
 PROJECT_DISPOSITIONS = {"decision", "deferral", "supersession", "goal_change", "question"}
 USER_DISPOSITIONS = {"user_preference", "user_constraint", "user_feedback", "user_context", "user_retraction"}
 CLAIM_DISPOSITIONS = PROJECT_DISPOSITIONS | USER_DISPOSITIONS | {"knowledge"}
-LEGACY_DISPOSITIONS = {"merge", "replace"}  # deprecated in protocol 23, removed in 24
+LEGACY_DISPOSITIONS = {"merge", "replace"}  # deprecated; retained for existing raw plans
 MARKED_DISPOSITIONS = CLAIM_DISPOSITIONS | LEGACY_DISPOSITIONS  # these owe a pvg-src marker in each target
 SUBAGENT_DISPOSITIONS = {"knowledge", "already-covered", "discard", "hold"}
 DISPOSITIONS = MARKED_DISPOSITIONS | {"already-covered", "discard", "hold"}
@@ -52,7 +52,7 @@ CURATOR_KINDS: dict[str, dict[str, Any]] = {
     "decision_ledger": {
         "dir": "20_Projects/", "file": "DECISIONS.md", "template": "docs/templates/DECISIONS.md", "prefix": "D",
         "header": ("id", "날짜", "유형", "상태", "내용", "이유·근거", "후속"),
-        "types": {"결정", "미룸", "대체", "목표변경", "질문"}, "statuses": {"유효", "대체됨", "보류", "종결"},
+        "types": {"결정", "미룸", "대체", "목표변경", "질문"}, "statuses": {"유효", "대체됨", "보류", "종결", "이관됨"},
     },
     "user_ledger": {
         "dir": "10_User/", "file": "OBSERVATIONS.md", "template": "docs/templates/OBSERVATIONS.md", "prefix": "U",
@@ -642,6 +642,66 @@ def _review_items(entries: Any) -> list[dict[str, Any]]:
     return expanded
 
 
+def review_targets(plan: dict) -> set[str]:
+    targets = {path for item in _review_items(plan["review"]["items"]) for path in item["targets"]}
+    if plan.get("mode") == "ledger-transfer":
+        paths = plan["selected"].get("transfer_paths")
+        if not isinstance(paths, list) or not paths or any(not _project_path(path) for path in paths):
+            raise ValueError("ledger-transfer requires explicit project Markdown paths")
+        targets.update(paths)
+    return targets
+
+
+def build_transfer_plan(documents: list[dict], paths: list[str], *, revision: str, before: str, brief_cap: int) -> dict:
+    if brief_cap < 1 or not paths or len(set(paths)) != len(paths) or any(not _project_path(path) for path in paths):
+        raise ValueError("ledger-transfer requires distinct project paths and a positive brief cap")
+    date.fromisoformat(before)
+    by_path = {doc["path"]: doc for doc in documents}
+    if not any(by_path.get(path, {}).get("kind") == "decision_ledger" for path in paths):
+        raise ValueError("ledger-transfer requires an existing decision ledger")
+    nodes, ledgers = [], []
+    for path in sorted(paths):
+        doc = by_path.get(path)
+        nodes.append({"type": "canonical_candidate", "path": path,
+                      **({"sha256": doc["document_hash"]} if doc else {"create": True})})
+        kind = doc.get("kind") if doc else {"DECISIONS.md": "decision_ledger", "BRIEF.md": "brief"}.get(PurePosixPath(path).name)
+        if kind in {"decision_ledger", "brief"}:
+            rows = ledger_entries(str((doc or {}).get("text") or ""), path=path)[0] if kind == "decision_ledger" and doc else []
+            ledgers.append({"path": path, "kind": kind, "template": CURATOR_KINDS[kind]["template"], "create": doc is None,
+                            "cap": brief_cap, "next_id": f"D-{max((int(row['id'][2:]) for row in rows), default=0) + 1:03d}"})
+    return {
+        "status": "ok", "mode": "ledger-transfer", "revision": revision, "before": before,
+        "selected": {"source_paths": [], "transfer_paths": sorted(paths), "graph": {"nodes": nodes, "edges": []}, "ledgers": ledgers},
+        "review": {"items": [], "delete_paths": [], "ledger_transfers": [], "repository_id": "", "drafts": {},
+                   "dependencies": sorted(path for path in paths if path in by_path), "probes": [],
+                   "user_knowledge": {"status": "unchanged", "reason": "Project ownership only; no user-profile change."}},
+    }
+
+
+def _project_path(path: Any) -> bool:
+    return (
+        isinstance(path, str) and path.startswith("20_Projects/") and path.endswith(".md")
+        and PurePosixPath(path).as_posix() == path and len(PurePosixPath(path).parts) >= 3
+        and not any(part.startswith(".") for part in PurePosixPath(path).parts)
+        and not any(char in path for char in "\\\x00\n\r#")
+    )
+
+
+def ledger_ref(path: str, row_id: str) -> str:
+    return f"{quote(path, safe='/')}#{row_id}"
+
+
+def _ledger_refs(value: str, path: str) -> list[tuple[str, str]]:
+    refs = []
+    for token in value.split(", ") if value else []:
+        target, sep, row_id = token.partition("#")
+        target, row_id = (unquote(target), row_id) if sep else (path, token)
+        if (sep and not _project_path(target)) or not re.fullmatch(r"D-\d{3,}", row_id):
+            raise ValueError("invalid ledger reference")
+        refs.append((target, row_id))
+    return refs
+
+
 def ledger_entries(text: str, kind: str = "decision_ledger", path: str = "") -> tuple[list[dict[str, Any]], list[str]]:
     """Parse the one ledger table of a curator document into rows plus path-qualified problems."""
     spec, problems = CURATOR_KINDS[kind], []
@@ -685,10 +745,17 @@ def ledger_entries(text: str, kind: str = "decision_ledger", path: str = "") -> 
             "items": _src_tokens(line, "item:"), "docs": _src_tokens(line, "doc:"), "sess": _src_tokens(line, "sess:"),
         })
     for row in rows:
-        if row["successor"] and row["successor"] not in seen - {row["id"]}:
+        successor = row["successor"]
+        try:
+            refs = _ledger_refs(successor, path)
+            invalid = any(p == path and r not in seen - {row["id"]} for p, r in refs)
+            invalid |= len(refs) > 1 and row["status"] != "이관됨"
+        except ValueError:
+            invalid = True
+        if invalid:
             problems.append(f"ledger 후속 not found: {path}: {row['id']}")
-        if row["status"] == "대체됨" and not row["successor"]:
-            problems.append(f"ledger 대체됨 requires 후속: {path}: {row['id']}")
+        if row["status"] in {"대체됨", "이관됨"} and not successor:
+            problems.append(f"ledger {row['status']} requires 후속: {path}: {row['id']}")
     return rows, problems
 
 
@@ -728,12 +795,14 @@ def _doc_source_ok(token: str, original: dict[str, dict[str, Any]]) -> bool:
 
 def _curator_checks(
     targets: set[str], current: dict[str, dict[str, Any]], original: dict[str, dict[str, Any]],
-    session_of: dict[str, str], brief_cap: int,
+    session_of: dict[str, str], brief_cap: int, transfers: set[tuple[str, str]] | None = None,
+    transfer_docs: dict[str, set[str]] | None = None,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
     """Mechanical checks for BRIEF/PROFILE and the two ledgers; the meaning of a claim stays with the reviewer."""
     errors: list[str] = []
     warnings: list[str] = []
     numbers: dict[str, Any] = {"brief_cap": brief_cap, "brief_chars": {}, "ledger_rows": {}, "superseded_rows": {}}
+    referenced_rows: dict[str, set[str]] = {}
     # A brief cites ledger rows by id, so a changed ledger also re-checks the brief beside it, targeted or not.
     ledger_dirs = {
         PurePosixPath(path).parent for path in targets if "header" in CURATOR_KINDS.get(current.get(path, {}).get("kind"), {})
@@ -755,7 +824,7 @@ def _curator_checks(
             errors.append(f"curator document not allowed here: {path}")
         errors += [
             f"doc source invalid: {path}: {token}" for token in sorted(_src_docs(text) - _src_docs(base_text))
-            if not _doc_source_ok(token, original)
+            if token not in (transfer_docs or {}).get(path, set()) and not _doc_source_ok(token, original)
         ]
         if "header" in spec:
             rows, problems = ledger_entries(text, kind, path)
@@ -768,6 +837,11 @@ def _curator_checks(
                 numbers["superseded_rows"][path] = sum(row["status"] == "대체됨" for row in rows)
             for row in rows:
                 old, where = old_rows.get(row["id"]), f"{path}: {row['id']}"
+                transferred = (path, row["id"]) in (transfers or set())
+                if row["status"] == "이관됨" and not transferred and (not old or row["cells"] != old["cells"]):
+                    errors.append(f"ledger transfer requires a reviewed mapping: {where}")
+                if old and old["status"] == "이관됨" and row["cells"] != old["cells"]:
+                    errors.append(f"ledger transfer redirect is immutable: {where}")
                 if old is None:
                     if int(row["id"][2:]) <= ceiling:
                         errors.append(f"ledger id not above the base maximum: {where}")
@@ -775,13 +849,24 @@ def _curator_checks(
                         errors.append(f"ledger row without provenance: {where}")
                 else:
                     # Only 상태 and the last column (후속 / 독립 세션) may change; history is never rewritten.
-                    if [cell for index, cell in enumerate(row["cells"]) if index not in (3, 6)] != [
+                    if not transferred and [cell for index, cell in enumerate(row["cells"]) if index not in (3, 6)] != [
                         cell for index, cell in enumerate(old["cells"]) if index not in (3, 6)
                     ]:
                         errors.append(f"ledger row changed outside its mutable columns: {where}")
                     if not (old["items"] <= row["items"] and old["docs"] <= row["docs"] and old["sess"] <= row["sess"]):
                         errors.append(f"ledger row lost provenance: {where}")
                 if kind != "user_ledger":
+                    try:
+                        for target, row_id in _ledger_refs(row["successor"], path):
+                            other = current.get(target, {})
+                            if target not in referenced_rows:
+                                referenced_rows[target] = {
+                                    r["id"] for r in ledger_entries(str(other.get("text") or ""), path=target)[0]
+                                } if other.get("kind") == "decision_ledger" else set()
+                            if row_id not in referenced_rows[target]:
+                                errors.append(f"ledger 후속 not found: {where}: {target}#{row_id}")
+                    except ValueError:
+                        pass  # ledger_entries already reported malformed references
                     continue
                 # 독립 세션 is the tool's count of distinct sessions behind the row, never the Curator's claim.
                 want = (old["sess"] if old else set()) | {
@@ -823,6 +908,98 @@ def _curator_checks(
     return errors, warnings, numbers
 
 
+def _check_ledger_transfers(
+    plan: dict, original: dict[str, dict], current: dict[str, dict], targets: set[str],
+) -> tuple[list[str], set[tuple[str, str]], dict[str, set[str]]]:
+    """Only an exact, lossless ownership map may replace a frozen row with a redirect."""
+    errors: list[str] = []
+    sources: set[tuple[str, str]] = set()
+    destinations: set[tuple[str, str]] = set()
+    allowed_docs: defaultdict[str, set[str]] = defaultdict(set)
+    review = plan["review"]
+    entries = review.get("ledger_transfers")
+    repo = review.get("repository_id")
+    if not isinstance(entries, list) or not entries or not isinstance(repo, str) or not _REPOSITORY_ID_RE.fullmatch(repo):
+        raise ValueError("ledger-transfer requires ledger_transfers and the Vault repository_id")
+    old_tables = {p: {r["id"]: r for r in ledger_entries(str(d.get("text") or ""), path=p)[0]}
+                  for p, d in original.items() if p in targets and d.get("kind") == "decision_ledger"}
+    tables = {p: {r["id"]: r for r in ledger_entries(str(d.get("text") or ""), path=p)[0]}
+              for p, d in current.items() if p in targets and d.get("kind") == "decision_ledger"}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("source"), dict) or not isinstance(entry.get("destinations"), list):
+            raise ValueError("transfer requires source and destinations")
+        source, to = entry["source"], entry["destinations"]
+        path, row_id = source.get("path"), source.get("id")
+        if not isinstance(path, str) or not isinstance(row_id, str):
+            raise ValueError("transfer source requires path and id")
+        key, where = (path, row_id), f"{path}#{row_id}"
+        old, stub = old_tables.get(path, {}).get(row_id), tables.get(path, {}).get(row_id)
+        if (
+            key in sources or path not in targets or not old or not stub or old["status"] == "이관됨"
+            or source.get("sha256") != original[path]["document_hash"]
+        ):
+            errors.append(f"transfer source missing, repeated or stale: {where}")
+            continue
+        sources.add(key)
+        if any(stub[field] != old[field] for field in ("items", "docs", "sess")):
+            errors.append(f"transfer redirect must preserve exact source markers: {where}")
+        if entry.get("basis") not in {"inferred", "human_explicit"} or not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
+            errors.append(f"transfer requires attribution basis and reason: {where}")
+        evidence = entry.get("evidence_paths")
+        if not isinstance(evidence, list) or not evidence or any(p not in original for p in evidence if isinstance(p, str)) or any(not isinstance(p, str) for p in evidence):
+            errors.append(f"transfer requires Git-base evidence_paths: {where}")
+        elif not set(evidence) <= set(review.get("dependencies", [])):
+            errors.append(f"transfer evidence must be review dependencies: {where}")
+        refs, parts = [], []
+        for destination in to:
+            if not isinstance(destination, dict) or not isinstance(destination.get("path"), str) or not isinstance(destination.get("id"), str):
+                raise ValueError("transfer destination requires path and id")
+            target, new_id = destination["path"], destination["id"]
+            new_key, row = (target, new_id), tables.get(target, {}).get(new_id)
+            if target not in targets or new_key in destinations or new_id in old_tables.get(target, {}) or not row:
+                errors.append(f"transfer destination must be a unique new row: {target}#{new_id}")
+                continue
+            destinations.add(new_key)
+            refs.append(ledger_ref(target, new_id))
+            parts.append(row["cells"][4])
+            expected_successor = old["successor"]
+            if expected_successor and target != path:
+                expected_successor = ", ".join(ledger_ref(p, r) for p, r in _ledger_refs(expected_successor, path))
+            if (
+                row["cells"][1:4] != old["cells"][1:4] or row["cells"][5] != old["cells"][5]
+                or row["successor"] != expected_successor
+            ):
+                errors.append(f"transfer changed date, type, state, reason or supersession: {target}#{new_id}")
+            origin = "doc:" + ledger_ref(path, row_id)
+            allowed_docs[target].update(old["docs"] | {origin})
+            if row["items"] != old["items"] or row["sess"] != old["sess"] or row["docs"] != old["docs"] | {origin}:
+                errors.append(f"transfer must copy exact source markers and origin: {target}#{new_id}")
+            required_repos = [*original[path].get("repository_sources", []),
+                              {"repo_id": repo, "path": path, "commit": plan["revision"], "anchor": row_id}]
+            if any(ref not in current[target].get("repository_sources", []) for ref in required_repos):
+                errors.append(f"transfer lost repository provenance or pinned origin: {target}#{new_id}")
+        if not refs or not any(_project_path(d["path"]) and PurePosixPath(d["path"]).parts[1] != PurePosixPath(path).parts[1] for d in to):
+            errors.append(f"transfer needs a destination in another project: {where}")
+        # No paraphrasing in this exception: ordered fragments must cover the original content exactly.
+        normalize = lambda text: re.sub(r"\s+", " ", text).strip()
+        if any(not part.strip() for part in parts) or normalize(" ".join(parts)) != normalize(old["cells"][4]):
+            errors.append(f"transfer fragments must preserve the complete source content in order: {where}")
+        expected = [*old["cells"][:3], "이관됨", "Ownership transferred; follow destinations.", old["cells"][5], ", ".join(refs)]
+        if stub["cells"] != expected:
+            errors.append(f"transfer source must become an exact non-authoritative redirect: {where}")
+    for path in targets:
+        previous, latest = original.get(path, {}), current.get(path, {})
+        if any(ref not in latest.get("repository_sources", []) for ref in previous.get("repository_sources", [])):
+            errors.append(f"transfer target lost repository_sources: {path}")
+        for row_id, row in tables.get(path, {}).items():
+            old = old_tables.get(path, {}).get(row_id)
+            if old and (path, row_id) not in sources and row["cells"] != old["cells"]:
+                errors.append(f"unmapped ledger row changed during transfer: {path}#{row_id}")
+            if not old and (path, row_id) not in destinations:
+                errors.append(f"unmapped new ledger row during transfer: {path}#{row_id}")
+    return errors, sources, dict(allowed_docs)
+
+
 def check_compaction(
     plan: dict[str, Any], before: list[dict[str, Any]], after: list[dict[str, Any]],
     *, integrity_after: list[dict[str, Any]] | None = None, brief_cap: int = BRIEF_CAP,
@@ -837,7 +1014,8 @@ def check_compaction(
     selected = plan.get("selected") or {}
     paths = selected.get("source_paths") or []
     review = plan.get("review") or {}
-    if not isinstance(paths, list) or not paths or len(set(paths)) != len(paths) or not isinstance(review, dict):
+    transfer_mode = plan.get("mode") == "ledger-transfer"
+    if not isinstance(paths, list) or (not paths and not transfer_mode) or len(set(paths)) != len(paths) or not isinstance(review, dict):
         raise ValueError("plan requires selected source_paths and an annotated review")
     nodes = selected.get("graph", {}).get("nodes", [])
     frozen = {node["path"]: node.get("sha256") for node in nodes if node.get("type") == "source_file"}
@@ -863,12 +1041,23 @@ def check_compaction(
     deleted = review.get("delete_paths")
     if not isinstance(deleted, list) or any(not isinstance(path, str) for path in deleted):
         raise ValueError("review.delete_paths must be a list of paths")
-    if not deleted or len(set(deleted)) != len(deleted) or not set(deleted) <= set(paths):
+    if (not deleted and not transfer_mode) or len(set(deleted)) != len(deleted) or not set(deleted) <= set(paths):
         errors.append("delete_paths must select distinct planned source files")
+    if transfer_mode and (paths or entries or deleted):
+        errors.append("ledger-transfer cannot include raw items or file deletion")
+    if not transfer_mode and review.get("ledger_transfers"):
+        errors.append("ledger_transfers requires a ledger-transfer plan")
     classified: set[str] = set()
-    targets: set[str] = set()
+    targets = review_targets(plan) if transfer_mode else set()
     retained: set[str] = set()
     owed: defaultdict[str, set[str]] = defaultdict(set)
+    if transfer_mode:
+        for target in targets:
+            doc, base = current.get(target), original.get(target)
+            if not doc or doc.get("metadata_valid") is False or doc.get("memory_type") != "canonical":
+                errors.append(f"missing or invalid transfer canonical: {target}")
+            if base and doc and (doc.get("document_id") != base.get("document_id") or doc.get("kind") != base.get("kind")):
+                errors.append(f"transfer cannot change document identity or kind: {target}")
     for entry in entries:
         item_id = entry.get("id")
         disposition = entry.get("disposition")
@@ -937,17 +1126,21 @@ def check_compaction(
         errors.append(f"unplanned Markdown changes: {', '.join(sorted(unexpected))}")
     # New markers must be backed by a claim review of that target. A missing marker is an error in a curator
     # document and only a count elsewhere, until compact-annotate has been used on a real batch.
+    transfer_errors, transfers, transfer_docs = _check_ledger_transfers(plan, original, current, targets) if transfer_mode else ([], set(), {})
+    errors += transfer_errors
+    # Related topics/briefs may copy existing evidence, but may not fabricate new item identities.
+    copied_ids = set().union(*(_src_ids(str(original.get(p, {}).get("text") or "")) for p in targets)) if transfer_mode else set()
     unmarked: set[str] = set()
     for target in targets:
         have = _src_ids(str(current.get(target, {}).get("text") or ""))
-        if have - _src_ids(str(original.get(target, {}).get("text") or "")) - owed[target]:
+        if have - _src_ids(str(original.get(target, {}).get("text") or "")) - owed[target] - copied_ids:
             errors.append(f"provenance marker without a claim review: {target}")
         missing = owed[target] - have
         if missing and current.get(target, {}).get("kind") in CURATOR_KINDS:
             errors.append(f"claim without provenance marker: {target}")
         else:
             unmarked |= missing
-    curator_errors, curator_warnings, curation = _curator_checks(targets, current, original, session_of, brief_cap)
+    curator_errors, curator_warnings, curation = _curator_checks(targets, current, original, session_of, brief_cap, transfers, transfer_docs)
     errors += curator_errors
     warnings += curator_warnings
     user = review.get("user_knowledge") or {}
@@ -959,7 +1152,7 @@ def check_compaction(
         errors.append("user_knowledge requires an accurate updated/unchanged status and reason")
     before_chars = sum(len(str(doc.get("text") or "")) for doc in before)
     after_chars = sum(len(str(doc.get("text") or "")) for doc in after)
-    if after_chars >= before_chars:
+    if after_chars >= before_chars and not transfer_mode:
         errors.append("active Markdown characters did not decrease")
     baseline = analyze_documents(before)
     analysis = analyze_documents(after if integrity_after is None else integrity_after)

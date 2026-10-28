@@ -1030,6 +1030,196 @@ def index_lock_checks() -> None:
     print("compaction indexing: cross-process exclusion and lock release passed")
 
 
+def ledger_transfer_checks() -> None:
+    """Ownership moves use real drafts/review gates, never fabricated raw or false supersession."""
+    from test_wiki import HEADERS, SEPARATOR, brief_text, row
+    from gateway.wiki import _curator_checks, ledger_entries, ledger_ref
+
+    with TemporaryDirectory(prefix="pvg-transfer-") as temporary:
+        root = Path(temporary)
+        staging = root / ".tmp/curating"
+        staging.mkdir(parents=True)
+        source, target = "20_Projects/Model/DECISIONS.md", "20_Projects/Platform/DECISIONS.md"
+        source_brief, target_brief = "20_Projects/Model/BRIEF.md", "20_Projects/Platform/BRIEF.md"
+        old_marker = "item:0123456789abcdef"
+        old_ref = {"repo_id": "operations", "commit": "a" * 40, "path": "ops.md"}
+
+        def text(path: str, body: str, refs: list[dict] | None = None) -> str:
+            front = {"id": path.replace("/", "_"), "kind": "decision_ledger" if path.endswith("DECISIONS.md") else "brief",
+                     "memory_type": "canonical", "review_state": "human_accepted", "temporal_state": "current",
+                     "provenance_mode": "human_asserted", "retrieval_tier": "primary", "repository_sources": refs or []}
+            return "---\n" + "".join(f"{key}: {json.dumps(value)}\n" for key, value in front.items()) + f"---\n\n{body}\n"
+
+        def table(*rows: str) -> str:
+            return "\n".join([HEADERS["decision_ledger"], SEPARATOR, *rows])
+
+        base_rows = [row("D-001", content="Shared builds are isolated. Model CI stays local.", tokens=(old_marker,)),
+                     row("D-002", "대체됨", "Earlier build policy.", last="D-003", tokens=(old_marker,)),
+                     row("D-003", content="Replacement policy.", tokens=(old_marker,)),
+                     row("D-004", content="The cycle runner stays with the model.", tokens=(old_marker,))]
+        base = {source: text(source, table(*base_rows), [old_ref]),
+                target: text(target, table(row("D-001", content="Existing platform decision.", tokens=(old_marker,)))),
+                source_brief: text(source_brief, brief_text(**{"유효한 결정": "- D-001 Shared builds and model CI\n- D-004 Cycle runner"}))}
+        for path, content in base.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(content, encoding="utf-8")
+
+        def git(*args: str) -> str:
+            return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Transfer Test")
+        git("config", "user.email", "test@localhost")
+        git("add", "20_Projects")
+        git("commit", "-qm", "Base")
+        plan_path = staging / "transfer.json"
+
+        def command(name: str, *args: str) -> dict:
+            return cli.run(["--vault", str(root), name, str(plan_path), *args])
+
+        paths = [source, target, source_brief, target_brief]
+        with no_network():
+            preview = cli.run(["--vault", str(root), "compact-plan", "--ledger-transfer", *paths, "--output", str(plan_path)])
+        assert preview["mode"] == "ledger-transfer" and preview["selected"]["source_paths"] == [], preview
+        assert preview["selected"]["create_targets"] == [target_brief], preview
+        plan = json.loads(plan_path.read_text())
+        hashes = {n["path"]: n.get("sha256") for n in plan["selected"]["graph"]["nodes"]}
+        origin1, origin2 = "doc:" + ledger_ref(source, "D-001"), "doc:" + ledger_ref(source, "D-002")
+        pinned = [{"repo_id": "vault", "path": source, "commit": plan["revision"], "anchor": r} for r in ("D-001", "D-002")]
+        redirects = [
+            row("D-001", "이관됨", "Ownership transferred; follow destinations.", last=f"{ledger_ref(target, 'D-002')}, {ledger_ref(source, 'D-005')}", tokens=(old_marker,)),
+            row("D-002", "이관됨", "Ownership transferred; follow destinations.", last=ledger_ref(target, "D-003"), tokens=(old_marker,)),
+        ]
+        bodies = {
+            source: text(source, table(*redirects, *base_rows[2:], row("D-005", content="Model CI stays local.", tokens=(old_marker, origin1))), [old_ref, pinned[0]]),
+            target: text(target, table(row("D-001", content="Existing platform decision.", tokens=(old_marker,)),
+                                      row("D-002", content="Shared builds are isolated.", tokens=(old_marker, origin1)),
+                                      row("D-003", "대체됨", "Earlier build policy.", last=ledger_ref(source, "D-003"), tokens=(old_marker, origin2))), [old_ref, *pinned]),
+            source_brief: text(source_brief, brief_text(**{"유효한 결정": "- D-004 Cycle runner\n- D-005 Model CI stays local."})),
+            target_brief: text(target_brief, brief_text(**{"유효한 결정": "- D-002 Shared builds are isolated."})),
+        }
+        plan["review"].update(
+            repository_id="vault", ledger_transfers=[
+                {"source": {"path": source, "id": "D-001", "sha256": hashes[source]},
+                 "destinations": [{"path": target, "id": "D-002"}, {"path": source, "id": "D-005"}],
+                 "basis": "inferred", "reason": "Independent operations lifecycle; keep model-specific CI.", "evidence_paths": [source]},
+                {"source": {"path": source, "id": "D-002", "sha256": hashes[source]},
+                 "destinations": [{"path": target, "id": "D-003"}], "basis": "inferred",
+                 "reason": "The older platform decision belongs with platform history.", "evidence_paths": [source]},
+            ],
+            drafts={path: f".tmp/curating/draft-{i}.md" for i, path in enumerate(paths)},
+            probes=[{"query": "Shared builds", "bundle": "current", "expect_paths": [target], "answer_state": "supported"}],
+        )
+
+        def stage(p: dict = plan, content: dict = bodies) -> None:
+            for path, data in content.items():
+                (root / p["review"]["drafts"][path]).write_text(data, encoding="utf-8")
+            plan_path.write_text(json.dumps(p), encoding="utf-8")
+
+        stage()
+        first = command("compact-review")
+        assert first["status"] == "ok" and first["review_binding"]["review_required_ids"] == ["ledger-transfer"], first
+        assert first["active_characters"]["delta"] > 0, first  # Ownership-only work does not pretend to compact raw.
+        assert command("compact-review", "--record")["semantic_review"] == "recorded"
+        recorded = json.loads(plan_path.read_text())
+        assert command("compact-review")["semantic_review"] == "reusable"
+        assert {p: (root / p).read_text() for p in base} == base and not (root / target_brief).exists()
+        # An optional personal policy is hash-bound even when absent at the reviewed base.
+        before = cli.documents_at_revision(root, recorded["revision"])
+        projected = cli.projected_documents(root, recorded, before)
+        personal = {"path": "CURATOR.local.md", "document_hash": "a" * 64}
+        assert review_binding(recorded, [*before, personal], [*projected, personal])["review_required_ids"] == ["ledger-transfer"]
+        (root / "CURATOR.local.md").write_text("Prefer concise status reports.\n", encoding="utf-8")
+        assert command("compact-review")["reason"] == "unplanned_changes_during_review"
+        (root / "CURATOR.local.md").unlink()
+
+        def blocked(message: str, *, contents: dict | None = None, changed_plan: dict | None = None) -> None:
+            stage(changed_plan or plan, contents or bodies)
+            result = command("compact-review")
+            assert result["status"] == "blocked" and message in json.dumps(result), (message, result)
+
+        for old, new, message in (
+            ("Shared builds are isolated.", "Shared builds are optional.", "complete source content"),
+            ("| 2026-01-01 |", "| 2026-10-29 |", "date, type, state"),
+            ("| 대체됨 |", "| 유효 |", "date, type, state"),
+            (origin1, "doc:20_Projects/Missing/DECISIONS.md#D-001", "exact source markers"),
+            ('"commit": "' + plan["revision"] + '"', '"commit": "' + "b" * 40 + '"', "pinned origin"),
+            (ledger_ref(source, "D-003"), ledger_ref(source, "D-999"), "not found"),
+        ):
+            blocked(message, contents={**bodies, target: bodies[target].replace(old, new)})
+        blocked("exact non-authoritative redirect", contents={**bodies, source: bodies[source].replace(redirects[0], base_rows[0])})
+        blocked("row deleted", contents={**bodies, source: bodies[source].replace(base_rows[3] + "\n", "")})
+        blocked("unmapped ledger row changed", contents={**bodies, source: bodies[source].replace("Replacement policy.", "Changed fact.")})
+        blocked("non-valid entry", contents={**bodies, source_brief: base[source_brief]})
+        blocked("identity or kind", contents={**bodies, target: bodies[target].replace('"20_Projects_Platform_DECISIONS.md"', '"renamed"')})
+        invalid = deepcopy(plan)
+        invalid["review"]["ledger_transfers"][0]["source"]["sha256"] = "0" * 64
+        blocked("stale", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["ledger_transfers"].append(deepcopy(invalid["review"]["ledger_transfers"][0]))
+        blocked("repeated", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["delete_paths"] = [source]
+        blocked("cannot include raw items or file deletion", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["items"] = [{"id": "invented", "targets": [], "disposition": "discard", "reason": "No raw"}]
+        blocked("cannot include raw items", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["selected"]["transfer_paths"].append("10_User/OBSERVATIONS.md")
+        blocked("explicit project Markdown", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["ledger_transfers"][0]["basis"] = "automatic"
+        blocked("attribution basis", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["ledger_transfers"][0]["destinations"].append({"path": target, "id": "D-002"})
+        blocked("unique new row", changed_plan=invalid)
+        invalid = deepcopy(plan)
+        invalid["review"]["ledger_transfers"][0]["evidence_paths"] = []
+        blocked("evidence_paths", changed_plan=invalid)
+
+        # Any related topic/brief change invalidates review, even if no ledger content changes.
+        stage(recorded, {**bodies, target_brief: bodies[target_brief] + "\nRelated clarification.\n"})
+        assert command("compact-review")["review_binding"]["review_required_ids"] == ["ledger-transfer"]
+        stage(recorded)
+        for path, content in bodies.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(content, encoding="utf-8")
+        assert command("compact-check")["status"] == "ok"
+        with patch.dict(os.environ, {"EMBEDDING_PROVIDER": "none"}), no_network():
+            finished = command("compact-finish")
+        assert finished["status"] == "ok" and finished["search"]["semantic"] == "disabled", finished
+        db = root / "test.db"
+        db.touch()
+        settings = replace(cli.settings_for(str(root)), db_path=db, embedding_provider="hash")
+        response = {"results": [{"path": target}], "index": {"stale": False}, "answer_state": {"state": "supported"}}
+        with patch.object(core, "qdrant_index_current", return_value=True), patch.object(core, "search_vault", return_value=response), \
+                patch.object(core, "qdrant_json", side_effect=AssertionError("no empty retired-path filter")):
+            assert finish_search(settings, recorded, core.vault_documents(settings))["probes"][0]["passed"]
+        invalid = deepcopy(recorded)
+        invalid["review"]["ledger_transfers"][0]["reason"] += " Changed rationale."
+        stage(invalid)
+        assert command("compact-finish")["reason"] == "semantic_review_changed_or_missing"
+        stage(recorded)
+        (root / target).write_text(bodies[target] + "\nUnreviewed text.\n", encoding="utf-8")
+        assert command("compact-finish")["reason"] == "applied_patch_differs_from_drafts"
+        (root / target).write_text(bodies[target], encoding="utf-8")
+        git("add", "20_Projects")
+        git("commit", "-qm", "Reviewed ownership transfer")
+        assert command("compact-check")["reason"] == "plan_base_changed"
+        current = {d["path"]: d for d in core.vault_documents(settings)}
+        changed = deepcopy(current)
+        changed[source]["text"] = changed[source]["text"].replace("| 이관됨 |", "| 유효 |", 1)
+        errors = _curator_checks({source}, changed, current, {}, 8000)[0]
+        assert any("redirect is immutable" in e for e in errors), errors
+        changed = deepcopy(current)
+        changed[source]["text"] = changed[source]["text"].replace("| D-004 | 2026-01-01 | 결정 | 유효 |", "| D-004 | 2026-01-01 | 결정 | 이관됨 |")
+        assert any("requires a reviewed mapping" in e for e in _curator_checks({source}, changed, current, {}, 8000)[0])
+        spaced = "20_Projects/New Platform/DECISIONS.md"
+        rows, errors = ledger_entries(table(row("D-001", "대체됨", last=ledger_ref(spaced, "D-002"))), path=source)
+        assert not errors and "%20" in rows[0]["successor"], errors
+    print("ledger-transfer: split/move, provenance, supersession, immutable rows, review binding and keyword finish passed")
+
+
 def main() -> None:
     efficiency_checks()
     workflow_checks()
@@ -1037,6 +1227,7 @@ def main() -> None:
     brief_cap_argument_checks()
     annotate_checks()
     ledger_workflow_checks()
+    ledger_transfer_checks()
     index_lock_checks()
     disputed = document_metadata("20_Projects/Demo/disputed.md", """---
 id: kn_disputed
