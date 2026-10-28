@@ -94,18 +94,29 @@ An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When 
 
 Search candidates are not automatically answer evidence. Response-only `answer_relevance`
 distinguishes `candidate`, `semantic_candidate`, `grounded`, and `related_claim`.
-Grounding uses query-term coverage, explicit identifiers, and conservative actor/approval guards.
-Approval queries require one identifiable actor linked to the approval verb in the source.
+Grounding uses query-term coverage, explicit identifiers, and conservative actor/action guards.
+Coverage is evaluated per paragraph or Markdown table row, with enclosing ATX headings and
+table headers retained as local context. Unrelated paragraphs, sibling sections, and table
+rows cannot pool their words into one anchor. Keyword/hybrid snippets come from the best
+eligible block rather than the first matching part of the document. Provenance markers remain hidden.
+Approval queries and claims that someone confirmed or verified something require one identifiable
+actor linked to that action in the source.
 Missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
 an empty actor extraction is never treated as a match, even for actor-free approval queries.
+Confirmation claims also require all requested objects and qualifiers in the same affirmative
+clause. Words from separate confirmations, another person's report, or an unconfirmed completion
+cannot be combined into proof. Negation, plans, uncertainty, and checking *whether* something is
+complete do not establish completion. A topic lookup such as `NFS 복구 상태 확인해줘` remains a normal search.
+These lexical guards can abstain on valid paraphrases or evidence spread across sentences or blocks.
 It is not a general entailment checker: `supported` still requires reading the cited claim,
 including its attribution, scope, and negation. A shared project name alone is not proof.
 Semantic-only candidates remain available with `answer_state=evidence` and
 `reason=semantic_candidates_require_verification`, not automatic `supported`.
 Candidates that violate explicit question constraints do not become answer evidence.
 
-Unresolved conflicts gate the answer only when linked to grounded evidence by the same
-`subject_id` or explicit relations, not merely because a result shares a keyword.
+An unresolved conflict on a grounded document still gates the answer. Other conflicts gate it
+when linked by the same `subject_id` or explicit relations, not merely by a shared keyword.
+This does not localize document-level conflict metadata to individual paragraphs.
 Keep `subject_id` claim-specific, not project-wide. Safety runs before the response `limit`;
 `index.results_truncated` warns when related evidence was omitted from the displayed results.
 Neither this response field nor its computation changes stored Markdown or requires reindexing.

@@ -58,6 +58,16 @@ cloud account (the SSH transport is replaced by a local bare repository). All of
 - Do not run tests against a personal Vault, real tokens, `.env`, or installed agent configuration. There are also no tests that call the real Cloudflare
   API.
 
+For an offline search experiment, pass a trusted pre-change `gateway/core.py` snapshot:
+
+```bash
+uv run --frozen python tests/benchmark_search_evidence.py --baseline /path/to/baseline_core.py
+```
+
+It compares baseline, paragraph/table-row evidence, and a test-only BM25 reranker on synthetic data.
+It reports safety cases, latency, CPU time, Python peak allocations (not process RSS), and response size
+(not token usage). BM25 is not enabled in production. This is not a real-embedding quality benchmark.
+
 ## Compose smoke (needs Docker)
 
 This is separate from the list above and needs the Docker CLI, the Compose v2 plugin (`docker compose`), a running Docker daemon, and a network for image

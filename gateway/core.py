@@ -1182,6 +1182,61 @@ def evidence_term(term: str) -> str:
     return term
 
 
+def evidence_blocks(text: str) -> list[str]:
+    """Keep paragraphs and table rows separate, retaining their local heading/header context."""
+    text = _SRC_RE.sub("", text).strip()
+    blocks: list[str] = []
+    headings: list[tuple[int, str]] = []
+    paragraph: list[str] = []
+    table_header = ""
+    fence = ""
+
+    def flush() -> None:
+        if paragraph:
+            blocks.append("\n".join([heading for _, heading in headings] + paragraph))
+            paragraph.clear()
+
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if fence:
+            paragraph.append(line)
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = ""
+                flush()
+            continue
+        if marker:
+            flush()
+            table_header = ""
+            fence = marker[1]
+            paragraph.append(line)
+            continue
+        heading = re.match(r"^\s{0,3}(#{1,6})\s+", line)
+        if heading:
+            flush()
+            table_header = ""
+            level = len(heading[1])
+            headings = [(depth, value) for depth, value in headings if depth < level]
+            headings.append((level, line))
+        elif not line.strip():
+            flush()
+            table_header = ""
+        elif re.match(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", line):
+            continue
+        elif "|" in line and index + 1 < len(lines) and re.match(
+            r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[index + 1]
+        ):
+            flush()
+            table_header = line
+        elif table_header and "|" in line:
+            blocks.append("\n".join([heading for _, heading in headings] + [table_header, line]))
+        else:
+            table_header = ""
+            paragraph.append(line)
+    flush()
+    return blocks
+
+
 def query_evidence(query: str, results: list[dict[str, Any]], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Select answer anchors separately from retrieval, leaving all candidates available to the reader."""
     by_id = {doc["document_id"]: doc for doc in documents}
@@ -1197,56 +1252,84 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         match[1] for match in re.finditer(subject_pattern, query)
         if not match[0].endswith(("다는", "라는", "하는"))
     ]
-    actors += re.findall(
-        r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:인가(?:요)?|인지|입니까)(?=$|[\s?!.])", query
-    )
+    identity_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:인가(?:요)?|인지|입니까)(?=$|[\s?!.])"
+    actors += re.findall(identity_pattern, query)
     actors += re.findall(r"\b(?:[Bb]y|[Dd]id)\s+([A-Z][\w-]*)\b", query)
-    actors += re.findall(r"\b([A-Z][\w-]*)\s+(?:approved|authorized|decided|adopted)\b", query)
+    actors += re.findall(r"\b([A-Z][\w-]*)\s+(?:personally\s+)?(?:approved|authorized|decided|adopted|confirmed|verified)\b", query)
     actors = {actor.casefold() for actor in actors} - {"사람", "승인자", "담당자", "주체", "인물"}
     # shortcut: lexical guards do not prove arbitrary claims; add an evaluated verifier before claiming entailment.
-    # Approval is not established by a test or a proposal, nor by a different person's action.
     approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
+    # A request to inspect a topic ("확인해줘") is not a claim that someone already verified it.
+    confirmation = bool(re.search(r"(?:확인|검증)(?:했|하|한|함|됐|되|된|됨)|\b(?:confirm(?:ed)?|verify|verified)\b", query, re.I))
+    action_pattern = r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b"
+    confirmation_terms: set[str] = set()
+    if confirmation:
+        action_pattern = r"(?:확인|검증)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:confirmed|verified)\b"
+        scope = re.sub(identity_pattern, " ", re.sub(subject_pattern, " ", query))
+        confirmation_terms = {
+            re.sub(r"(?<=[가-힣])(?:에서는|으로|에서|에게|에는|은|는|이|가|을|를|의|에|와|과)$", "", word)
+            for word in TOKEN_RE.findall(scope.lower())
+            if not re.match(r"확인|검증|(?:confirm(?:ed)?|verify|verified)$", word)
+        } - QUERY_STOPWORDS - actors - {"did", "기록", "여부"}
     scored = []
     for item in results:
         doc = by_id.get(item["document_id"], item)
-        text = str(doc.get("text") or item.get("snippet") or "")
-        search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
-        literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
-        eligible = all(term_in(term, literal_text) for term in literals)
-        if approval:
-            # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
-            eligible = eligible and len(actors) == 1
-            approval_found = False
-            clauses = re.split(r"[\n.!?。;]+|\b(?:but|while)\b|하지만", text, flags=re.I) if eligible else []
-            for clause in clauses:
-                verb = re.search(r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b", clause, re.I)
-                if not verb:
-                    continue
-                # Bind the approval to its subject, not to another participant elsewhere in the sentence.
-                subjects = re.findall(subject_pattern, clause[:verb.start()])
-                if subjects:
-                    source_actor = subjects[-1]
-                else:
-                    english_actor = re.match(r"\s+by\s+([A-Za-z][\w-]*)\b", clause[verb.end():], re.I) or re.search(
-                        r"\b([A-Za-z][\w-]*)\s+(?:(?:has|had)\s+)?$", clause[:verb.start()], re.I
-                    )
-                    source_actor = english_actor[1] if english_actor else ""
-                if source_actor.casefold() not in actors:
-                    continue
-                if (
-                    all(term_in(term, clause.lower()) for term in literals)
-                    and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
-                    and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
-                ):
-                    approval_found = True
-                    break
-            eligible = eligible and approval_found
-        coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
+        blocks = evidence_blocks(str(doc.get("text") or item.get("snippet") or ""))
+        best_coverage = 0
+        best_text = ""
+        semantic_eligible = False
+        for text in blocks:
+            search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
+            literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
+            eligible = all(term_in(term, literal_text) for term in literals)
+            if approval or confirmation:
+                # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
+                eligible = eligible and len(actors) == 1
+                action_found = False
+                clauses = re.split(r"[\n.!。;]+|\b(?:but|while)\b|하지만", text, flags=re.I) if eligible else []
+                for clause in clauses:
+                    verb = re.search(action_pattern, clause, re.I)
+                    if not verb:
+                        continue
+                    # Bind the action to its subject, not another participant elsewhere in the sentence.
+                    subjects = re.findall(subject_pattern, clause[:verb.start()])
+                    if subjects:
+                        source_actor = subjects[-1]
+                    else:
+                        english_actor = re.match(r"\s+by\s+([A-Za-z][\w-]*)\b", clause[verb.end():], re.I) or re.search(
+                            r"\b([A-Za-z][\w-]*)\s+(?:(?:has|had)\s+)?(?:personally\s+)?$", clause[:verb.start()], re.I
+                        )
+                        source_actor = english_actor[1] if english_actor else ""
+                    if source_actor.casefold() not in actors:
+                        continue
+                    if confirmation:
+                        # Do not combine a confirmed object with completion words from another clause.
+                        scope = clause[:verb.start()] if verb[0].startswith(("확인", "검증")) else clause[verb.end():]
+                        if not confirmation_terms or not all(
+                            term_in(term, (clause[:verb.start()] if term == "personally" else scope).lower())
+                            for term in confirmation_terms
+                        ):
+                            continue
+                        if re.search(r"\?|여부|미확인|미완료|불확실|추정|가정|부인|실패|대기|계획|예상|\b안\s|\b(?:whether|unconfirmed|unverified|incomplete|unknown|uncertain|denied|assumed|estimated|failed|planned)\b", clause, re.I):
+                            continue
+                    if (
+                        all(term_in(term, clause.lower()) for term in literals)
+                        and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
+                        and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", clause, re.I)
+                    ):
+                        action_found = True
+                        break
+                eligible = eligible and action_found
+            coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
+            semantic_eligible |= eligible
+            if coverage > best_coverage:
+                best_coverage, best_text = coverage, text
         item["answer_relevance"] = "candidate"
-        if eligible and item.get("match") == "semantic":
+        if semantic_eligible and item.get("match") == "semantic":
             item["answer_relevance"] = "semantic_candidate"
-        if coverage and item.get("match") in {"keyword", "hybrid"}:
-            scored.append((coverage, item))
+        if best_coverage and item.get("match") in {"keyword", "hybrid"}:
+            scored.append((best_coverage, item))
+            item["snippet"] = rag_snippet(best_text, list(terms))
     best = max((coverage for coverage, _ in scored), default=0)
     evidence = [item for coverage, item in scored if coverage == best and coverage >= min(2, len(terms))]
     for item in evidence:
