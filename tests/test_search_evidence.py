@@ -282,6 +282,90 @@ class SearchEvidenceTests(unittest.TestCase):
                 with self.subTest(query=query, limit=limit):
                     self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
 
+    def test_numeric_values_are_not_replaced_by_matching_decimal_tails(self):
+        for source, query_value in (
+            ("6.5배", "5.5배"), ("5.5배", "5배"), ("15.5배", "5.5배"),
+            (".715", ".620"), (".620", "620"), ("1.620", ".620"),
+            ("-5.5배", "5.5배"), ("5.5배", "-5.5배"),
+            ("6개", "5개"), ("6", "5"), ("2,000개", "1,000개"),
+            ("FP32", "FP16"), ("FP160", "FP16"), ("D-107", "D-106"), ("1.2.3", "1.2.4"),
+            ("5.5배", "5.5%"), ("5.5", "5.5배"),
+            ("0.123456789012345678901234567891", "0.123456789012345678901234567892"),
+        ):
+            self.note("metrics", f"ExampleModel 측정 결과는 {source}였다.")
+            query = f"ExampleModel 측정 결과 {query_value}"
+            for limit in (1, 4, 20):
+                with self.subTest(source=source, query=query, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+            documents = core.vault_documents(self.settings)
+            candidate = {**documents[0], "match": "semantic"}
+            evidence = core.query_evidence(query, [candidate], documents)
+            self.assertEqual(core.rag_answer_state([candidate], "current", evidence)["state"], "abstain")
+
+    def test_numeric_surface_variants_preserve_exact_value_and_unit(self):
+        for source, query_value in (
+            (".620", ".620보다"), (".715였다", ".715이며"), ("5.5배로", "5.5배만"),
+            ("0.620", ".620"), ("5.50배", "5.5배"), ("1,000개", "1000개"),
+            ("180초", "180초만"), ("5.5배로", "5.5"), ("5.5%", "5.5%"),
+        ):
+            self.note("metrics", f"ExampleModel 측정 결과는 {source} 기록이다.")
+            for limit in (1, 4, 20):
+                with self.subTest(source=source, query_value=query_value, limit=limit):
+                    self.assertEqual(self.search(f"ExampleModel 측정 결과 {query_value}", limit)["answer_state"]["state"], "supported")
+        self.note("metrics", "ExampleModel 측정 결과는 5.5% 기록이다.")
+        self.assertEqual(self.search("ExampleModel 측정 결과 5.5배")["answer_state"]["state"], "abstain")
+
+    def test_presentation_numeric_suffixes_keep_document_conflict_gate(self):
+        self.note(
+            "presentation", "# ExampleModel\n\n## 2026-10-22\n\n"
+            "| 비교 | Random F1 | Model F1 | 속도 |\n| --- | --- | --- | --- |\n"
+            "| 임시 시험 | .620 | .715였다 | 5.5배로 측정 |",
+            conflict_state="unresolved",
+        )
+        for query, expected in (
+            ("2026-10-22 ExampleModel Random F1 .620보다 Model F1 .715이며 속도 5.5배만 기록됐나?", "review_required"),
+            ("2026-10-22 ExampleModel Random F1 .620, Model F1 .715, 속도 5.5배", "review_required"),
+            ("2026-10-22 ExampleModel Random F1 .620보다 Model F1 .715이며 속도 6.5배만 기록됐나?", "abstain"),
+            ("2026-10-23 ExampleModel Random F1 .620 Model F1 .715 속도 5.5배", "abstain"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertEqual(result["answer_state"]["state"], expected)
+                    if expected == "review_required":
+                        self.assertIn(".715였다", result["results"][0]["snippet"])
+
+    def test_decimal_constraints_stay_with_the_actor_action_clause(self):
+        query = "김민수가 ExampleModel 속도 5.5배를 확인했나?"
+        for body, expected in (
+            ("김민수가 ExampleModel 속도 5.5배를 확인했다.", "supported"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했다.", "abstain"),
+            ("이영희가 ExampleModel 속도 5.5배를 확인했다. 김민수는 회의에 참여했다.", "abstain"),
+            ("김민수가 ExampleModel 속도 5.5배를 확인하지 않았다.", "abstain"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했다. 이영희가 ExampleModel 속도 5.5배를 확인했다.", "abstain"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했고 이영희가 ExampleModel 속도 5.5배를 확인했다.", "abstain"),
+        ):
+            self.note("metrics", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
+
+    def test_numeric_attribution_does_not_pool_multiple_actions(self):
+        for body, query in (
+            ("Alice confirmed ExampleModel speed 6.5 and Bob confirmed ExampleModel speed 5.5.",
+             "Did Alice confirm ExampleModel speed 5.5?"),
+            ("Alice confirmed ExampleModel speed 6.5 and Bob approved ExampleModel speed 5.5.",
+             "Did Alice confirm ExampleModel speed 5.5?"),
+            ("김민수가 ExampleModel 속도 6.5배 도입을 승인했고 이영희가 ExampleModel 속도 5.5배 도입을 승인했다.",
+             "김민수가 ExampleModel 속도 5.5배 도입을 승인했나?"),
+            ("김민수가 ExampleModel 속도 6.5배 도입을 승인했고 이영희가 ExampleModel 속도 5.5배를 확인했다.",
+             "김민수가 ExampleModel 속도 5.5배 도입을 승인했나?"),
+        ):
+            self.note("metrics", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+
     def test_wrong_actor_does_not_inherit_approval(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
         for limit in (1, 4, 20):

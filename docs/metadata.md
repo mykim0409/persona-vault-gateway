@@ -114,6 +114,13 @@ having made a decision. Actor-free decision lookups remain ordinary retrieval.
 The noun `결정` in a decision-scope question is not a person; any explicitly named actor is still checked.
 The guards do not infer units from field names or calculate totals from per-node counts. Query the recorded
 fields and values when those inferences are needed to interpret the evidence.
+Numeric constraints preserve the whole signed decimal and any explicit unit instead of comparing keyword
+fragments: `5.5배` cannot match `6.5배` or `5배`. Equivalent decimal notation and thousands grouping are
+normalized without rounding; limited Korean endings such as `보다`, `이며`, and `만` are stripped only from
+numeric-leading expressions. Dates and digit-bearing identifiers remain intact. Decimal points do not split
+actor/action clauses. This changes response validation only, not retrieval, stored text, or the index.
+Numeric attribution across multiple approval/confirmation/decision actions in one clause remains `abstain`;
+the lexical guard cannot safely bind each quantity there yet.
 For approval/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
 an empty actor extraction is never treated as a match, even for actor-free approval queries.
 Confirmation claims also require all requested objects and qualifiers in the same affirmative
