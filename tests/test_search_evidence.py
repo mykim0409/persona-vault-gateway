@@ -130,6 +130,118 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("actual", "ExampleMiner FP16 comparison", conflict_state="unresolved")
         self.assertEqual(self.search("없는프로젝트QZV981")["answer_state"]["state"], "abstain")
 
+    def decision_note(self, reason="사용자가 정확히 이 명령을 무시하라고 재확인했다.", date="2026-10-20"):
+        self.note(
+            "decisions",
+            "# ExampleLab 결정 장부\n\n"
+            "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            f"| D-009 | {date} | 결정 | 유효 | 204의 `/data`에는 제안된 `sudo chmod +t /data`를 하지 않고 "
+            "기존 `root:sharegroup` mode 777로 진행한다. | " + reason +
+            " 여러 사용자가 속한 공유 그룹이며, sticky bit가 없는 상위 디렉터리의 교체·이름변경 위험을 "
+            "수용한 것이지 안전성 검증은 아니다. | - |\n"
+            "| D-010 | 2026-10-21 | 결정 | 유효 | 205 mode 755. | 김민수가 다른 설정을 선택했다. | - |",
+            kind="decision_ledger",
+        )
+
+    def test_decision_dates_and_particles_preserve_actor_constraints(self):
+        self.decision_note()
+        for query, expected in (
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 결정했나?", "supported"),
+            ("10월 20일 사용자가 204 /data의 sticky bit 변경을 제외하고 777 권한을 유지하기로 한 결정은?", "supported"),
+            ("2026년 10월 20일 사용자가 ExampleLab D-009 204 /data mode 777로 유지하기로 한 결정은?", "supported"),
+            ("2026-10-20 김민수가 ExampleLab 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 직접 결정했나?", "abstain"),
+            ("ExampleLab D-009 204 /data chmod +t mode 777 결정 내용", "supported"),
+            ("2026-10-20 ExampleLab D-009 204 /data mode 777로 진행하기로 결정했나?", "supported"),
+            ("ExampleLab D-009 사용자의 결정 내용은?", "supported"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +u를 제외하고 mode 777로 진행하기로 결정했나?", "abstain"),
+            ("2026-10-20 ExampleLab D-009 사용자는 chmod +u 제외 후 mode 777로 진행하기로 결정했나?", "abstain"),
+            ("2026-10-20 ExampleLab D-009 사용자는 chmod -t 제외 후 mode 777로 진행하기로 결정했나?", "abstain"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 755로 진행하기로 결정했나?", "abstain"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 7770으로 진행하기로 결정했나?", "abstain"),
+            ("2026-10-21 ExampleLab D-009 사용자는 mode 777로 진행하기로 결정했나?", "abstain"),
+            ("10월 21일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "abstain"),
+            ("2025년 10월 20일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "abstain"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertTrue(result["results"])
+                    self.assertEqual(result["answer_state"]["state"], expected)
+                    if expected == "supported":
+                        self.assertIn("D-009", result["results"][0]["snippet"])
+                        self.assertNotIn("D-010", result["results"][0]["snippet"])
+
+    def test_decision_attribution_is_not_participation_or_negated_choice(self):
+        query = "2026-10-20 ExampleLab D-009 사용자는 204 /data mode 777로 진행하기로 결정했나?"
+        for reason, expected in (
+            ("사용자가 정확히 이 명령을 무시하라고 재확인했다.", "supported"),
+            ("사용자가 이 설정을 선택했다. 김민수는 회의에 참여했다.", "supported"),
+            ("김민수가 이 설정을 선택했다. 사용자는 회의에 참여했다.", "abstain"),
+            ("김민수가 이 설정을 선택했고 사용자는 회의에 참여했다.", "abstain"),
+            ("사용자가 이 설정을 결정하지 않았다.", "abstain"),
+            ("사용자가 이 설정을 결정했다는 근거가 없다.", "abstain"),
+            ("사용자가 이 설정을 결정할 예정이다.", "abstain"),
+            ("사용자가 이 설정을 안 결정했다.", "abstain"),
+            ("사용자가 이 설정을 결정했다?", "abstain"),
+        ):
+            self.decision_note(reason)
+            for limit in (1, 4, 20):
+                with self.subTest(reason=reason, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], expected)
+
+    def test_calendar_notation_keeps_explicit_year(self):
+        for date in ("2026-10-20", "2026년 10월 20일", "2026년 10월20일"):
+            self.decision_note(date=date)
+            for query in ("2026-10-20 ExampleLab D-009 mode 777", "10월20일 ExampleLab D-009 mode 777"):
+                with self.subTest(date=date, query=query):
+                    self.assertEqual(self.search(query)["answer_state"]["state"], "supported")
+        self.note("decisions", "2025-10-20 ExampleLab mode 777")
+        self.assertEqual(self.search("2026-10-20 ExampleLab mode 777")["answer_state"]["state"], "abstain")
+
+    def test_short_technical_terms_keep_particle_free_identity(self):
+        for term, expected in (("t를", "t"), ("777로", "777"), ("NFS를", "NFS"), ("사용자는", "사용자"), ("이", "이")):
+            with self.subTest(term=term):
+                self.assertEqual(core.evidence_term(term), expected)
+
+    def test_calendar_normalization_does_not_move_dates_between_actions(self):
+        self.note("approval", "2026-10-21 김민수가 ExampleMiner FP16 도입을 승인했다. 2026-10-20 홍길동은 회의에 참여했다.")
+        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "abstain")
+        self.note("approval", "2026년 10월 20일 김민수가 ExampleMiner FP16 도입을 승인했다.")
+        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "supported")
+
+    def test_invalid_calendar_dates_are_not_normalized(self):
+        for date in ("2026-02-29", "2026년 13월 20일", "0000-10-20", "10월 32일"):
+            with self.subTest(date=date):
+                self.assertEqual(core.normalize_evidence_dates(date), date)
+        self.assertEqual(core.normalize_evidence_dates("02월 29일"), "02-29")
+
+    def test_decision_constraints_also_reject_semantic_only_candidates(self):
+        self.decision_note()
+        documents = core.vault_documents(self.settings)
+        for query in (
+            "2026-10-20 김민수가 ExampleLab D-009 mode 777로 진행하기로 결정했나?",
+            "2025-10-20 사용자가 ExampleLab D-009 mode 777로 진행하기로 결정했나?",
+            "2026-10-20 사용자가 ExampleLab D-009 mode 755로 진행하기로 결정했나?",
+        ):
+            with self.subTest(query=query):
+                item = {**documents[0], "match": "semantic"}
+                evidence = core.query_evidence(query, [item], documents)
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+
+    def test_plain_decisions_keep_their_own_actor_and_object(self):
+        for body, query, expected in (
+            ("사용자가 ExampleLab mode 777을 유지하기로 결정했다. 김민수는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "supported"),
+            ("김민수가 ExampleLab mode 777을 유지하기로 결정했다. 사용자는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "abstain"),
+            ("사용자가 ExampleLab mode 755를 선택했다. 사용자가 OtherProject mode 777을 선택했다.", "사용자는 ExampleLab mode 777을 선택하기로 결정했나?", "abstain"),
+            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Alice decide to keep ProjectX mode 777?", "supported"),
+            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Bob decide to keep ProjectX mode 777?", "abstain"),
+            ("Alice had not decided to keep ProjectX mode 777.", "Did Alice decide to keep ProjectX mode 777?", "abstain"),
+        ):
+            self.note("decisions", body)
+            with self.subTest(body=body, query=query):
+                self.assertEqual(self.search(query)["answer_state"]["state"], expected)
+
     def test_wrong_actor_does_not_inherit_approval(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
         for limit in (1, 4, 20):

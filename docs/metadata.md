@@ -104,7 +104,14 @@ rows cannot pool their words into one anchor. Keyword/hybrid snippets come from 
 eligible block rather than the first matching part of the document. Provenance markers remain hidden.
 Approval queries and claims that someone confirmed or verified something require one identifiable
 actor linked to that action in the source.
-Missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
+Date notation and Korean particles on technical identifiers are normalized for matching (for example,
+`10월 20일` and `10-20`, or `+t를` and `+t`); source snippets are not rewritten. Explicit years,
+numeric values, and option names remain constraints. This does not add an as-of-date interpretation.
+A decision query naming an actor also checks that attribution. In a `decision_ledger`, an explicit
+decision row can carry the choice and its reaffirmation in separate cells; other rows and mere
+participants cannot supply its actor. Choosing not to perform an operation is distinct from not
+having made a decision. Actor-free decision lookups remain ordinary retrieval.
+For approval/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
 an empty actor extraction is never treated as a match, even for actor-free approval queries.
 Confirmation claims also require all requested objects and qualifiers in the same affirmative
 clause. Words from separate confirmations, another person's report, or an unconfirmed completion
