@@ -1343,20 +1343,24 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
     ]
     identity_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:인가(?:요)?|인지|입니까)(?=$|[\s?!.])"
     actors += re.findall(identity_pattern, query)
-    actors += re.findall(r"\b(?:[Bb]y|[Dd]id)\s+([A-Z][\w-]*)\b", query)
-    actors += re.findall(r"\b([A-Z][\w-]*)\s+(?:personally\s+)?(?:approved|authorized|decided|adopted|confirmed|verified)\b", query)
+    english_subject = r"[A-Z][\w-]*(?:[ \t]+[A-Z][\w-]*)*"
+    actors += re.findall(rf"\b(?:[Bb]y|[Dd]id)\s+({english_subject})\b", query)
+    actors += re.findall(rf"\b({english_subject})\s+(?:(?:has|had)\s+)?(?:(?:personally|officially)\s+)?(?:approved|authorized|decided|adopted|confirmed|verified)\b", query)
     actors = {actor.casefold() for actor in actors} - {"사람", "승인자", "담당자", "주체", "인물"}
     # shortcut: lexical guards do not prove arbitrary claims; add an evaluated verifier before claiming entailment.
     approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
+    adoption = bool(re.search(r"\badopt(?:ed|s)?\b", query, re.I))
     # A request to inspect a topic ("확인해줘") is not a claim that someone already verified it.
     confirmation = bool(re.search(r"(?:확인|검증)(?:했|하|한|함|됐|되|된|됨)|\b(?:confirm(?:ed)?|verify|verified)\b", query, re.I))
-    decision = not (approval or confirmation) and bool(re.search(r"결정|\bdecid(?:e|ed)\b", query, re.I))
+    decision = not (approval or confirmation or adoption) and bool(re.search(r"결정|\bdecid(?:e|ed)\b", query, re.I))
     if decision:
         actors.update(re.findall(r"(?<!\w)([가-힣]{2,})의\s+결정", query))
         # In a scope question, "the decision" is a subject, not an attributed person.
         actors.discard("결정")
         decision = bool(actors)
     action_pattern = r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b"
+    if adoption:
+        action_pattern = r"\badopted\b"
     if decision:
         action_pattern = r"(?:결정|선택)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:decided|chose)\b"
     confirmation_terms: set[str] = set()
@@ -1368,6 +1372,26 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             for word in TOKEN_RE.findall(scope.lower())
             if not re.match(r"확인|검증|(?:confirm(?:ed)?|verify|verified)$", word)
         } - QUERY_STOPWORDS - actors - {"did", "기록", "여부"}
+    # Property questions name an object, unlike a loose list of retrieval keywords.
+    property_query = bool(re.search(
+        r"\b(?:cover(?:s|ed)?|contain(?:s|ed)?|include(?:s|d)?|describe(?:s|d)?)\s+|"
+        r"\b(?:what|which)\s+(?:is|are|was|were)\s+.+?\s+(?:of|in|for)\b", query, re.I,
+    ))
+    lexical_terms = {term for term in terms if re.fullmatch(r"[a-z][a-z_]*", term)} - {"did", "had", "been"}
+    if approval or confirmation or decision or adoption:
+        lexical_terms = {term for term in lexical_terms if not re.fullmatch(
+            r"approv(?:e|ed|es)|authoriz(?:e|ed|es)|decid(?:e|ed|es)|adopt(?:ed|s)?|confirm(?:ed|s)?|verif(?:y|ied|ies)", term,
+        )}
+    if property_query:
+        lexical_terms = {term for term in lexical_terms if not re.fullmatch(
+            r"cover(?:s|ed)?|contain(?:s|ed)?|include(?:s|d)?|describe(?:s|d)?", term,
+        )}
+    lexical_patterns = {term: re.compile(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", re.I) for term in lexical_terms}
+    # A slash groups a technical topic or alternatives (mount/read); its whole subject cannot disappear.
+    topic_groups = [
+        [re.compile(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", re.I) for term in group.lower().split("/")]
+        for group in re.findall(r"(?<![\w/])[A-Za-z][A-Za-z_-]+(?:/[A-Za-z][A-Za-z_-]+)+(?![A-Za-z_/-])", query)
+    ]
     scored = []
     for item in results:
         doc = by_id.get(item["document_id"], item)
@@ -1379,8 +1403,10 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             text = normalize_evidence_dates(block)
             search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
             literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
-            eligible = (not numbers or numbers <= numeric_evidence_literals(literal_text)) and all(term_in(term, literal_text) for term in literals)
-            if approval or confirmation or decision:
+            eligible = (numbers <= numeric_evidence_literals(literal_text)
+                        and all(term_in(term, literal_text) for term in literals)
+                        and all(any(pattern.search(search_text) for pattern in group) for group in topic_groups))
+            if approval or confirmation or decision or adoption:
                 # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
                 eligible = eligible and len(actors) == 1
                 action_found = False
@@ -1393,10 +1419,10 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     verb = re.search(pattern, clause, re.I)
                     if not verb:
                         continue
-                    # shortcut: numeric attribution in multi-action clauses needs finer binding; abstain for now.
-                    if numbers and len(re.findall(
+                    # shortcut: multi-action clauses need finer object binding; abstain for now.
+                    if len(re.findall(
                         r"(?:승인|확인|검증|결정|선택)(?:했|하였|하셨|함|됐|되었|됨)|"
-                        r"\b(?:approved|authorized|confirmed|verified|decided|chose)\b", clause, re.I,
+                        r"\b(?:approved|authorized|adopted|confirmed|verified|decided|chose)\b", clause, re.I,
                     )) > 1:
                         continue
                     # Bind the action to its subject, not another participant elsewhere in the sentence.
@@ -1404,8 +1430,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     if subjects:
                         source_actor = subjects[-1]
                     else:
-                        english_actor = re.match(r"\s+by\s+([A-Za-z][\w-]*)\b", clause[verb.end():], re.I) or re.search(
-                            r"\b([A-Za-z][\w-]*)\s+(?:(?:has|had)\s+)?(?:personally\s+)?$", clause[:verb.start()], re.I
+                        english_actor = re.match(rf"\s+(?i:by)\s+({english_subject}|[a-z][\w-]*)\b", clause[verb.end():]) or re.search(
+                            rf"\b({english_subject}|[a-z][\w-]*)\s+(?:(?:has|had)\s+)?(?:(?:personally|officially)\s+)?$", clause[:verb.start()]
                         )
                         source_actor = english_actor[1] if english_actor else ""
                     if source_actor.casefold() not in actors:
@@ -1418,8 +1444,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                             for term in confirmation_terms
                         ):
                             continue
-                        if re.search(r"\?|여부|미확인|미완료|불확실|추정|가정|부인|실패|대기|계획|예상|\b안\s|\b(?:whether|unconfirmed|unverified|incomplete|unknown|uncertain|denied|assumed|estimated|failed|planned)\b", clause, re.I):
-                            continue
+                    if (confirmation or adoption) and re.search(r"\?|여부|미확인|미완료|불확실|추정|가정|부인|실패|대기|계획|예상|\b안\s|\b(?:whether|unconfirmed|unverified|incomplete|unknown|uncertain|denied|assumed|estimated|failed|planned)\b", clause, re.I):
+                        continue
                     # Declining an operation is not the same as failing to make a decision.
                     negation_text = clause[verb.end():] if decision else clause
                     if decision and re.search(r"\b(?:안|못|not|never)\s+(?:personally\s+)?$", clause[:verb.start()], re.I):
@@ -1427,12 +1453,15 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     if (
                         (not numbers or numbers <= numeric_evidence_literals(text if ledger_decision else clause))
                         and all(term_in(term, (text if ledger_decision else clause).lower()) for term in literals)
+                        and all(pattern.search(text if ledger_decision else clause) for pattern in lexical_patterns.values())
                         and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
                         and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", negation_text, re.I)
                     ):
                         action_found = True
                         break
                 eligible = eligible and action_found
+            if property_query:
+                eligible = eligible and all(pattern.search(search_text) for pattern in lexical_patterns.values())
             coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
             semantic_eligible |= eligible
             if coverage > best_coverage:

@@ -130,6 +130,95 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("actual", "ExampleMiner FP16 comparison", conflict_state="unresolved")
         self.assertEqual(self.search("없는프로젝트QZV981")["answer_state"]["state"], "abstain")
 
+    def test_dated_nfs_question_cannot_use_an_unrelated_allowlist_decision(self):
+        self.note("decisions", "## 2026-10-20\n\nNFS export allowlist keeps .51. This is not account isolation.")
+        self.note("home", "H10: notebook-home has 15 Profile PVCs Bound. "
+                  "Notebook 홈 파일 읽기는 미확인이다. NFS export, PV Bound, mount/read are separate checks.")
+        query = "2026-10-20 NFS export·PV Bound 확인 뒤 남아 있는 Notebook 홈 mount/read 미확인 범위는?"
+        for limit in (1, 4, 20):
+            with self.subTest(limit=limit):
+                result = self.search(query, limit)
+                self.assertTrue(result["results"])
+                self.assertEqual(result["answer_state"]["state"], "abstain")
+                self.assertFalse(any(item["answer_relevance"] == "grounded" for item in result["results"]))
+                result = self.search("H10 Notebook 홈 mount/read", limit)
+                self.assertEqual(result["answer_state"]["state"], "supported")
+                self.assertEqual(result["results"][0]["document_id"], "home")
+        self.note("home", "## 2026-10-20\n\nNFS export, PV Bound, Notebook 홈 mount/read: "
+                  "홈 파일 읽기는 미확인이다.")
+        for limit in (1, 4, 20):
+            result = self.search(query, limit)
+            self.assertEqual(result["answer_state"]["state"], "supported")
+            self.assertEqual(result["results"][0]["document_id"], "home")
+            self.assertIn("미확인", result["results"][0]["snippet"])
+        self.note("objection", "The home check is disputed.", memory_type="candidate", relations={"contradicts": ["home"]})
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search(query, limit)["answer_state"]["state"], "review_required")
+
+    def test_missing_property_cannot_be_grounded_by_shared_project_words(self):
+        query = "Team Policy TF meeting minutes cover background color"
+        for conflict in ("none", "unresolved"):
+            self.note("minutes", "Team Policy TF meeting minutes cover the roadmap and business KPI.", conflict_state=conflict)
+            for limit in (1, 4, 20):
+                with self.subTest(conflict=conflict, limit=limit):
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+        self.note("minutes", "Team Policy TF meeting minutes cover background color: blue.")
+        self.assertEqual(self.search(query)["answer_state"]["state"], "supported")
+        self.note("minutes", "Team Policy TF meeting minutes cover roadmap.\n\nOther committee background color: blue.")
+        self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+
+    def test_property_queries_preserve_known_unknowns_and_reject_semantic_guessing(self):
+        for question in (
+            "Team Policy TF meeting minutes include background color",
+            "Team Policy TF meeting minutes describe background color",
+            "What is the background color of Team Policy TF meeting minutes?",
+        ):
+            self.note("minutes", "Team Policy TF meeting minutes: background color is unspecified.")
+            self.assertEqual(self.search(question)["answer_state"]["state"], "supported")
+            self.note("minutes", "Team Policy TF meeting minutes discuss roadmap.")
+            documents = core.vault_documents(self.settings)
+            for match in ("keyword", "hybrid", "semantic"):
+                with self.subTest(question=question, match=match):
+                    item = {**documents[0], "match": match}
+                    evidence = core.query_evidence(question, [item], documents)
+                    self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+
+    def test_topic_lookup_still_allows_cross_language_keywords_and_current_conflicts(self):
+        self.note("ledger", "# ExampleLab\n\n| id | 날짜 | 결정 |\n| --- | --- | --- |\n"
+                  "| D-041 | 2026-10-20 | 브라우저 로그인과 검색 오류 수정을 별개로 다룬다. |", kind="decision_ledger")
+        self.assertEqual(self.search("ExampleLab D-041 browser login separate search bug")["answer_state"]["state"], "supported")
+        self.note("status", "## 2026-10-20\n\nH10 Model 현황")
+        self.note("disputed", "## 2026-10-20\n\nH10 현황 상태", conflict_state="unresolved")
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("2026-10-20 H10 Model 현황 상태", limit)["answer_state"]["state"], "review_required")
+
+    def test_adoption_requires_the_organization_action_and_complete_object(self):
+        query = "Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting"
+        for body, expected in (
+            ("Team Policy TF meeting notes: the LMFM roadmap and business KPI are an assistant draft, not an adopted organizational decision.", "abstain"),
+            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting.", "supported"),
+            ("Team Policy TF has officially adopted the LMFM roadmap and business KPI from this meeting.", "supported"),
+            ("The LMFM roadmap and business KPI from this meeting were officially adopted by Team Policy TF.", "supported"),
+            ("Other Policy TF officially adopted the LMFM roadmap and business KPI from this meeting. Team Policy TF attended.", "abstain"),
+            ("Team Policy TF has not officially adopted the LMFM roadmap and business KPI from this meeting.", "abstain"),
+            ("Team Policy TF officially adopted the LMFM roadmap from this meeting. Business KPI remains a draft.", "abstain"),
+            ("Team Policy TF officially adopted the LMFM roadmap from this meeting and Other Policy TF adopted the business KPI.", "abstain"),
+            ("Team Policy TF proposed the LMFM roadmap and business KPI from this meeting for official adoption.", "abstain"),
+            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting?", "abstain"),
+            ("Whether Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting is unknown.", "abstain"),
+        ):
+            self.note("minutes", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertTrue(result["results"])
+                    self.assertEqual(result["answer_state"]["state"], expected)
+            if expected == "abstain":
+                documents = core.vault_documents(self.settings)
+                item = {**documents[0], "match": "semantic"}
+                evidence = core.query_evidence(query, [item], documents)
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+
     def decision_note(self, reason="사용자가 정확히 이 명령을 무시하라고 재확인했다.", date="2026-10-20"):
         self.note(
             "decisions",
@@ -470,6 +559,7 @@ class SearchEvidenceTests(unittest.TestCase):
             "Alice approved ProjectX FP16 adoption. Bob ran the trial.",
             "Alice has approved ProjectX FP16 adoption and Bob ran the trial.",
             "ProjectX FP16 adoption was approved by Alice. Bob ran the trial.",
+            "alice approved ProjectX FP16 adoption. Bob ran the trial.",
         ):
             with self.subTest(body=body):
                 self.note("approval", body)
