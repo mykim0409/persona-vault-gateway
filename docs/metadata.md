@@ -205,6 +205,8 @@ A claim written from raw ends with a provenance marker, an HTML comment such as 
 
 - `item:<16 hex>` is a one-way hash of a raw item's path and locator. It holds no path or quote.
 - `sess:<8 hex>` is a one-way hash of a session id. Only user-ledger rows carry it.
-- `doc:<path>#<heading>` points at an existing document. It is typed by hand, and only in the one-time migration from topic documents.
+- `doc:<path>#<heading>` points at an existing document for topic migration. A reviewed project-ledger transfer also uses `doc:<source-ledger-path>#D-###`, paired with a Git-pinned `repository_sources` origin.
+
+Decision ledger rows retain their IDs. A reviewed ownership transfer may replace a source row with a non-authoritative `이관됨` redirect to one or more qualified destination row references; ordinary frozen-column and no-row-delete rules still apply. See [CURATOR.md](CURATOR.md#project-boundaries-and-reviewed-ownership-transfers) for the lossless split format and approval gates. No metadata migration is required.
 
 The marker sits at the end of the claim line, inside the last cell of a table row. It is hidden in the Obsidian reading view. It is part of the Markdown body, so it counts in the active characters and is indexed. The Curator tools write `item:` and `sess:` tokens; do not edit them by hand. Only `doc:` tokens are typed by hand.
