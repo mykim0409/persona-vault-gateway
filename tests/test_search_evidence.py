@@ -167,6 +167,160 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("minutes", "Team Policy TF meeting minutes cover roadmap.\n\nOther committee background color: blue.")
         self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
 
+    def test_finalization_requires_the_actual_object_and_polarity(self):
+        for body in (
+            "# ExampleLab\n\ncontrol-plane 서버 A/B 견적 미정. 구매 확정 없음.",
+            "# ExampleLab\n\n서버 구매를 확정했다. 양자컴퓨터 구매는 미정이다.",
+            "# ExampleLab\n\n양자컴퓨터 구매 확정 여부는 미확인이다.",
+            "# ExampleLab\n\n양자컴퓨터 구매를 확정할 예정이다.",
+        ):
+            self.note("purchase", body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, limit=limit):
+                    result = self.search("ExampleLab 양자컴퓨터 구매 확정", limit)
+                    self.assertTrue(result["results"])
+                    self.assertEqual(result["answer_state"]["state"], "abstain")
+            documents = core.vault_documents(self.settings)
+            for match in ("keyword", "hybrid", "semantic"):
+                item = {**documents[0], "match": match}
+                evidence = core.query_evidence("ExampleLab 양자컴퓨터 구매 확정", [item], documents)
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+
+    def test_finalization_keeps_positive_negative_and_open_status_queries(self):
+        for body, query, expected in (
+            ("서버 구매 확정.", "서버 구매 확정", "supported"),
+            ("서버 구매를 확정했다. 양자컴퓨터 구매는 미정이다.", "서버 구매 확정", "supported"),
+            ("서버 구매를 확정하지 않았다.", "서버 구매 확정", "abstain"),
+            ("서버 구매 확정 없음.", "서버 구매 확정 없음", "supported"),
+            ("서버 구매는 미정이다.", "서버 구매 미정", "supported"),
+            ("서버 구매는 미정이다.", "서버 구매 확정 여부", "supported"),
+            ("서버 구매는 미정이다.", "양자컴퓨터 구매 확정 여부", "abstain"),
+            ("서버 구매는 미정이다.", "양자컴퓨터 구매 미정", "abstain"),
+            ("서버 구매 확정.", "서버 구매 미정", "abstain"),
+        ):
+            self.note("purchase", "# ExampleLab\n\n" + body)
+            for limit in (1, 4, 20):
+                with self.subTest(body=body, query=query, limit=limit):
+                    self.assertEqual(self.search("ExampleLab " + query, limit)["answer_state"]["state"], expected)
+
+    def test_transfer_redirects_are_candidates_not_authoritative_anchors(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        source = ("# ExampleLab\n\n" + header +
+                  "| D-089 | 2026-10-20 | 결정 | 이관됨 | Ownership transferred; follow destinations. | "
+                  "204 LAN guard 안전 검증이 아니다. | 20_Projects/ExampleLab/DECISIONS.md#D-057 |")
+        self.note("origin", source, kind="decision_ledger", conflict_state="unresolved")
+        query = "ExampleLab 204 LAN guard 안전 검증"
+        self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+        self.note("destination", "# ExampleLab\n\n" + header +
+                  "| D-057 | 2026-10-20 | 결정 | 유효 | 204 LAN guard 위험을 수용한다. | "
+                  "안전 검증이 아니다. <!-- pvg-src: doc:20_Projects/origin.md#D-089 --> | - |",
+                  kind="decision_ledger")
+        for limit in (1, 4, 20):
+            result = self.search(query, limit)
+            self.assertEqual(result["answer_state"]["state"], "supported")
+            self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "grounded" for r in result["results"]))
+        self.note("objection", "The destination claim remains disputed.", memory_type="candidate",
+                  relations={"contradicts": ["destination"]})
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search(query, limit)["answer_state"]["state"], "review_required")
+
+    def test_transfer_filter_keeps_live_rows_and_real_conflicts(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        self.note("ledger", "# ExampleLab\n\n" + header +
+                  "| D-089 | 2026-10-20 | 결정 | 이관됨 | Ownership transferred; follow destinations. | 204 LAN guard | 20_Projects/Other/DECISIONS.md#D-057 |\n"
+                  "| D-090 | 2026-10-20 | 질문 | 보류 | 1분 strip 정책 | ±30초 merge 미해결 | - |",
+                  kind="decision_ledger", conflict_state="unresolved")
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("ExampleLab 1분 strip", limit)["answer_state"]["state"], "review_required")
+
+    def test_ledger_conflict_scope_preserves_disputed_claim_without_poisoning_other_decisions(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        body = ("# ExampleLab\n\n" + header +
+                "| D-056 | 2026-10-20 | 결정 | 유효 | Selector output은 고정 1분 strip. | 운영 계약; ±30초 merge는 충돌 미해결. | - |\n"
+                "| D-067 | 2026-10-20 | 결정 | 유효 | 4pf queue 시험은 라벨 예산이 아니다. | 1,000h fill cap은 시험값이다. | - |\n"
+                "| D-083 | 2026-10-20 | 결정 | 유효 | cycle 실행과 ops 현장 적용은 자동 배포에서 제외한다. | ops는 별도 저장소다. | - |")
+        self.note("ledger", body, kind="decision_ledger", conflict_state="unresolved")
+        for query, expected in (
+            ("ExampleLab selector output 고정 1분 strip 길이 계약", "supported"),
+            ("ExampleLab ops 별도 저장소", "supported"),
+            ("ExampleLab cycle 실행 ops 현장 적용 자동 배포 제외", "supported"),
+            ("ExampleLab 4pf queue 시험 1,000h fill cap 라벨 예산 아님", "supported"),
+            ("ExampleLab ±30초 merge 미해결 충돌", "review_required"),
+            ("ExampleLab D-056 merge", "review_required"),
+            ("ExampleLab D-056", "review_required"),
+        ):
+            for limit in (1, 4, 20):
+                with self.subTest(query=query, limit=limit):
+                    result = self.search(query, limit)
+                    self.assertEqual(result["answer_state"]["state"], expected)
+                    self.assertEqual(result["results"][0]["conflict_state"], "unresolved")
+                    self.assertEqual(result["results"][0]["answer_conflict_state"], "none" if expected == "supported" else "unresolved")
+                    if expected == "supported":
+                        self.assertFalse(result["groups"][0]["warnings"])
+        self.note("objection", "The fixed strip contract is disputed.", memory_type="candidate",
+                  relations={"contradicts": ["ledger"]})
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("ExampleLab selector output 고정 1분 strip", limit)["answer_state"]["state"], "review_required")
+
+    def test_unlocalized_or_unstructured_conflict_cannot_be_cleared(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        for body, kind in (
+            ("ExampleLab selector 1분 strip", "procedure"),
+            ("ExampleLab selector 1분 strip", "decision_ledger"),
+            (header + "| D-001 | 2026-10-20 | 결정 | 유효 | ExampleLab selector 1분 strip | No local scope. | - |", "decision_ledger"),
+        ):
+            self.note("unknown", body, kind=kind, conflict_state="unresolved")
+            self.assertEqual(self.search("ExampleLab selector 1분 strip")["answer_state"]["state"], "review_required")
+
+    def test_ledger_scope_retains_same_subject_conflicts_with_different_numbers(self):
+        from gateway.app import search_response
+
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        body = ("# ExampleLab\n\n" + header +
+                "| D-001 | 2026-10-20 | 결정 | 유효 | Selector output은 고정 1분 strip. | 사용자 계약. | - |\n"
+                "| D-002 | 2026-10-20 | 질문 | 보류 | Selector output은 2분 strip이라는 반대 주장. | strip 길이 충돌 미해결. | - |")
+        self.note("ledger", body, kind="decision_ledger", conflict_state="unresolved")
+        for limit in (1, 4, 20):
+            result = self.search("ExampleLab selector output 고정 1분 strip", limit)
+            self.assertEqual(result["answer_state"]["state"], "review_required")
+            public = search_response(result, "current")
+            self.assertEqual(public["results"][0]["answer_conflict_state"], "unresolved")
+            self.assertIn('"answer_conflict_state": "unresolved"', public["context"])
+        self.note("ledger", body.replace("strip 길이 충돌 미해결", "다른 주제의 충돌 미해결"),
+                  kind="decision_ledger", conflict_state="unresolved", subject_id="strip-contract")
+        self.assertEqual(self.search("ExampleLab selector output 고정 1분 strip")["answer_state"]["state"], "review_required")
+
+    def test_ledger_anaphoric_disputes_and_tied_pending_rows_remain_gated(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        for reason in ("This remains unresolved.", "해당 결정은 충돌 미해결."):
+            self.note("ledger", "# ExampleLab\n\n" + header +
+                      f"| D-001 | 2026-10-20 | 결정 | 유효 | selector 1분 strip | {reason} | - |",
+                      kind="decision_ledger", conflict_state="unresolved")
+            self.assertEqual(self.search("ExampleLab selector 1분 strip")["answer_state"]["state"], "review_required")
+        self.note("ledger", "# ExampleLab\n\n" + header +
+                  "| D-001 | 2026-10-20 | 결정 | 유효 | selector 1분 strip | 사용자 결정 | - |\n"
+                  "| D-002 | 2026-10-20 | 질문 | 보류 | selector 1분 strip | 충돌 미해결 | - |",
+                  kind="decision_ledger", conflict_state="unresolved")
+        for limit in (1, 4, 20):
+            self.assertEqual(self.search("ExampleLab selector 1분 strip", limit)["answer_state"]["state"], "review_required")
+
+    def test_transfer_redirect_stays_non_authoritative_in_hybrid_search(self):
+        header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+        self.note("origin", "# ExampleLab\n\n" + header +
+                  "| D-001 | 2026-10-20 | 결정 | 이관됨 | Ownership transferred; follow destinations. | 204 LAN guard | 20_Projects/Other/DECISIONS.md#D-002 |",
+                  kind="decision_ledger", conflict_state="unresolved")
+        self.note("destination", "ExampleLab 204 LAN guard 위험을 수용했지만 안전 검증은 아니다.")
+        settings = replace(self.settings, embedding_provider="hash")
+        vector = [1.0] + [0.0] * (core.HASH_EMBEDDING_DIMENSIONS - 1)
+        with patch.object(core, "qdrant_json", FakeQdrant()), \
+             patch.object(core, "embed_documents", side_effect=lambda _s, texts: [vector for _ in texts]), \
+             patch.object(core, "embed_query", return_value=(vector, core.HASH_EMBEDDING_MODEL)):
+            core.index_vault(settings)
+            for limit in (1, 4, 20):
+                result = core.search_vault(settings, AGENT, "ExampleLab 204 LAN guard", limit, bundle="current")
+                self.assertEqual(result["answer_state"]["state"], "supported")
+                self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "grounded" for r in result["results"]))
+
     def test_property_queries_preserve_known_unknowns_and_reject_semantic_guessing(self):
         for question in (
             "Team Policy TF meeting minutes include background color",

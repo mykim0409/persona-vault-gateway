@@ -86,7 +86,7 @@ def bm25_matches(settings, terms, limit, bundle="auto", context=None, documents=
     terms = sorted({core.evidence_term(term) for term in terms})
     docs = documents if documents is not None else core.analyzed_documents(core.vault_documents(settings))
     units = {
-        doc["document_id"]: [core.searchable_text(doc, block).lower() for block in core.evidence_blocks(doc["text"])]
+        doc["document_id"]: [core.searchable_text(doc, block).lower() for block in core.evidence_blocks(doc["text"], kind=doc.get("kind", ""))]
         for doc in docs if core.bundle_accepts(doc, bundle)
     }
     texts = [text for blocks in units.values() for text in blocks]

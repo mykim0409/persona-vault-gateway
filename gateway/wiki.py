@@ -1795,7 +1795,9 @@ def bundle_groups(bundle: str, results: list[dict[str, Any]], analysis: dict[str
     for (cluster_type, key), items in grouped.items():
         document_ids = [_document_id(item) for item in items]
         support = _cluster_support(analysis, cluster_type, key, document_ids)
-        conflict_state = "unresolved" if any(item.get("conflict_state") == "unresolved" for item in items) else "none"
+        conflict_state = "unresolved" if any(
+            item.get("answer_conflict_state", item.get("conflict_state")) == "unresolved" for item in items
+        ) else "none"
         base: dict[str, Any] = {
             "key": key,
             "cluster_type": cluster_type,
