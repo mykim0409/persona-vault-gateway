@@ -117,7 +117,9 @@ fields and values when those inferences are needed to interpret the evidence.
 Numeric constraints preserve the whole signed decimal and any explicit unit instead of comparing keyword
 fragments: `5.5배` cannot match `6.5배` or `5배`. Equivalent decimal notation and thousands grouping are
 normalized without rounding; limited Korean endings such as `보다`, `이며`, and `만` are stripped only from
-numeric-leading expressions. Dates and digit-bearing identifiers remain intact. Decimal points do not split
+numeric-leading expressions, including unit suffixes in `0건이나` and `2028년까지`. Korean magnitudes such as
+`1만` and `2억4천만` remain intact without numeric conversion; their `만` is not a particle.
+Dates and digit-bearing identifiers remain intact. Decimal points do not split
 actor/action clauses. This changes response validation only, not retrieval, stored text, or the index.
 Numeric attribution across multiple approval/confirmation/decision actions in one clause remains `abstain`;
 the lexical guard cannot safely bind each quantity there yet.
