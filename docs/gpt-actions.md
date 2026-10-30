@@ -216,7 +216,7 @@ paths:
   /gateway/v3/search:
     post:
       operationId: searchPersonaVault
-      summary: Search PersonaVault and return compact flat results.
+      summary: Search PersonaVault with multiple relevant passages grouped by document.
       requestBody:
         required: true
         content:
@@ -253,7 +253,7 @@ paths:
                 - view
       responses:
         "200":
-          description: Compact search context and one flat result list.
+          description: Bounded search context and document results containing relevant passages.
           content:
             application/json:
               schema:
@@ -284,6 +284,34 @@ paths:
                         title:
                           type: string
                         snippet:
+                          type: string
+                        passages:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            properties:
+                              block_index:
+                                type: integer
+                                description: Zero-based evidence block in the current parsed document.
+                              chunk_index:
+                                type: integer
+                                description: Zero-based semantic chunk when block_index is absent.
+                              section:
+                                type: string
+                              snippet:
+                                type: string
+                              truncated:
+                                type: boolean
+                              answer_relevance:
+                                type: string
+                            required:
+                              - snippet
+                        passages_omitted:
+                          type: integer
+                        answer_relevance:
+                          type: string
+                        answer_conflict_state:
                           type: string
                         score:
                           type: number
@@ -339,7 +367,9 @@ Use searchPersonaVault when the user asks about prior notes, personal memory,
 project history, decisions, or anything that may already exist in PersonaVault.
 Always send view: all for broad search, current for compacted current knowledge,
 evidence for raw sources, history for chronology, or conflicts for unresolved
-claims. Search already returns compact flat results; never send bundle or compact.
+claims. Search returns multiple passages grouped by document; never send bundle or compact.
+Read each passage's qualifiers and answer_relevance. If excerpts or results were omitted,
+narrow the query before claiming complete coverage. The snippet field is only the first passage.
 
 If answer_state=abstain, say the available evidence is insufficient or does not
 match the requested environment. If answer_state=review_required, show the
