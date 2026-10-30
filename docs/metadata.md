@@ -100,8 +100,22 @@ list-item introductions, and table headers retained as local context. Sibling li
 separate even without blank lines; wrapped lines stay with their item. Nested items inherit their
 parent's introductory paragraph, not sibling content. This is a conservative block splitter, not
 a complete CommonMark parser. Unrelated paragraphs, sibling sections, list items, and table
-rows cannot pool their words into one anchor. Keyword/hybrid snippets come from the best
-eligible block rather than the first matching part of the document. Provenance markers remain hidden.
+rows cannot pool their words into one anchor. Results are grouped by document, but `passages`
+preserves multiple eligible keyword/hybrid blocks, including different decisions, failures and conditions.
+Each passage includes its section and zero-based `block_index` (in the current parsed document),
+or `chunk_index` for a semantic candidate. Its `answer_relevance` distinguishes answer anchors from
+weaker candidates; combining passages never supplies missing claim constraints. The legacy `snippet`
+contains the first displayed passage. Provenance markers remain hidden.
+
+Exact repetitions and adjacent visibly contained excerpts in the same section are collapsed, not
+similar claims with different dates, conditions or negation. A shared 12,000-byte UTF-8 passage budget
+is allocated round-robin across returned documents; `limit` still controls the document count, not
+passage count. Excerpts are at most 520 characters and mark `truncated` when shortened. A document's
+`passages_omitted` and `index.passages_truncated` report omitted distinct excerpts, also noted in `context`.
+The REST response (including both context and result JSON) is capped at 60,000 UTF-8 bytes; oversized
+responses drop trailing documents and report `index.results_truncated`. Narrow the query to inspect
+omitted evidence. MCP and CLI clients receive these passages through the existing rendered context.
+Neither passage nor wire-size limits change the safety verdict computed before presentation limits.
 An explicit slash-separated technical topic such as `mount/read` requires at least one member in the
 same block; shared project names and dates cannot replace the entire requested topic. This permits
 alternatives, not a claim that every operation succeeded. English property questions using `cover`,
