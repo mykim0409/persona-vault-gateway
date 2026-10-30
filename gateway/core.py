@@ -97,6 +97,7 @@ CLOUDFLARE_RETRYABLE_STATUS = {500, 502, 503, 504}
 EMBEDDING_RETRY_GRACE_SECONDS = 60
 RAG_CHUNK_CHARS = 1800
 RAG_CHUNK_OVERLAP = 180
+SEARCH_PASSAGE_BYTES = 12_000
 RAG_INDEX_SCHEMA = "5"
 MAX_CONVERSATION_BYTES = 4 * 1024 * 1024
 WORKING_AGREEMENT_PATH = PurePosixPath("10_User/WORKING_AGREEMENT.md")
@@ -1105,12 +1106,13 @@ def search_vault(
     if bundle in {"evidence", "experiences"}:
         ordered = prioritize_experience_results(ordered)
     results: list[dict[str, Any]] = []
-    seen_documents: set[str] = set()
+    seen_documents: dict[str, dict[str, Any]] = {}
     for item in ordered:
         document_id = item["document_id"]
         if document_id in seen_documents:
+            seen_documents[document_id]["passages"].extend(item["passages"])
             continue
-        seen_documents.add(document_id)
+        seen_documents[document_id] = item
         results.append(item)
     evidence = query_evidence(query, results, documents)
     # Candidate retrieval is not proof of the question. Only grounded evidence seeds claim expansion.
@@ -1133,6 +1135,7 @@ def search_vault(
         results = expanded[:max_results]
         if omitted:
             index["results_truncated"] = omitted
+    limit_search_passages(results, index)
     if analysis:
         groups = bundle_groups(bundle, results, analysis)
     else:
@@ -1141,6 +1144,8 @@ def search_vault(
     rendered_context = "\n\n".join(
         render_rag_context(item) for item in results
     )
+    if index.get("passages_truncated"):
+        rendered_context += f"\n\n[Search excerpts omitted: {index['passages_truncated']}. Narrow the query for more detail.]"
     return {
         "query": query,
         "bundle_type": bundle,
@@ -1411,8 +1416,9 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         best_coverage = 0
         best_text = ""
         best_blocks: list[str] = []
+        block_passages: list[tuple[int, dict[str, Any]]] = []
         semantic_eligible = False
-        for block in blocks:
+        for block_index, block in enumerate(blocks):
             text = normalize_evidence_dates(block)
             search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
             literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
@@ -1494,6 +1500,10 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                 eligible = eligible and state_found
             coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
             semantic_eligible |= eligible
+            if coverage and coverage >= min(2, len(terms)) and item.get("match") in {"keyword", "hybrid"}:
+                passage = search_passage(block, sorted(terms), block_index=block_index)
+                passage["_coverage"] = coverage
+                block_passages.append((coverage, passage))
             if coverage > best_coverage:
                 best_coverage, best_text = coverage, block
                 best_blocks = [block]
@@ -1505,6 +1515,8 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         if best_coverage and item.get("match") in {"keyword", "hybrid"}:
             scored.append((best_coverage, item))
             item["snippet"] = rag_snippet(best_text, list(terms))
+            if block_passages:
+                item["passages"] = [passage for _, passage in sorted(block_passages, key=lambda entry: -entry[0])]
             if doc.get("kind") == "decision_ledger" and doc.get("conflict_state") == "unresolved":
                 item["answer_conflict_state"] = ledger_answer_conflict(doc, best_blocks, terms)
     best = max((coverage for coverage, _ in scored), default=0)
@@ -1514,6 +1526,10 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             item["answer_relevance"] = "grounded"
         else:
             item.pop("answer_conflict_state", None)
+        for passage in item.get("passages", []):
+            passage["answer_relevance"] = "grounded" if (
+                passage.pop("_coverage", 0) == best and best >= min(2, len(terms))
+            ) else "candidate"
     return evidence
 
 
@@ -1773,6 +1789,7 @@ def result_item(
     item.update(
         {
             "snippet": rag_snippet(str(payload.get("text") or ""), terms),
+            "passages": [search_passage(str(payload.get("text") or ""), terms, chunk_index=int(payload.get("chunk_index") or 0))],
             "score": round(score, 6),
             "match": match,
             "ranking": {
@@ -1866,11 +1883,83 @@ def render_rag_context(item: dict[str, Any]) -> str:
         )
         if item.get(key) not in (None, "", [], {})
     }
+    excerpts = []
+    for passage in item.get("passages", []):
+        location = f"block {passage['block_index']}" if "block_index" in passage else f"chunk {passage['chunk_index']}"
+        label = " | ".join(part for part in (
+            location, passage.get("section"), passage.get("answer_relevance", "candidate"),
+            "excerpt truncated" if passage.get("truncated") else "",
+        ) if part)
+        excerpts.append(f"[{label}]\n{passage['snippet']}")
+    excerpts = "\n\n".join(excerpts) if "passages" in item else item["snippet"]
+    if item.get("passages_omitted"):
+        excerpts += f"\n[Omitted {item['passages_omitted']} other excerpts from this document.]"
     return (
         f"### {item['label']} | {item['path']}\n"
         f"Metadata: {json.dumps(safety, ensure_ascii=False, sort_keys=True)}\n"
-        f"{item['snippet']}"
+        f"{excerpts}"
     )
+
+
+def search_passage(text: str, terms: list[str], **location: int) -> dict[str, Any]:
+    lines = text.splitlines()
+    headings = []
+    for line in lines:
+        if not re.match(r"^\s*#{1,6} ", line):
+            break
+        headings.append(line.lstrip(" #"))
+    normalized = re.sub(r"\s+", " ", text).strip()
+    snippet = rag_snippet(text, terms)
+    return {
+        **location,
+        "section": " / ".join(headings)[:160],
+        "snippet": snippet,
+        "truncated": snippet != normalized,
+        "_text": normalized,
+    }
+
+
+def limit_search_passages(results: list[dict[str, Any]], index: dict[str, Any]) -> None:
+    """Share a UTF-8 excerpt budget across documents, without changing the pre-cap safety verdict."""
+    pending = []
+    for item in results:
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for passage in item.get("passages", []):
+            key = (passage["section"], passage["_text"])
+            if key in seen:
+                continue
+            seen.add(key)
+            # Lexical blocks have no chunk overlap. Collapse only visible containment in adjacent excerpts,
+            # never similar claims or text hidden by truncation; keep this linear for long transcripts.
+            if unique and unique[-1]["section"] == passage["section"]:
+                if passage["_text"] in unique[-1]["snippet"]:
+                    continue
+                if unique[-1]["_text"] in passage["snippet"]:
+                    unique.pop()
+            passage.setdefault("answer_relevance", item.get("answer_relevance", "candidate"))
+            unique.append(passage)
+        pending.append([{key: value for key, value in passage.items() if key != "_text"} for passage in unique])
+        item["passages"] = []
+        item["snippet"] = ""
+    remaining = SEARCH_PASSAGE_BYTES
+    for rank in range(max((len(passages) for passages in pending), default=0)):
+        for item, passages in zip(results, pending):
+            if rank >= len(passages):
+                continue
+            passage = passages[rank]
+            size = len(json.dumps(passage, ensure_ascii=False).encode("utf-8"))
+            if size <= remaining:
+                item["passages"].append(passage)
+                remaining -= size
+            else:
+                item["passages_omitted"] = item.get("passages_omitted", 0) + 1
+    for item in results:
+        if item["passages"]:
+            item["snippet"] = item["passages"][0]["snippet"]
+    omitted = sum(item.get("passages_omitted", 0) for item in results)
+    if omitted:
+        index["passages_truncated"] = omitted
 
 
 def expand_bundle_results(
@@ -1999,7 +2088,7 @@ def keyword_matches(
 ) -> list[dict[str, Any]]:
     if not terms:
         return []
-    # Best chunk per document, so one long transcript cannot fill the candidate limit.
+    # Rank document candidates here; query_evidence selects their individual passages from the full text.
     best: dict[str, tuple[float, str, int, str, int, float, float]] = {}
     # ponytail: O(n) vault scan is fine for a personal vault; move this into Qdrant payload filters if it becomes slow.
     if documents is None:

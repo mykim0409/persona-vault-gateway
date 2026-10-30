@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import html
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -33,6 +34,7 @@ from .core import (
     load_working_agreement,
     lookup_agent,
     rag_readiness,
+    render_rag_context,
     retry_due_embeddings,
     save_agent_note,
     save_conversation,
@@ -147,6 +149,8 @@ SEARCH_RESULT_FIELDS = (
     "path",
     "title",
     "snippet",
+    "passages",
+    "passages_omitted",
     "score",
     "match",
     "outcome",
@@ -156,6 +160,7 @@ SEARCH_RESULT_FIELDS = (
     "answer_conflict_state",
     "answer_relevance",
 )
+SEARCH_RESPONSE_BYTES = 60_000
 
 
 def search_response(result: dict[str, Any], view: str) -> dict[str, Any]:
@@ -178,6 +183,18 @@ def search_response(result: dict[str, Any], view: str) -> dict[str, Any]:
         }
         for item in result.get("results", [])
     ]
+    response["index"] = dict(response.get("index", {}))
+    # Include both JSON results and their rendered context in the wire-size limit used by Actions.
+    while response["results"] and len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > SEARCH_RESPONSE_BYTES:
+        response["results"].pop()
+        response["index"]["results_truncated"] = response["index"].get("results_truncated", 0) + 1
+        response["context"] = "\n\n".join(
+            render_rag_context(item) for item in result["results"][:len(response["results"])]
+        )
+        response["context"] += (
+            f"\n\n[Search results omitted: {response['index']['results_truncated']}; "
+            f"excerpts omitted: {response['index'].get('passages_truncated', 0)}. Narrow the query for more detail.]"
+        )
     return response
 
 

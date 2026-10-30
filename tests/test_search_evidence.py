@@ -1,6 +1,7 @@
 """Question relevance and claim safety must not depend on the presentation limit."""
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from dataclasses import replace
@@ -42,6 +43,110 @@ class SearchEvidenceTests(unittest.TestCase):
                 with self.subTest(case=case["id"], limit=limit), no_network():
                     result = core.search_vault(settings, AGENT, case["query"], limit, bundle="current")
                     self.assertTrue(check_case(case, result), result)
+
+    def test_multiple_passages_in_one_document_survive_document_limit(self):
+        self.note("runbook", "## Decision\n\ndeploy rollback uses the saved build.\n\n"
+                  + "unrelated filler " * 300 + "\n\n"
+                  "## Failure\n\ndeploy rollback failed with a locked database.\n\n"
+                  "## Correction\n\ndeploy rollback requires stopping the writer first.")
+        for limit in (1, 4, 20):
+            result = self.search("deploy rollback", limit)
+            self.assertEqual(len(result["results"]), 1)
+            passages = result["results"][0]["passages"]
+            self.assertEqual(len(passages), 3)
+            self.assertEqual([p["block_index"] for p in passages], [0, 2, 3])
+            for section in ("Decision", "Failure", "Correction"):
+                self.assertIn(section, result["context"])
+            self.assertIn("locked database", result["context"])
+            self.assertIn("stopping the writer", result["context"])
+            self.assertEqual(result["results"][0]["snippet"], passages[0]["snippet"])
+
+    def test_passage_dedupe_keeps_dates_conditions_and_negation(self):
+        self.note("runbook", "## Policy\n\ndeploy rollback is allowed on Linux.\n\n"
+                  "deploy rollback is allowed on Linux.\n\n"
+                  "deploy rollback is not allowed on Windows.\n\n"
+                  "## 2026-10-29\n\ndeploy rollback is allowed on Linux.\n\n"
+                  "## 2026-10-30\n\ndeploy rollback is allowed on Linux.")
+        result = self.search("deploy rollback")
+        passages = result["results"][0]["passages"]
+        self.assertEqual(len(passages), 4)
+        self.assertIn("not allowed on Windows", result["context"])
+        self.assertIn("2026-10-29", result["context"])
+        self.assertIn("2026-10-30", result["context"])
+        self.assertNotIn("_text", json.dumps(result))
+        self.assertNotIn("_coverage", json.dumps(result))
+
+    def test_weaker_passages_are_not_promoted_to_answer_anchors(self):
+        self.note("runbook", "deploy rollback during an outage uses the saved build.\n\n"
+                  "deploy rollback was also tested on a quiet day.")
+        result = self.search("deploy rollback outage")
+        self.assertEqual([p["answer_relevance"] for p in result["results"][0]["passages"]], ["grounded", "candidate"])
+
+    def test_passage_budget_does_not_hide_conflict_verdict(self):
+        self.note("runbook", "\n\n".join(f"deploy rollback observation {n}." for n in range(200)))
+        self.note("objection", "That procedure is disputed.", memory_type="candidate", relations={"contradicts": ["runbook"]})
+        for limit in (1, 4, 20):
+            with patch.object(core, "SEARCH_PASSAGE_BYTES", 400):
+                result = self.search("deploy rollback", limit)
+            self.assertEqual(result["answer_state"]["state"], "review_required")
+            self.assertGreater(result["index"]["passages_truncated"], 0)
+            self.assertIn("omitted", result["context"])
+            size = sum(len(json.dumps(p, ensure_ascii=False).encode("utf-8")) for item in result["results"] for p in item["passages"])
+            self.assertLessEqual(size, 400)
+            if limit > 1:
+                self.assertTrue(all(item["passages"] for item in result["results"]))
+
+    def test_passage_budget_counts_exact_exhaustion(self):
+        passage = core.search_passage("deploy rollback", [], chunk_index=0)
+        size = len(json.dumps({k: v for k, v in passage.items() if k != "_text"} | {"answer_relevance": "candidate"}, ensure_ascii=False).encode("utf-8"))
+        items = [{"passages": [passage, core.search_passage("another excerpt", [], chunk_index=1)]}]
+        index = {}
+        with patch.object(core, "SEARCH_PASSAGE_BYTES", size):
+            core.limit_search_passages(items, index)
+        self.assertEqual(len(items[0]["passages"]), 1)
+        self.assertEqual(index["passages_truncated"], 1)
+
+    def test_semantic_only_results_keep_multiple_chunks_without_claiming_support(self):
+        self.note("runbook", "Restore the previous build. " * 80 + "\n\n" + "Redeploy the saved artifact. " * 80)
+        settings = replace(self.settings, embedding_provider="hash")
+        vector = [1.0] + [0.0] * (core.HASH_EMBEDDING_DIMENSIONS - 1)
+        with patch.object(core, "qdrant_json", FakeQdrant()), \
+             patch.object(core, "embed_documents", side_effect=lambda _s, texts: [vector for _ in texts]), \
+             patch.object(core, "embed_query", return_value=(vector, core.HASH_EMBEDDING_MODEL)):
+            core.index_vault(settings)
+            result = core.search_vault(settings, AGENT, "how is deployment undone", limit=1, bundle="current")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertGreater(len(result["results"][0]["passages"]), 1)
+        self.assertIn("Restore", result["context"])
+        self.assertIn("Redeploy", result["context"])
+        self.assertEqual(result["answer_state"]["state"], "evidence")
+
+    def test_containment_cannot_drop_text_hidden_by_snippet_truncation(self):
+        text = "deploy rollback " + "padding " * 100 + "Later distinct condition."
+        items = [{"passages": [core.search_passage(text, ["deploy"], block_index=0),
+                               core.search_passage("Later distinct condition.", [], block_index=1)]}]
+        core.limit_search_passages(items, {})
+        self.assertEqual(len(items[0]["passages"]), 2)
+        self.assertTrue(items[0]["passages"][0]["truncated"])
+
+    def test_wire_response_budget_and_passages_reach_all_clients(self):
+        from gateway.app import SEARCH_RESPONSE_BYTES, search_response
+        from fastapi.responses import JSONResponse
+        for n in range(20):
+            self.note(f"runbook{n}", "\n\n".join(f"deploy rollback {i} 단계의 한글 조건입니다. " + "설명 " * 50 for i in range(20)))
+        result = self.search("deploy rollback", limit=20)
+        public = search_response(result, "current")
+        self.assertLessEqual(len(JSONResponse(public).body), SEARCH_RESPONSE_BYTES)
+        self.assertTrue(public["results"][0]["passages"])
+        self.assertIn("[block ", public["context"])
+        self.assertIn("omitted", public["context"])
+        self.assertGreater(public["index"]["passages_truncated"], 0)
+        # Metadata also counts: pathological titles cannot bypass the Actions wire limit.
+        result["results"][0]["title"] = "긴 제목" * SEARCH_RESPONSE_BYTES
+        public = search_response(result, "current")
+        self.assertLessEqual(len(JSONResponse(public).body), SEARCH_RESPONSE_BYTES)
+        self.assertGreater(public["index"]["results_truncated"], 0)
+        self.assertEqual(public["answer_state"], result["answer_state"])
 
     def test_evidence_blocks_keep_local_context(self):
         self.assertEqual(core.evidence_blocks(""), [])
