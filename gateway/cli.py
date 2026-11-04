@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from datetime import date
 from hashlib import sha256
@@ -13,7 +14,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from .compaction import annotate_drafts, concurrent_raw_captures, finish_search, projected_documents, review_binding, staging_path
+from .compaction import annotate_drafts, compaction_sources, concurrent_raw_captures, finish_search, projected_documents, read_compaction, record_compaction, review_binding, staging_path
 from .core import RAG_EXCLUDED_DIRS, Settings, document_metadata, markdown_body, qdrant_compaction_neighbors, vault_documents
 from .wiki import BRIEF_CAP, analyze_documents, build_compaction_plan, build_transfer_plan, check_compaction, health_report, review_targets
 
@@ -110,6 +111,12 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("plan", help="Saved compact-plan JSON with its review section completed.")
     annotate = commands.add_parser("compact-annotate", help="Write pvg-src provenance markers from review anchors into staged drafts only.")
     annotate.add_argument("plan")
+    read = commands.add_parser("compact-read", help="Read bounded source excerpts from the plan's Git base; never records review.")
+    read.add_argument("plan")
+    read.add_argument("--cursor", help="Continue using next_cursor from the previous page.")
+    read.add_argument("--max-characters", type=int, default=6000, help="Primary text budget, 256..16000 code points; at most 800 extra context characters.")
+    record = commands.add_parser("compact-record", help="Update staged item judgments from stdin JSON (plan_sha256, items); not approval.")
+    record.add_argument("plan")
     review = commands.add_parser("compact-review", help="Check staged targets and report reusable semantic-review bindings.")
     review.add_argument("plan")
     review.add_argument("--record", action="store_true", help="Record bindings AFTER independent review; not user approval.")
@@ -125,7 +132,7 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
-def documents_at_revision(vault: Path, revision: str) -> list[dict[str, Any]]:
+def documents_at_revision(vault: Path, revision: str, paths: set[str] | None = None) -> list[dict[str, Any]]:
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
         raise ValueError("plan revision must be a full commit ID")
 
@@ -142,6 +149,7 @@ def documents_at_revision(vault: Path, revision: str) -> list[dict[str, Any]]:
         path = raw_path.decode("utf-8")
         if (
             header.split()[0] not in {b"100644", b"100755"}
+            or (paths is not None and path not in paths)
             or not path.endswith(".md") or any(part in RAG_EXCLUDED_DIRS for part in Path(path).parts)
         ):
             continue
@@ -202,20 +210,55 @@ def plan_output(plan: dict[str, Any], args: argparse.Namespace, vault: Path) -> 
     }
 
 
-def update_plan(path: Path, plan: dict, expected: bytes) -> None:
+def update_plan(path: Path, plan: dict, expected: bytes) -> str:
     """Only checkpoint the local plan, refusing edits made while checks were running."""
     temporary = None
+    lock = path.with_name(path.name + ".lock")
+    # Serialize CLI/MCP writers so the hash check and replace cannot lose a concurrent update.
+    descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
+        payload = json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as file:
             temporary = Path(file.name)
-            json.dump(plan, file, ensure_ascii=False, indent=2, sort_keys=True)
-            file.write("\n")
+            file.write(payload)
         if path.read_bytes() != expected:
             raise ValueError("plan changed during checks")
         os.replace(temporary, path)
+        return sha256(payload.encode("utf-8")).hexdigest()
     finally:
+        os.close(descriptor)
+        lock.unlink(missing_ok=True)
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def run_source_tool(args: argparse.Namespace, settings: Settings) -> dict:
+    try:
+        path = staging_path(settings.vault_dir, Path(args.plan))
+        raw_plan = path.read_bytes()
+        plan = json.loads(raw_plan)
+        snapshot = git_snapshot(settings.vault_dir, include_dates=False)
+        if snapshot.get("revision") != plan["revision"]:
+            return {"status": "blocked", "reason": "plan_base_changed"}
+        sources = compaction_sources(plan, documents_at_revision(settings.vault_dir, plan["revision"], set(plan["selected"]["source_paths"])))
+        plan_hash = sha256(raw_plan).hexdigest()
+        if args.command == "compact-read":
+            result = read_compaction(plan, sources, args.cursor, args.max_characters)
+        else:
+            request = sys.stdin.read(1_000_001)
+            if len(request) > 1_000_000:
+                raise ValueError("record payload exceeds 1000000 characters")
+            payload = json.loads(request)
+            if payload.get("plan_sha256") != plan_hash:
+                return {"status": "blocked", "reason": "plan_changed_before_record"}
+            result = record_compaction(plan, sources, payload["items"])
+        if git_snapshot(settings.vault_dir, include_dates=False).get("revision") != plan["revision"] or path.read_bytes() != raw_plan:
+            raise ValueError("plan or Git base changed during source operation")
+        if args.command == "compact-record":
+            plan_hash = update_plan(path, plan, raw_plan)
+        return {**result, "plan_sha256": plan_hash}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, subprocess.CalledProcessError) as exc:
+        return {"status": "blocked", "reason": f"invalid_compaction_source: {exc}"}
 
 
 def run_compaction(args: argparse.Namespace, settings: Settings, documents: list[dict]) -> dict:
@@ -313,6 +356,8 @@ def run_compaction(args: argparse.Namespace, settings: Settings, documents: list
 def run(argv: list[str] | None = None) -> dict[str, Any]:
     args = parser().parse_args(argv)
     settings = settings_for(args.vault)
+    if args.command in {"compact-read", "compact-record"}:
+        return run_source_tool(args, settings)
     if args.command == "compact-annotate":
         try:
             plan = json.loads(staging_path(settings.vault_dir, Path(args.plan)).read_text(encoding="utf-8"))

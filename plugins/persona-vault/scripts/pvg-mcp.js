@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// PersonaVault MCP server (stdio, newline-delimited JSON-RPC 2.0): pvg_search and pvg_memo as a typed facade over
-// pvg-client.js. Each call runs the shared helper, so validation, payloads, config, timeouts and error text match
-// the pvg-rag-search / pvg-agent-memo commands. Nothing but JSON-RPC messages may reach stdout.
+// Thin stdio facades over the shared Gateway client and local pvg-wiki CLI. No curation rules live here.
 
 const { spawn } = require('child_process');
 const path = require('path');
@@ -58,6 +56,40 @@ const TOOLS = [{
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+}, {
+  name: 'pvg_compact_read',
+  description: 'Read a bounded page of raw evidence from an existing local curation plan. Requires pvg-wiki installed on '
+    + 'the MCP host and an explicitly selected local Git Vault; does not call the Gateway or record review. '
+    + 'Returns source IDs, roles, code-point spans, context_only, next_cursor and plan_sha256. Context and coverage are not proof of meaning.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      vault: { ...text('Absolute path to the local Git Vault root.'), minLength: 1 },
+      plan: { ...text('Absolute path to an existing plan JSON inside that Vault .tmp/curating/.'), minLength: 1 },
+      cursor: text('next_cursor from the previous page; omit for the first page.'),
+      max_characters: { type: 'integer', minimum: 256, maximum: 16000, default: 6000 },
+    },
+    required: ['vault', 'plan'], additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+}, {
+  name: 'pvg_compact_record',
+  description: 'Record agent-authored judgments in an existing local staged plan only, when the user requested curation. '
+    + 'Uses the same pvg-wiki validation as the CLI. Requires the latest plan_sha256. items replace complete records '
+    + 'for those source IDs; use {id, parts:[{span:[start,end], disposition, targets, reason, quote?, anchors?}]} for multiple '
+    + 'judgments in one event. No semantic inference, raw writes, deletion, independent-review approval, commit or indexing.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      vault: { ...text('Absolute local Git Vault root.'), minLength: 1 },
+      plan: { ...text('Absolute plan JSON path inside Vault .tmp/curating/.'), minLength: 1 },
+      plan_sha256: { ...text('Latest plan_sha256 returned by read or record; stale writes are rejected.'), minLength: 64, maxLength: 64 },
+      items: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object', additionalProperties: true },
+        description: 'Existing review.items format or multipart records. Python validates dispositions, quotes, roles, spans and targets. Partial coverage cannot pass final review.' },
+    },
+    required: ['vault', 'plan', 'plan_sha256', 'items'], additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 }];
 
 // Checks arguments against a tool's inputSchema (required, string/integer/array types and bounds) and returns '' or a
@@ -76,8 +108,13 @@ function invalid(schema, args) {
       if (!Number.isInteger(value) || value < (rule.minimum ?? -Infinity) || value > (rule.maximum ?? Infinity)) {
         return `${key} must be an integer in ${rule.minimum}..${rule.maximum}`;
       }
-    } else if (rule.type === 'array' && (!Array.isArray(value) || value.some((item) => typeof item !== 'string'))) {
-      return `${key} must be an array of strings`;
+    } else if (rule.type === 'array') {
+      const objects = rule.items.type === 'object';
+      if (!Array.isArray(value) || value.some((item) => objects
+        ? !item || typeof item !== 'object' || Array.isArray(item) : typeof item !== 'string')) {
+        return `${key} must be an array of ${objects ? 'objects' : 'strings'}`;
+      }
+      if (value.length < (rule.minItems ?? 0) || value.length > (rule.maxItems ?? Infinity)) return `${key} has too few or too many items`;
     }
   }
   return '';
@@ -116,10 +153,51 @@ function runClient(command, argv, { stdin = '', limit = '' } = {}) {
   });
 }
 
+function runCuration(name, args) {
+  if (!path.isAbsolute(args.vault) || !path.isAbsolute(args.plan)) {
+    return Promise.resolve({ code: 1, err: 'vault and plan must be absolute local paths' });
+  }
+  const command = name === 'pvg_compact_read' ? 'compact-read' : 'compact-record';
+  const argv = [`--vault=${args.vault}`, command, args.plan];
+  if (args.cursor != null) argv.push(`--cursor=${args.cursor}`);
+  if (args.max_characters != null) argv.push(`--max-characters=${args.max_characters}`);
+  const input = command === 'compact-record' ? JSON.stringify({ plan_sha256: args.plan_sha256, items: args.items }) : '';
+  if (Buffer.byteLength(input) > 1_000_000) return Promise.resolve({ code: 1, err: 'Record payload is too large' });
+  return new Promise((resolve) => {
+    const child = spawn('pvg-wiki', argv, {
+      env: { ...process.env, PYTHONUTF8: '1' }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    });
+    const out = [], err = [];
+    let bytes = 0, failure = '';
+    const timer = setTimeout(() => { failure = 'Local curation timed out; inspect the plan before retrying.'; child.kill(); }, 30_000);
+    const collect = (chunks) => (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 512_000) { failure = 'Local curation output limit exceeded'; child.kill(); }
+      else chunks.push(chunk);
+    };
+    child.stdout.on('data', collect(out));
+    child.stderr.on('data', collect(err));
+    child.stdin.on('error', () => {});
+    child.once('error', () => {
+      clearTimeout(timer);
+      resolve({ code: 1, err: 'Local pvg-wiki could not start. Install persona-vault-gateway with uv tool install and add its executable directory to the MCP host PATH. No automatic installation was attempted.' });
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code: failure ? 1 : code, out: Buffer.concat(out).toString('utf8'), err: failure || Buffer.concat(err).toString('utf8') });
+    });
+    child.stdin.end(input);
+  });
+}
+
 async function callTool(name, args) {
-  const problem = invalid(TOOLS.find((tool) => tool.name === name).inputSchema, args);
+  const schema = TOOLS.find((tool) => tool.name === name).inputSchema;
+  const problem = invalid(schema, args);
   if (problem) return { content: [{ type: 'text', text: problem }], isError: true };
-  const run = name === 'pvg_search'
+  if (name.startsWith('pvg_compact_') && Object.keys(args).some((key) => !Object.hasOwn(schema.properties, key))) {
+    return { content: [{ type: 'text', text: 'Unknown curation argument' }], isError: true };
+  }
+  const run = name.startsWith('pvg_compact_') ? await runCuration(name, args) : name === 'pvg_search'
     ? await runClient('rag-search', ['--view', String(args.view ?? 'all'), '--query', String(args.query ?? '')],
       { limit: args.limit == null ? '' : String(args.limit) })
     : await runClient('agent-memo', memoArgv(args), { stdin: String(args.body ?? '') });

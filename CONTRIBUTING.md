@@ -30,11 +30,13 @@ uv run --frozen python tests/test_search_evidence.py
 uv run --frozen python tests/test_retrieval_contract.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
+uv run --frozen python tests/test_curation_tools.py
 uv run --frozen python tests/test_bootstrap.py
 uv run --frozen python tests/test_onboarding.py
 uv run --frozen python tests/test_deployment_surfaces.py
 uv run --frozen python tests/test_release_bundle.py
 node tests/test_hook.js
+node tests/test_mcp.js
 uv run --frozen python tests/test_capture_integration.py
 ```
 
@@ -45,7 +47,7 @@ uv run --frozen python tests/test_capture_integration.py
 | Compose smoke helper logic (skip rules, backup and restore, test-only transport) and the native `gateway.server` first-use flow | `test_sync.py` |
 | RAG retrieval, corrective evidence and source warnings | `test_rag_benchmark.py`, `test_search_evidence.py` |
 | Retrieval-only corpus, evaluator mutations and contract gate | `test_retrieval_contract.py` |
-| Wiki and compaction | `test_wiki.py`, `test_compaction.py` |
+| Wiki and compaction | `test_wiki.py`, `test_compaction.py`, `test_curation_tools.py` (local CLI/MCP parity) |
 | SSH deploy key and known_hosts helpers (`gateway.bootstrap`) | `test_bootstrap.py` |
 | Release install bundle (including localized doc pairs) | `test_release_bundle.py` |
 | Hook and capture | `test_hook.js`, `test_capture_integration.py` |
@@ -165,7 +167,7 @@ Language: skills and references, agent-facing templates, source comments and doc
 
 ## Versions
 
-The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.5`
+The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.6`
 (the Codex one includes a build suffix), and the API is `v3`. Do not bump versions in ordinary changes; bump the plugin when its contract changes, as it did here.
 
 ## Docs and known limitations

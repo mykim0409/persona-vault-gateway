@@ -110,3 +110,22 @@ Search returns sources, not a truth verdict. `answer_state=evidence` and `lexica
 
 Read each passage's conditions and negation. `linked_context` is bounded supplemental context, not proof of a missing claim.
 If excerpts are omitted, narrow the query only when that missing detail is needed; do not recursively traverse every link or assume a preview is complete.
+
+## Local Curation Tools
+
+Only for user-requested curation of an explicitly selected local Git Vault, use `pvg_compact_read` and
+`pvg_compact_record` with an existing plan under that Vault's `.tmp/curating/`. They run the shared `pvg-wiki`
+CLI on the MCP host, not the Gateway. Remote token access alone does not provide a local Vault or authorize curation.
+Read the Vault's `CURATOR.md` and applicable local rules first. If `pvg-wiki` is absent, ask for local CLI setup;
+do not try another OS's commands or automatically install software. Absolute `vault` and `plan` paths are required.
+
+Read `primary` text with its roles and source spans; `context_only` neighbors are supplemental, not reviewed items.
+Follow `next_cursor` for remaining text. Positions are Unicode code points within the item's body, not UTF-16 offsets.
+For multiple claims in one event, keep its ID and record `parts` with separate spans, dispositions, targets, reasons and quotes.
+Preserve negation, scope and attribution; subagent text is not the user's preference. Do not infer judgments from keywords.
+Reuse the latest `plan_sha256`; record replaces each supplied ID's complete judgment, including all its parts.
+Inspect `unreviewed_ranges`: a gap cannot pass final review. Range coverage does not establish that all meaning was preserved.
+
+These tools only read Git-base raw and edit the staged review plan. They do not write canonical notes, delete raw,
+approve changes, commit or reindex. Use the existing independent review and exact approval gates from `CURATOR.md`;
+`compact-record` is not `compact-review --record`. Existing whole-item reviews still work.

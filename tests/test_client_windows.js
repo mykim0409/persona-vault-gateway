@@ -133,7 +133,7 @@ async function exerciseMcp(requests, url) {
     assert.strictEqual(result.stderr, '');
     const reply = (id) => JSON.parse(result.stdout.split(/\r?\n/).filter(Boolean).find((line) => JSON.parse(line).id === id));
     assert.strictEqual(reply(1).result.protocolVersion, '2025-06-18');
-    assert.deepStrictEqual(reply(2).result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo']);
+    assert.deepStrictEqual(reply(2).result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record']);
     assert.deepStrictEqual(reply(3).result, {
       content: [{ type: 'text', text: 'Answer state: answered (test)\nwindows search result' }], isError: false,
     });
