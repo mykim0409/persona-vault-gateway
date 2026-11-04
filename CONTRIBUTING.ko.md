@@ -30,11 +30,13 @@ uv run --frozen python tests/test_search_evidence.py
 uv run --frozen python tests/test_retrieval_contract.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
+uv run --frozen python tests/test_curation_tools.py
 uv run --frozen python tests/test_bootstrap.py
 uv run --frozen python tests/test_onboarding.py
 uv run --frozen python tests/test_deployment_surfaces.py
 uv run --frozen python tests/test_release_bundle.py
 node tests/test_hook.js
+node tests/test_mcp.js
 uv run --frozen python tests/test_capture_integration.py
 ```
 
@@ -45,7 +47,7 @@ uv run --frozen python tests/test_capture_integration.py
 | Compose smoke 보조 로직(skip 규칙, backup·restore, 테스트 전용 transport)과 네이티브 `gateway.server` 첫 사용 흐름 | `test_sync.py` |
 | RAG 검색·질문/주장 안전성 | `test_rag_benchmark.py`, `test_search_evidence.py` |
 | 근거 조회 전용 테스트셋·평가기 변이 검사·계약 검증 | `test_retrieval_contract.py` |
-| wiki·compaction | `test_wiki.py`, `test_compaction.py` |
+| wiki·compaction | `test_wiki.py`, `test_compaction.py`, `test_curation_tools.py` (로컬 CLI/MCP 일치 검증) |
 | SSH deploy key·known_hosts 보조 함수(`gateway.bootstrap`) | `test_bootstrap.py` |
 | 릴리스 설치 bundle(번역 문서 쌍 포함) | `test_release_bundle.py` |
 | hook·capture | `test_hook.js`, `test_capture_integration.py` |
@@ -168,7 +170,7 @@ Vault 내용을 영어로 써야 한다는 뜻은 아니며, 번역된 README·�
 
 ## 버전
 
-Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.5`
+Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.6`
 (Codex는 build suffix 포함), API `v3`입니다. 일반 변경에서 버전을 올리지 않으며, plugin 계약이 바뀔 때 plugin 버전을 올립니다(이번 변경이 그 경우입니다).
 
 ## 문서와 알려진 한계

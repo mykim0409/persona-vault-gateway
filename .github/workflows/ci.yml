@@ -70,6 +70,7 @@ jobs:
           uv run --frozen python tests/benchmark_retrieval_contract.py --check
           uv run --frozen python tests/test_wiki.py
           uv run --frozen python tests/test_compaction.py
+          uv run --frozen python tests/test_curation_tools.py
           node tests/test_hook.js
           node tests/test_mcp.js
           uv run --frozen python tests/test_capture_integration.py
@@ -107,3 +108,14 @@ jobs:
 
       - name: Windows client and PowerShell launchers
         run: node tests/test_client_windows.js
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Windows local curation CLI and MCP
+        run: |
+          python -m pip install uv==0.12.17
+          uv sync --frozen
+          uv run --frozen python tests/test_curation_tools.py
+          node tests/test_mcp.js

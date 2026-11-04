@@ -140,4 +140,6 @@ Windows PowerShell:
 memo 명령은 저장된 `path`(`30_Conversations/raw/` 아래)를 포함한 JSON을 출력하고, 검색에는 같은 메모가 나와야 합니다. 이는 Vault에 raw note를
 쓰는 것이며 승인된 지식이 아니므로, 새 Vault에서는 `--view current`가 비거나 abstain하는 것이 정상일 수 있습니다.
 
-plugin에는 `pvg_search`, `pvg_memo` 두 도구를 가진 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.
+plugin에는 검색·메모용 `pvg_search`, `pvg_memo`를 제공하는 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.
+
+선택적 로컬 큐레이션에는 `pvg_compact_read`, `pvg_compact_record`도 제공합니다. 같은 CLI 구현을 호출하며, 로컬 Git Vault와 MCP 호스트 PATH의 `pvg-wiki`가 필요합니다. 원문을 나눠 읽고 임시 계획에 판정을 기록할 뿐, 원문 삭제·승인·색인은 하지 않습니다. 설치와 사용법은 [Curator 프로토콜](CURATOR.md)을 참고하세요.

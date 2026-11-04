@@ -627,7 +627,7 @@ def build_compaction_plan(
     }
 
 
-def _review_items(entries: Any) -> list[dict[str, Any]]:
+def _review_records(entries: Any) -> list[dict[str, Any]]:
     """Expand explicitly grouped IDs; never infer that unlisted items were reviewed."""
     if not isinstance(entries, list):
         raise ValueError("review.items must be a list")
@@ -638,8 +638,77 @@ def _review_items(entries: Any) -> list[dict[str, Any]]:
         ids = entry.get("ids") if "ids" in entry else [entry["id"]]
         if not isinstance(ids, list) or not ids or any(not isinstance(item_id, str) for item_id in ids):
             raise ValueError("review ids must be a nonempty list of item IDs")
-        expanded.extend({**entry, "id": item_id} for item_id in ids)
+        if "span" in entry:
+            raise ValueError("source spans belong inside parts, not a whole-item review")
+        if "parts" in entry and (set(entry) != {"id", "parts"} or not isinstance(entry["parts"], list) or not entry["parts"]):
+            raise ValueError("multipart review requires only id and a nonempty parts list")
+        expanded.extend({key: value for key, value in {**entry, "id": item_id}.items() if key != "ids"} for item_id in ids)
+    if len({entry["id"] for entry in expanded}) != len(expanded):
+        raise ValueError("unknown or duplicate reviewed item")
     return expanded
+
+
+def _review_items(entries: Any) -> list[dict[str, Any]]:
+    expanded = []
+    for entry in _review_records(entries):
+        if "parts" not in entry:
+            expanded.append(entry)
+            continue
+        for part in entry["parts"]:
+            if not isinstance(part, dict) or any(key in part for key in ("id", "ids", "parts")) or "span" not in part:
+                raise ValueError("each review part requires a span and cannot override its source identity")
+            expanded.append({**part, "id": entry["id"]})
+    return expanded
+
+
+def unreviewed_ranges(record: dict, length: int) -> list[list[int]]:
+    """Code-point coverage is bookkeeping, not a claim that all meaning was preserved."""
+    if "parts" not in record:
+        return [] if record.get("disposition") in DISPOSITIONS else [[0, length]]
+    spans = []
+    for part in record["parts"]:
+        span = part.get("span") if isinstance(part, dict) else None
+        if (not isinstance(span, list) or len(span) != 2 or any(type(n) is not int for n in span)
+                or not 0 <= span[0] < span[1] <= length):
+            raise ValueError(f"invalid source span: {record['id']}")
+        if part.get("disposition") in DISPOSITIONS:
+            spans.append(span)
+    end, gaps = 0, []
+    for start, stop in sorted(spans):
+        if start > end:
+            gaps.append([end, start])
+        end = max(end, stop)
+    if end < length:
+        gaps.append([end, length])
+    return gaps
+
+
+def review_item_errors(entry: dict, body: str, event_role: str) -> list[str]:
+    item_id, disposition = entry["id"], entry.get("disposition")
+    errors = []
+    if disposition not in DISPOSITIONS:
+        errors.append(f"unclassified item: {item_id}")
+    if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
+        errors.append(f"item requires a reason: {item_id}")
+    destinations = entry.get("targets")
+    if not isinstance(destinations, list) or any(not isinstance(path, str) for path in destinations):
+        raise ValueError("item.targets must be a list of paths")
+    if disposition in MARKED_DISPOSITIONS | {"already-covered"} and not destinations:
+        errors.append(f"durable item requires a target: {item_id}")
+    if "span" in entry:
+        unreviewed_ranges({"id": item_id, "parts": [entry]}, len(body))
+        body = body[slice(*entry["span"])]
+    quote = entry.get("quote")
+    if quote is None:
+        if disposition in CLAIM_DISPOSITIONS:
+            errors.append(f"claim item requires a quote: {item_id}")
+    elif not isinstance(quote, str) or not 4 <= len(_normal(quote)) <= 200:
+        errors.append(f"quote must be 4 to 200 characters: {item_id}")
+    elif _normal(quote) not in _normal(body):
+        errors.append(f"quote not found in item: {item_id}")
+    if event_role == "subagent" and disposition not in SUBAGENT_DISPOSITIONS:
+        errors.append(f"subagent item may only be knowledge, already-covered, discard or hold: {item_id}")
+    return errors
 
 
 def review_targets(plan: dict) -> set[str]:
@@ -1020,7 +1089,7 @@ def check_compaction(
     nodes = selected.get("graph", {}).get("nodes", [])
     frozen = {node["path"]: node.get("sha256") for node in nodes if node.get("type") == "source_file"}
     expected: dict[str, str] = {}
-    facts: dict[str, tuple[str, str]] = {}  # item id -> (event role, normalized own text) for quote and role checks
+    facts: dict[str, tuple[str, str]] = {}  # item id -> (event role, own text) for quote and span checks
     for path in paths:
         source = original.get(path)
         if not source or not path.startswith(("30_Conversations/raw/", "40_Agents/")) or frozen.get(path) != source.get("document_hash"):
@@ -1031,13 +1100,14 @@ def check_compaction(
             if item_id in expected:
                 errors.append(f"ambiguous item identity: {item_id}")
             expected[item_id] = path
-            facts[item_id] = (item.get("event_role", ""), _normal(item["body"]))
+            facts[item_id] = (item.get("event_role", ""), item["body"])
     session_of = {item_id: _doc_sess(original[path]) for item_id, path in expected.items()}
     entries = _review_items(review.get("items"))
-    errors += [
-        f"claim items cannot be grouped under ids: {raw['disposition']}"
-        for raw in review["items"] if "ids" in raw and raw.get("disposition") in CLAIM_DISPOSITIONS
-    ]
+    errors += [f"claim items cannot be grouped under ids: {entry['disposition']}"
+               for entry in review["items"] if "ids" in entry and entry.get("disposition") in CLAIM_DISPOSITIONS]
+    for record in _review_records(review["items"]):
+        if record["id"] in facts and unreviewed_ranges(record, len(facts[record["id"]][1])):
+            errors.append(f"source ranges remain unreviewed: {record['id']}")
     deleted = review.get("delete_paths")
     if not isinstance(deleted, list) or any(not isinstance(path, str) for path in deleted):
         raise ValueError("review.delete_paths must be a list of paths")
@@ -1062,30 +1132,13 @@ def check_compaction(
         item_id = entry.get("id")
         disposition = entry.get("disposition")
         destinations = entry.get("targets")
-        if not isinstance(item_id, str) or item_id not in expected or item_id in classified:
+        if not isinstance(item_id, str) or item_id not in expected:
             errors.append(f"unknown or duplicate reviewed item: {item_id}")
             continue
         classified.add(item_id)
-        if disposition not in DISPOSITIONS:
-            errors.append(f"unclassified item: {item_id}")
-        if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
-            errors.append(f"item requires a reason: {item_id}")
-        if not isinstance(destinations, list) or any(not isinstance(path, str) for path in destinations):
-            raise ValueError("item.targets must be a list of paths")
-        if disposition in MARKED_DISPOSITIONS | {"already-covered"} and not destinations:
-            errors.append(f"durable item requires a target: {item_id}")
+        errors += review_item_errors(entry, facts[item_id][1], facts[item_id][0])
         if disposition in LEGACY_DISPOSITIONS:
             warnings.append("legacy disposition merge/replace is deprecated: use a typed disposition")
-        quote = entry.get("quote")
-        if quote is None:
-            if disposition in CLAIM_DISPOSITIONS:
-                errors.append(f"claim item requires a quote: {item_id}")
-        elif not isinstance(quote, str) or not 4 <= len(_normal(quote)) <= 200:
-            errors.append(f"quote must be 4 to 200 characters: {item_id}")
-        elif _normal(quote) not in facts[item_id][1]:
-            errors.append(f"quote not found in item: {item_id}")
-        if facts[item_id][0] == "subagent" and disposition not in SUBAGENT_DISPOSITIONS:
-            errors.append(f"subagent item may only be knowledge, already-covered, discard or hold: {item_id}")
         if disposition == "hold":
             retained.add(expected[item_id])
             if expected[item_id] in deleted:

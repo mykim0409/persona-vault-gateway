@@ -124,7 +124,11 @@ async function serverTest() {
 
     reply = await server.rpc('tools/list');
     const [search, memo] = reply.result.tools;
-    assert.deepStrictEqual(reply.result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo']);
+    assert.deepStrictEqual(reply.result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record']);
+    const [, , read, record] = reply.result.tools;
+    assert.deepStrictEqual([read.annotations.readOnlyHint, record.annotations.readOnlyHint], [true, false]);
+    assert.deepStrictEqual(read.inputSchema.required, ['vault', 'plan']);
+    assert.deepStrictEqual(record.inputSchema.required, ['vault', 'plan', 'plan_sha256', 'items']);
     assert.deepStrictEqual([search.inputSchema.required, memo.inputSchema.required], [['query'], ['title', 'body']]);
     assert.deepStrictEqual(search.inputSchema.properties.view.enum, pvgClient.VIEWS);
     assert.deepStrictEqual(memo.inputSchema.properties.outcome.enum, pvgClient.OUTCOMES);
@@ -251,6 +255,10 @@ async function serverTest() {
       ['pvg_search', { query: 'x'.repeat(501) }, 'query must be at most 500 characters'],
       ['pvg_search', 'a string', 'arguments must be an object'],
       ['pvg_memo', ['title', 'body'], 'arguments must be an object'],
+      ['pvg_compact_read', {}, 'vault is required'],
+      ['pvg_compact_read', { vault: 'relative', plan: 'relative' }, 'vault and plan must be absolute local paths'],
+      ['pvg_compact_read', { vault: '/v', plan: '/v/p', max_characters: 16001 }, 'max_characters must be an integer in 256..16000'],
+      ['pvg_compact_record', { vault: '/v', plan: '/v/p', plan_sha256: 'a'.repeat(64), items: [1] }, 'items must be an array of objects'],
     ]) {
       reply = await server.call(name, args);
       assert(reply.result.isError === true && text(reply) === expected, `${expected}: ${JSON.stringify(reply)}`);

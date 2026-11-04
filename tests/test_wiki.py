@@ -1027,6 +1027,32 @@ def template_checks() -> None:
     assert result["warnings"] == [] and result["curation"]["ledger_rows"] == {LEDGER: 1, OBSERVATIONS: 1}
 
 
+def multipart_review_checks() -> None:
+    first, second = "We will use SQLite for storage. ", "I prefer short answers."
+    source = "30_Conversations/raw/2026/01/01/a.md"
+    ids, check = scenario([raw(source, "s1", ("e0", "user", first + second), ("f", "user", FILLER))])
+    token = ids["e0"]
+    created = [
+        ledger("decision_ledger", row("D-001", tokens=(token,))),
+        ledger("user_ledger", row("U-001", "확인", kind="선호(명시)", last="1", tokens=(token, _sess("s1")))),
+    ]
+    parts = [
+        {"span": [0, len(first)], "disposition": "decision", "targets": [LEDGER], "quote": "use SQLite", "reason": "Project decision."},
+        {"span": [len(first), len(first + second)], "disposition": "user_preference", "targets": [OBSERVATIONS], "quote": "short answers", "reason": "Explicit preference."},
+    ]
+    result = check([{"id": "e0", "parts": parts}], created)
+    expect(result)
+    assert result["classified_items"] == result["item_count"] == 2
+    assert result["curation"]["ledger_rows"] == {LEDGER: 1, OBSERVATIONS: 1}
+    # One source/same session is still one independent observation, not two corroborating events.
+    assert result["warnings"] == []
+    expect(check([{"id": "e0", "parts": parts[:1]}], created), "source ranges remain unreviewed")
+    invalid = [parts[0], {**parts[1], "quote": "use SQLite"}]
+    expect(check([{"id": "e0", "parts": invalid}], created), "quote not found in item")
+    overlapping = [parts[0], {**parts[1], "span": [0, len(first + second)]}]
+    expect(check([{"id": "e0", "parts": overlapping}], created))
+
+
 def main() -> None:
     pure_analysis_checks()
     conflict_list_checks()
@@ -1039,6 +1065,7 @@ def main() -> None:
     user_ledger_checks()
     discovery_checks()
     template_checks()
+    multipart_review_checks()
     print(json.dumps({"wiki_analysis": "ok", "conflicts": "ok", "compaction_graph": "ok", "curator": "ok"}))
 
 
