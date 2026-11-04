@@ -76,13 +76,15 @@ Do not save:
 - an unattempted procedure presented as observed fact
 - a conclusion merely repeated from another source
 
-An observation should include only the useful fields:
+Keep each claim with its known actor, action, outcome, time, essential conditions and negation in the same paragraph or table row.
+Unknown facts stay unknown; capture time is not the event time. Use the existing subject, provenance and evidence fields rather than adding a new schema.
+Link to a specific section only for longer procedures or evidence; do not move the claim's essential conditions behind that link.
+Do not create extra notes or duplicate the automatic transcript just to satisfy this writing guidance.
+
+A compact observation can use:
 
 ```text
-Situation: ...
-Action: ...
-Outcome: success, failure, mixed, or unknown
-Applicability: project, repository, OS, version, or other conditions
+Observation: <actor> performed <action> under <conditions>, with <outcome> at <time, if known>.
 Evidence: run, file, commit, issue, transcript, or prior PersonaVault ID
 Uncertainty: what remains unverified
 ```
@@ -104,4 +106,7 @@ The OS reference shows search and temporary `PVG_RAG_REFRESH` syntax. Keep norma
 
 Normal searches combine stored semantic matches with a live keyword scan. A stale index does not make results keyword-only: stored semantic matches are used only when their source hash is verified against the current document, and lexical matches fill in the rest. If the response reports `index.stale=true`, use refresh only when fresh semantic matching is necessary. If `index.search_mode=keyword`, use the returned keyword evidence and do not request refresh; the Gateway resumes pending indexing after its stored limit reset.
 
-Do not claim PersonaVault contains anything not returned by search. Treat `answer_state=abstain` as insufficient or mismatched evidence. Treat `review_required` as an unresolved conflict and present the competing claims without choosing a winner. Preserve attribution and timeline order when reporting evidence or history.
+Search returns sources, not a truth verdict. `answer_state=evidence` and `lexical_match` mean retrieval, not support for the question; even an approved canonical can contradict its premise. `abstain` means no relevant sources were found, not that the claim is false. `review_required` flags unresolved source conflicts: inspect their scope and present relevant competing claims without choosing a winner. Read attribution, negation, dates, quantities and conditions in the excerpts; do not add a separate verification tool call. Legacy `supported` is not proof either.
+
+Read each passage's conditions and negation. `linked_context` is bounded supplemental context, not proof of a missing claim.
+If excerpts are omitted, narrow the query only when that missing detail is needed; do not recursively traverse every link or assume a preview is complete.

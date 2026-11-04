@@ -13,7 +13,7 @@ provenance_mode: human_asserted
 relations: {"supports":[],"contradicts":[],"supersedes":[]}
 retrieval_tier: primary
 privacy: normal
-protocol_version: 24
+protocol_version: 25
 ---
 
 # PersonaVault Curator Protocol
@@ -283,11 +283,18 @@ and do not add separate steps, checklists, LLMs, tools, or schemas. Finish withi
 
 - Group duplicated statements in one place, and remove progress narration with no lasting value.
 - Write one claim or one action per sentence. State the actor and the condition.
+- Keep a claim's known actor, outcome, time, negation and essential conditions in the same paragraph, list item or table row. Separate claims may share a document; do not create a file per claim.
 - Use one consistent term. If it helps search, give the original term or abbreviation alongside it only the first time.
 - Do not reduce source attribution, negation, uncertainty, exceptions, date and scope of application, or strength of evidence. Do not turn an observation into a fact or policy,
   a merely reviewed option into an adopted one, or a context-limited preference into a universal tendency.
 - Do not force English, an approved English dictionary, or an English word-count limit onto Korean documents.
 - Do not rewrite raw in place. Do not bulk-revise existing documents for style alone.
+
+Apply this to rewritten prose and new ledger rows; it does not authorize edits to frozen ledger columns.
+Use a relative Markdown link to a unique ATX section, such as `[procedure](#procedure)` within a file or a destination like `recovery.md#procedure` in another file, only for longer detail or evidence.
+Keep essential constraints in the claim itself. Do not add navigation files, duplicate summaries, or live links to retired raw; retain the existing provenance markers and pinned origins.
+The search preview follows at most one bounded hop and labels it `linked_context`, not a new answer anchor. Whole-file links, ledger row IDs and ambiguous sections are not automatically expanded.
+During the existing semantic review, check the returned passages for the critical conditions, not only the retrieved path or source status. Reuse the same probes and approval unit; do not add another review stage.
 
 Choose a table or Mermaid only when comparison, branching, dependency, state, or order is easier to read than prose. It is not needed in every document.
 Use it only to replace a long explanation, and do not duplicate the same content in both text and a diagram. Keep the key relations and conditions in short sentences
@@ -346,16 +353,21 @@ By default, the full source context, existing candidates, and the root `CURATOR.
   "drafts": {"20_Projects/Project/current.md": ".tmp/curating/current.md"},
   "dependencies": ["10_User/WORKING_AGREEMENT.md"],
   "probes": [
-    {"query": "The Project's current choice", "bundle": "current", "expect_paths": ["20_Projects/Project/current.md"], "answer_state": "supported"},
+    {"query": "The Project's current choice", "bundle": "current", "expect_paths": ["20_Projects/Project/current.md"], "expect_excerpts": [{"path": "20_Projects/Project/current.md", "text": "Alice approved the Linux pilot only."}], "answer_state": "evidence"},
     {"query": "A decision that does not actually exist", "bundle": "current", "answer_state": "abstain"},
-    {"query": "A decision attributed to the wrong person", "bundle": "current", "forbid_paths": ["20_Projects/Project/current.md"], "answer_state": "abstain"}
+    {"query": "Did Bob approve the Project pilot?", "bundle": "current", "expect_excerpts": [{"path": "20_Projects/Project/current.md", "text": "Alice approved the Linux pilot only."}], "answer_state": "evidence"}
   ]
 }
 ```
 
 This is an example of fields to add to `review` and does not replace `items/delete_paths/user_knowledge`.
 Write probes to fit the actual source and questions. `expect_paths` are paths that must all be retrieved, and
-`forbid_paths` are paths that must not be returned. State the `bundle` and the expected `answer_state` explicitly (at most 20).
+`forbid_paths` are paths that must not be returned. State the `bundle` and expected source-level `answer_state` explicitly (at most 20).
+Use `expect_excerpts: [{"path": "...", "text": "..."}]` for critical attribution and conditions; whitespace is normalized,
+but the text must occur in a returned passage from that path. An incorrect premise should retrieve its corrective source,
+not forbid it. `evidence` means candidates exist, not that the question is true. `review_required` is a source-conflict warning,
+not a query-level verdict. Interpret its scope during the existing review. Old `supported` probes must be rebaselined and
+reviewed again; the tool blocks them without rewriting the approved plan. No new review stage is added.
 
 ```bash
 # Write pvg-src markers for the anchored lines into the drafts only; re-run after any draft or anchor edit

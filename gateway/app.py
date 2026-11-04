@@ -157,7 +157,6 @@ SEARCH_RESULT_FIELDS = (
     "review_state",
     "temporal_state",
     "conflict_state",
-    "answer_conflict_state",
     "answer_relevance",
 )
 SEARCH_RESPONSE_BYTES = 60_000
@@ -195,6 +194,8 @@ def search_response(result: dict[str, Any], view: str) -> dict[str, Any]:
             f"\n\n[Search results omitted: {response['index']['results_truncated']}; "
             f"excerpts omitted: {response['index'].get('passages_truncated', 0)}. Narrow the query for more detail.]"
         )
+        if response["index"].get("context_expansion", {}).get("limited"):
+            response["context"] += "\n\n[Structural context is partial: one-hop preview limits reached.]"
     return response
 
 

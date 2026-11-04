@@ -21,7 +21,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gateway import cli, core
-from gateway.compaction import annotate_drafts, concurrent_raw_captures, finish_search, review_binding, staging_path
+from gateway.compaction import annotate_drafts, concurrent_raw_captures, finish_search, review_binding, staging_path, validated_probes
 from gateway.core import Settings, document_metadata, rag_answer_state, vault_documents
 from gateway.wiki import _src_ids, build_compaction_plan, check_compaction
 
@@ -133,7 +133,7 @@ def workflow_checks() -> None:
             delete_paths=sources, user_knowledge={"status": "unchanged", "reason": "No new preference."},
             drafts={target: f".tmp/curating/target-{i}.md" for i, target in enumerate(targets)},
             probes=[
-                {"query": "Scoped knowledge", "bundle": "current", "expect_paths": [targets[0]], "answer_state": "supported"},
+                {"query": "Scoped knowledge", "bundle": "current", "expect_paths": [targets[0]], "answer_state": "evidence"},
                 {"query": "Nonexistent claim", "bundle": "current", "forbid_paths": targets, "answer_state": "abstain"},
                 {"query": "Historical knowledge", "bundle": "history", "expect_paths": [targets[1]], "answer_state": "evidence"},
             ],
@@ -357,7 +357,7 @@ def workflow_checks() -> None:
                 assert first["status"] == "ok" and first["index_verification"] == "passed", first
                 assert first["search"]["reused"] is False and first["search"]["semantic"] == "disabled", first
                 assert [(c["query"], c["passed"], c["answer_state"]) for c in first["search"]["probes"]] == [
-                    ("Scoped knowledge", True, "supported"), ("Nonexistent claim", True, "abstain"),
+                    ("Scoped knowledge", True, "evidence"), ("Nonexistent claim", True, "abstain"),
                     ("Historical knowledge", True, "evidence"),
                 ], first
                 assert searching.call_count == 3 and all(c.kwargs["refresh"] is False for c in searching.call_args_list)
@@ -503,7 +503,7 @@ def provenance_checks() -> None:
             ],
             delete_paths=[source], user_knowledge={"status": "unchanged", "reason": "No new preference."},
             drafts={target: ".tmp/curating/cur.md"},
-            probes=[{"query": "Timeout seconds", "bundle": "current", "expect_paths": [target], "answer_state": "supported"}],
+            probes=[{"query": "Timeout seconds", "bundle": "current", "expect_paths": [target], "answer_state": "evidence"}],
         )
         plain = "# Retry policy\n\nConsolidated retry policy.\n\n" + f"{retry} <!-- pvg-src: {old} -->\n{timeout}"
         note(".tmp/curating/cur.md", "kn_cur", "canonical", plain)
@@ -796,7 +796,7 @@ def ledger_workflow_checks() -> None:
                 items=[{**row, "id": ids[row["id"]], "reason": "Reviewed."} for row in rows]
                 + [{"id": node, "disposition": "discard", "targets": [], "reason": "No lasting value."} for loc, node in ids.items() if loc not in named],
                 delete_paths=deleted, user_knowledge={"status": "updated", "reason": "The profile and observations changed."},
-                probes=[{"query": "SQLite storage", "bundle": "current", "expect_paths": [brief], "answer_state": "supported"}],
+                probes=[{"query": "SQLite storage", "bundle": "current", "expect_paths": [brief], "answer_state": "evidence"}],
             )
 
         # --- Curation 1: everything is created from nothing; plan preview, --brief-cap and --full.
@@ -1108,7 +1108,7 @@ def ledger_transfer_checks() -> None:
                  "reason": "The older platform decision belongs with platform history.", "evidence_paths": [source]},
             ],
             drafts={path: f".tmp/curating/draft-{i}.md" for i, path in enumerate(paths)},
-            probes=[{"query": "Shared builds", "bundle": "current", "expect_paths": [target], "answer_state": "supported"}],
+            probes=[{"query": "Shared builds", "bundle": "current", "expect_paths": [target], "answer_state": "evidence"}],
         )
 
         def stage(p: dict = plan, content: dict = bodies) -> None:
@@ -1191,7 +1191,7 @@ def ledger_transfer_checks() -> None:
         db = root / "test.db"
         db.touch()
         settings = replace(cli.settings_for(str(root)), db_path=db, embedding_provider="hash")
-        response = {"results": [{"path": target}], "index": {"stale": False}, "answer_state": {"state": "supported"}}
+        response = {"results": [{"path": target}], "index": {"stale": False}, "answer_state": {"state": "evidence"}}
         with patch.object(core, "qdrant_index_current", return_value=True), patch.object(core, "search_vault", return_value=response), \
                 patch.object(core, "qdrant_json", side_effect=AssertionError("no empty retired-path filter")):
             assert finish_search(settings, recorded, core.vault_documents(settings))["probes"][0]["passed"]
@@ -1220,7 +1220,61 @@ def ledger_transfer_checks() -> None:
     print("ledger-transfer: split/move, provenance, supersession, immutable rows, review binding and keyword finish passed")
 
 
+def retrieval_probe_checks() -> None:
+    with TemporaryDirectory(prefix="pvg-probe-") as temporary, no_network():
+        root = Path(temporary)
+        settings = Settings(root / "vault", root / "db", "probe-test", embedding_provider="none")
+        settings.vault_dir.mkdir()
+        core.init_db(settings.db_path)
+        path = "20_Projects/pilot.md"
+        probe = {"query": "pilot approval", "bundle": "current", "answer_state": "evidence",
+                 "expect_paths": [path], "expect_excerpts": [{"path": path, "text": "Alice approved the Linux pilot only."}]}
+        plan = {"review": {"probes": [probe], "delete_paths": []}}
+        response = {"results": [{"path": path, "passages": [{"snippet": "Alice approved the Linux pilot only."}]}],
+                    "index": {"stale": False, "search_mode": "keyword", "fallback_reason": "semantic_disabled"},
+                    "answer_state": {"state": "evidence"}}
+        with patch.object(core, "search_vault", return_value=response) as search:
+            completed = finish_search(settings, plan, [])
+            self_checkpoint = deepcopy(plan)
+            self_checkpoint["finish_checkpoint"] = completed
+            assert finish_search(settings, self_checkpoint, [])["reused"]
+            assert search.call_count == 1
+            for mutation in ("missing", "wrong-source", "wrong-condition"):
+                changed = deepcopy(response)
+                if mutation == "missing":
+                    changed["results"][0]["passages"] = []
+                elif mutation == "wrong-source":
+                    changed["results"][0]["path"] = "20_Projects/other.md"
+                else:
+                    changed["results"][0]["passages"][0]["snippet"] = "Alice approved Windows production."
+                with patch.object(core, "search_vault", return_value=changed):
+                    assert finish_search(settings, plan, [])["status"] == "blocked", mutation
+            changed_plan = deepcopy(self_checkpoint)
+            changed_plan["review"]["probes"][0]["expect_excerpts"][0]["text"] = "Windows production"
+            assert finish_search(settings, changed_plan, [])["status"] == "blocked"
+        for bad in ("supported", "invalid"):
+            invalid = deepcopy(plan)
+            invalid["review"]["probes"][0]["answer_state"] = bad
+            try:
+                validated_probes(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("obsolete/invalid probe accepted")
+        for excerpts in ("text", [{"path": path, "text": ""}], [{"path": 2, "text": "a"}], [{"path": path}]):
+            invalid = deepcopy(plan)
+            invalid["review"]["probes"][0]["expect_excerpts"] = excerpts
+            try:
+                validated_probes(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("malformed excerpt probe accepted")
+    print("retrieval probes: quote/source checks, legacy rejection and checkpoint binding passed")
+
+
 def main() -> None:
+    retrieval_probe_checks()
     efficiency_checks()
     workflow_checks()
     provenance_checks()

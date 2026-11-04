@@ -221,17 +221,29 @@ def validated_probes(plan: dict) -> list[dict]:
     if not isinstance(probes, list) or not 1 <= len(probes) <= 20:
         raise ValueError("review.probes requires 1..20 explicit search checks")
     for probe in probes:
+        if isinstance(probe, dict) and probe.get("answer_state") == "supported":
+            raise ValueError("supported probes are obsolete: rebaseline with evidence and required source excerpts")
         if (
             not isinstance(probe, dict)
             or not isinstance(probe.get("query"), str) or not 1 <= len(probe["query"].strip()) <= 500
             or probe.get("bundle") not in core.RAG_BUNDLES
-            or probe.get("answer_state") not in {"supported", "evidence", "review_required", "abstain"}
+            or probe.get("answer_state") not in {"evidence", "review_required", "abstain"}
         ):
             raise ValueError("probe requires query, bundle and expected answer_state")
         for key in ("expect_paths", "forbid_paths"):
             paths = probe.get(key, [])
             if not isinstance(paths, list) or any(not isinstance(path, str) or not path for path in paths):
                 raise ValueError("probe paths must be lists of nonempty paths")
+        excerpts = probe.get("expect_excerpts", [])
+        if not isinstance(excerpts, list) or any(
+            not isinstance(entry, dict) or set(entry) != {"path", "text"}
+            or not isinstance(entry["path"], str) or not entry["path"].strip()
+            or not isinstance(entry["text"], str) or not entry["text"].strip()
+            for entry in excerpts
+        ):
+            raise ValueError("expect_excerpts must list nonempty path/text objects")
+        if {entry["path"] for entry in excerpts} & set(probe.get("forbid_paths", [])):
+            raise ValueError("probe cannot require excerpts from a forbidden path")
         if set(probe.get("expect_paths", [])) & set(probe.get("forbid_paths", [])):
             raise ValueError("probe cannot both expect and forbid a path")
     return probes
@@ -305,6 +317,7 @@ def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) ->
             settings.qdrant_url, settings.qdrant_collection, settings.embedding_provider,
             core.selected_embedding_model(settings), core.RAG_INDEX_SCHEMA],
         "fingerprint": fingerprint,
+        "search_contract": "retrieval-only-v1",
     })
     checkpoint = plan.get("finish_checkpoint", {})
     if not isinstance(checkpoint, dict):
@@ -352,6 +365,15 @@ def finish_search(settings: core.Settings, plan: dict, documents: list[dict]) ->
             set(probe.get("expect_paths", [])) <= paths
             and not (set(probe.get("forbid_paths", [])) | set(plan["review"]["delete_paths"])) & paths
             and response["answer_state"]["state"] == probe["answer_state"]
+            and all(
+                any(
+                    item["path"] == entry["path"]
+                    and any(" ".join(entry["text"].split()) in " ".join(passage["snippet"].split())
+                            for passage in item.get("passages", []))
+                    for item in response["results"]
+                )
+                for entry in probe.get("expect_excerpts", [])
+            )
         )
         checks.append({"query": probe["query"], "passed": passed, "answer_state": response["answer_state"]["state"]})
     if not all(check["passed"] for check in checks):

@@ -123,7 +123,7 @@ plugin에는 `pvg_search`, `pvg_memo` 두 도구를 가진 작은 MCP 서버도 
    제안하는 실험적 로컬 CLI이며 스스로 apply·commit·push하지 않습니다. 백그라운드 서비스도
    아닙니다.
 3. **검색.** keyword 검색과, 사용할 수 있을 때의 semantic 검색이 `answer_state`와 함께 결과를
-   돌려줍니다. `answer_state`는 신호일 뿐 사실을 보증하지 않습니다.
+   돌려줍니다. `answer_state`는 출처 유무와 충돌 경고를 나타내며 질문의 참·거짓을 판정하지 않습니다.
 
 제품의 핵심은 기록, 일반 Markdown, keyword 검색입니다. semantic 검색은 그 위에 얹는 선택적 강화
 기능이고, Curator는 별도의 선택 도구입니다. 아래 표는 현재 무엇이 각각을 구현하는지 보여 줍니다.
