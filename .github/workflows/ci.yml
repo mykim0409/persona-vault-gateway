@@ -66,6 +66,8 @@ jobs:
           uv run --frozen python tests/test_release_bundle.py
           uv run --frozen python tests/test_rag_benchmark.py
           uv run --frozen python tests/test_search_evidence.py
+          uv run --frozen python tests/test_retrieval_contract.py
+          uv run --frozen python tests/benchmark_retrieval_contract.py --check
           uv run --frozen python tests/test_wiki.py
           uv run --frozen python tests/test_compaction.py
           node tests/test_hook.js

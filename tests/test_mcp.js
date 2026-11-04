@@ -75,6 +75,8 @@ async function serverTest() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pvg-mcp-'));
   const requests = [];
   let failWith = null;
+  const defaultSearch = { answer_state: { state: 'evidence', reason: 'r' }, context: 'ctx 한글' };
+  let searchResult = defaultSearch;
   const gateway = http.createServer((request, response) => {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
@@ -82,7 +84,7 @@ async function serverTest() {
       requests.push({ path: request.url, authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
       response.writeHead(failWith ? failWith.status : 200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(failWith ? failWith.body : request.url.endsWith('/search')
-        ? { answer_state: { state: 'supported', reason: 'r' }, context: 'ctx 한글' } : { status: 'ok', note_id: 'n1' }));
+        ? searchResult : { status: 'ok', note_id: 'n1' }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -164,7 +166,7 @@ async function serverTest() {
     // pvg_search: same text as the CLI helper, refresh/JSON/limit/view env pinned by the server.
     reply = await server.call('pvg_search', { query: 'raw claim' });
     assert.strictEqual(reply.result.isError, false);
-    assert.strictEqual(text(reply), 'Answer state: supported (r)\nctx 한글');
+    assert.strictEqual(text(reply), 'Answer state: evidence (r)\nctx 한글');
     assert.strictEqual(last().path, '/gateway/v3/search');
     assert.strictEqual(last().authorization, `Bearer ${TOKEN}`);
     assert.deepStrictEqual(last().body, { query: 'raw claim', limit: 5, refresh: false, view: 'all' });
@@ -173,8 +175,29 @@ async function serverTest() {
     reply = await server.call('pvg_search', { query: 'q', view: 'bogus' });
     assert(reply.result.isError && text(reply).includes('--view requires'), text(reply));
 
+    // Both surfaces use the Gateway's bounded context, not another traversal or local verdict.
+    const linkedContext = '### Current | 20_Projects/runbook.md\n[block 0 | Procedure | lexical_match]\n'
+      + 'deploy rollback uses the saved build.\n\n[block 3 | Limits | linked_context]\n'
+      + 'Only on Linux after stopping the writer. Windows is unverified.\n\n'
+      + '[Search results omitted: 1. Narrow the query for more detail.]\n'
+      + '[Structural context is partial: one-hop preview limits reached.]';
+    for (const state of ['evidence', 'review_required', 'abstain']) {
+      searchResult = {
+        answer_state: { state, reason: 'gateway_source_state' }, context: linkedContext,
+        results: [{ passages: [{ answer_relevance: 'linked_context' }] }],
+        index: { results_truncated: 1, context_expansion: { added: 1, limited: 1 } },
+      };
+      const before = requests.length;
+      reply = await server.call('pvg_search', { query: 'deploy rollback', view: 'current', limit: 1 });
+      assert.strictEqual(reply.result.isError, false);
+      assert.strictEqual(text(reply), `Answer state: ${state} (gateway_source_state)\n${linkedContext}`);
+      assert.strictEqual(requests.length, before + 1, 'no follow-up requests for linked context');
+    }
+    searchResult = defaultSearch;
+
     // pvg_memo: arguments map onto the helper's payload; the body arrives byte for byte.
-    const body = 'Situation: 한글 🚀\nline two after separator\n\nUncertainty: none';
+    const body = 'Observation: 한글 🚀 restored the saved build on Linux after stopping the writer; Windows was not tested.\n'
+      + 'Time is unknown. Preserve this separator.\n\nEvidence: run_1\nUncertainty: behavior on Windows';
     const fullMemo = {
       title: '-t', body, note_type: 'proposal', kind: 'debugging', outcome: 'success', project: 'Example',
       provenance: 'derived', session_id: 'run-1', subject: 'subj', evidence: ['run_1', 'run_2'], tags: ['x', 'y'],
@@ -262,7 +285,7 @@ async function serverTest() {
     server.child.stdin.write(split.subarray(0, cut));
     await new Promise((resolve) => setTimeout(resolve, 50));
     server.child.stdin.write(split.subarray(cut));
-    assert.strictEqual(text(await pending), 'Answer state: supported (r)\nctx 한글');
+    assert.strictEqual(text(await pending), 'Answer state: evidence (r)\nctx 한글');
     assert.strictEqual(last().body.query, '한글 query');
     const both = [server.reply(901), server.reply(902)];
     server.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 901, method: 'ping' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 902, method: 'ping' })}\n`);

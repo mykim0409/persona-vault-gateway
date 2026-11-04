@@ -27,6 +27,7 @@ uv run --frozen python tests/test_admin.py
 uv run --frozen python tests/test_sync.py
 uv run --frozen python tests/test_rag_benchmark.py
 uv run --frozen python tests/test_search_evidence.py
+uv run --frozen python tests/test_retrieval_contract.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
 uv run --frozen python tests/test_bootstrap.py
@@ -43,6 +44,7 @@ uv run --frozen python tests/test_capture_integration.py
 | admin 화면·login limiter | `test_admin.py` |
 | Compose smoke 보조 로직(skip 규칙, backup·restore, 테스트 전용 transport)과 네이티브 `gateway.server` 첫 사용 흐름 | `test_sync.py` |
 | RAG 검색·질문/주장 안전성 | `test_rag_benchmark.py`, `test_search_evidence.py` |
+| 근거 조회 전용 테스트셋·평가기 변이 검사·계약 검증 | `test_retrieval_contract.py` |
 | wiki·compaction | `test_wiki.py`, `test_compaction.py` |
 | SSH deploy key·known_hosts 보조 함수(`gateway.bootstrap`) | `test_bootstrap.py` |
 | 릴리스 설치 bundle(번역 문서 쌍 포함) | `test_release_bundle.py` |
@@ -67,6 +69,29 @@ uv run --frozen python tests/benchmark_search_evidence.py --baseline /path/to/ba
 합성 데이터에서 기존 방식, 문단·표 행 단위 근거 선택, 테스트용 BM25 재정렬을 비교합니다.
 안전성 사례, 지연 시간, CPU 시간, Python 최대 메모리 할당량(process RSS가 아님), 응답 크기
 (토큰 사용량이 아님)를 출력합니다. BM25는 운영 경로에 적용하지 않으며, 실제 임베딩 품질 벤치마크는 아닙니다.
+
+### 근거 조회 중심 전환 목표
+
+`tests/fixtures/retrieval-contract.json`은 반환해야 할 출처·발췌와 사람이 정한 해석 라벨을 분리합니다.
+라벨은 Gateway 요청에 전달하지 않습니다. 같은 원문에 대해 인물·행위·부정·수치·날짜·조건만 바꾼
+짝 질문을 사용하며, 틀린 질문에도 이를 바로잡을 근거는 보존해야 합니다.
+목표는 출처가 명확한 근거 반환이지, 질문을 `supported`나 `refuted`로 단정하는 것이 아닙니다.
+
+```bash
+uv run --frozen python tests/benchmark_retrieval_contract.py
+uv run --frozen python tests/benchmark_retrieval_contract.py --check
+```
+
+첫 명령은 미충족 항목을 보고하고, 두 번째는 **모든** 전환 조건이 통과하기 전까지 종료 코드 1을 반환합니다.
+CI에서도 전환 조건을 검사합니다. 기존 인물·행위 대조 사례는 서버의 참·거짓 판정 대신 중립적인 근거 반환과
+원문 보존을 요구하도록 전환했습니다. 파싱·식별자·수치 정규화·권한·충돌 경고 검사는 유지합니다.
+잡음 사례에서는 무관한 발췌와 과도한 추가 출처도 실패로 처리합니다.
+출처·발췌·메타데이터 회수, 표시 한도·생략 경고, 서버의 사실 판정을 별도로 집계합니다.
+빈 결과나 `abstain`만 반환하면 필수 근거 검사를 통과하지 못합니다. 올바른 긍정 판정도 비판정 목표에는 실패하며,
+`legacy_supported_against_annotation`은 그중 근거 없이 긍정한 응답을 별도로 셉니다.
+결과 한도 1/4/20, 임시 합성 Markdown, 네트워크 차단 상태에서 실행합니다. 주입한 의미 검색 후보는 보존 여부만
+검사하며 임베딩 품질을 측정하지 않습니다. 회귀 테스트의 시작점이지, 미공개 평가셋의 정확도나 LLM 답변 품질 측정은 아닙니다.
+런타임 규칙을 바꾸기 전에 익명화한 실패와 대조 질문을 추가하고, 현재 출력에 맞춰 필수 발췌를 약화하지 않습니다.
 
 ## Compose smoke (Docker 필요)
 
@@ -143,7 +168,7 @@ Vault 내용을 영어로 써야 한다는 뜻은 아니며, 번역된 README·�
 
 ## 버전
 
-Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.4`
+Gateway package, plugin, API 버전은 서로 독립입니다. 현재 Gateway package `0.1.0`, plugin `0.7.5`
 (Codex는 build suffix 포함), API `v3`입니다. 일반 변경에서 버전을 올리지 않으며, plugin 계약이 바뀔 때 plugin 버전을 올립니다(이번 변경이 그 경우입니다).
 
 ## 문서와 알려진 한계

@@ -311,8 +311,6 @@ paths:
                           type: integer
                         answer_relevance:
                           type: string
-                        answer_conflict_state:
-                          type: string
                         score:
                           type: number
                         match:
@@ -343,7 +341,6 @@ paths:
                       state:
                         type: string
                         enum:
-                          - supported
                           - evidence
                           - abstain
                           - review_required
@@ -370,10 +367,16 @@ evidence for raw sources, history for chronology, or conflicts for unresolved
 claims. Search returns multiple passages grouped by document; never send bundle or compact.
 Read each passage's qualifiers and answer_relevance. If excerpts or results were omitted,
 narrow the query before claiming complete coverage. The snippet field is only the first passage.
+linked_context is supplemental context, not proof of a missing claim.
+Do not recursively traverse every link; request more detail only when needed.
 
-If answer_state=abstain, say the available evidence is insufficient or does not
-match the requested environment. If answer_state=review_required, show the
-competing claims without choosing a winner. Prefer refresh=false; ordinary search
+Search returns sources, not truth verdicts. evidence/lexical_match does not prove
+the question's premise, even for approved canonical documents. Read the actor,
+negation, time, quantities and conditions in the excerpts; retain corrective evidence.
+If answer_state=abstain, no relevant candidates were found; that does not mean the
+claim is false. review_required flags source conflicts: inspect their scope and show
+relevant competing claims without choosing a winner. Do not add a separate verifier call.
+Prefer refresh=false; ordinary search
 does not start or rebuild the embedding index. If
 index.search_mode=keyword, use the returned keyword evidence and do not request
 refresh.
@@ -389,6 +392,10 @@ Before writing, search the same subject and source. Preserve attribution,
 negation, conflicts, chronology, applicability, and uncertainty. Do not save
 progress logs, help or smoke output, temporary errors, copied repository
 documentation, secrets, passwords, tokens, or private keys.
+Keep each claim's known actor, action, outcome, time, essential conditions and
+negation in the same paragraph or table row. Unknown facts stay unknown.
+Link to specific sections only for longer detail; do not move essential
+conditions behind a link or add extra notes to duplicate automatic capture.
 
 If an Action returns client_upgrade_required, tell the user to update the
 PersonaVault Action schema and plugin, then retry the unchanged request. Do not

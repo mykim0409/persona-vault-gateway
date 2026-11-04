@@ -26,7 +26,7 @@
       "query": "PVG-WINDOWS-ONLY-913",
       "context": {"projects": ["PersonaVault"], "repository": "persona-vault", "operating_system": "linux"},
       "expected_safety_outcome": "Mismatched-only evidence is surfaced as unverified and cannot produce an affirmative summary.",
-      "expected": {"include_ids": ["ep_windows_only"], "must_abstain": true}
+      "expected": {"include_ids": ["ep_windows_only"], "answer_state": "evidence"}
     },
     {
       "id": "current-canonical-plus-pending",
@@ -88,8 +88,8 @@
       "bundle": "auto",
       "query": "PVG-RAW-SUGGESTION-411",
       "context": {"projects": ["PersonaVault"]},
-      "expected_safety_outcome": "A lone raw suggestion is returned as evidence while the answer state explicitly abstains.",
-      "expected": {"include_ids": ["tr_raw_suggestion"], "must_abstain": true}
+      "expected_safety_outcome": "A lone raw suggestion stays visible as unreviewed transcript evidence, never canonical authority.",
+      "expected": {"include_ids": ["tr_raw_suggestion"], "answer_state": "evidence"}
     },
     {
       "id": "auto-tier-order",
@@ -179,8 +179,8 @@
       "query": "what is the rollback procedure for deployment",
       "limit": 5,
       "context": {"projects": ["PersonaVault"]},
-      "expected_safety_outcome": "Stopwords never count as lexical matches, so an unrelated stopword-heavy note cannot outrank the genuine current canonical note, which is supported even without explicit provenance.",
-      "expected": {"first_id": "project_rollback_procedure", "no_lexical_id": "project_stopword_noise", "answer_state": "supported"}
+      "expected_safety_outcome": "Stopwords never count as lexical matches, so an unrelated stopword-heavy note cannot outrank the genuine current canonical note, which remains retrievable as evidence even without explicit provenance.",
+      "expected": {"first_id": "project_rollback_procedure", "no_lexical_id": "project_stopword_noise", "answer_state": "evidence"}
     },
     {
       "id": "long-transcript-starvation",

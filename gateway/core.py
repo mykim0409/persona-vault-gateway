@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import posixpath
 import re
 import secrets
 import sqlite3
@@ -18,8 +19,9 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
-from .wiki import _SRC_RE, _cells, ledger_entries
+from .wiki import _SRC_RE, _cells
 
 
 SCHEMA = """
@@ -1115,22 +1117,29 @@ def search_vault(
         seen_documents[document_id] = item
         results.append(item)
     evidence = query_evidence(query, results, documents)
-    # Candidate retrieval is not proof of the question. Only grounded evidence seeds claim expansion.
+    # Only the strongest local matches seed bounded relation expansion, never a truth verdict.
     expanded = expand_bundle_results(results, documents, bundle, terms, context or {}, evidence)
     for item in expanded:
-        if item.get("answer_relevance") != "grounded" and claim_linked(item, evidence):
+        if item.get("answer_relevance") != "lexical_match" and claim_linked(item, evidence):
             item["answer_relevance"] = "related_claim"
     if analysis:
         by_id = analysis["by_id"]
         expanded = [{**item, **result_analysis_fields(by_id.get(item["document_id"], {}))} for item in expanded]
-    # Safety is judged on everything found; the cap below only limits what is returned.
+    # Source warnings are computed before display limits, so truncation cannot conceal a conflict.
     answer_state = rag_answer_state(expanded, bundle, evidence)
     omitted = 0
-    expanded.sort(key=lambda item: item.get("answer_relevance") not in {"grounded", "related_claim"})
+    expanded.sort(key=lambda item: item.get("answer_relevance") not in {"lexical_match", "related_claim"})
+    context_stats = expand_search_context(expanded, documents, bundle, terms, max_results)
+    if context_stats["added"] or context_stats["limited"]:
+        index["context_expansion"] = context_stats
+    expanded.sort(key=lambda item: (
+        0 if item.get("answer_relevance") in {"lexical_match", "related_claim"}
+        else 1 if item.get("answer_relevance") == "linked_context" else 2
+    ))
     results = expanded
     if len(expanded) > max_results:
         # Evidence, related context, and anything about the same claim outrank unrelated semantic fillers.
-        required = sum(item.get("answer_relevance") in {"grounded", "related_claim"} for item in expanded)
+        required = sum(item.get("answer_relevance") in {"lexical_match", "related_claim", "linked_context"} for item in expanded)
         omitted = max(0, required - max_results)
         results = expanded[:max_results]
         if omitted:
@@ -1144,8 +1153,12 @@ def search_vault(
     rendered_context = "\n\n".join(
         render_rag_context(item) for item in results
     )
+    if index.get("results_truncated"):
+        rendered_context += f"\n\n[Search results omitted: {index['results_truncated']}. Narrow the query for more detail.]"
     if index.get("passages_truncated"):
         rendered_context += f"\n\n[Search excerpts omitted: {index['passages_truncated']}. Narrow the query for more detail.]"
+    if index.get("context_expansion", {}).get("limited"):
+        rendered_context += "\n\n[Structural context is partial: one-hop preview limits reached.]"
     return {
         "query": query,
         "bundle_type": bundle,
@@ -1196,7 +1209,7 @@ def numeric_evidence_literals(text: str) -> set[str]:
         text.lower(),
     )
     for atom in atoms:
-        if not any(char.isdigit() for char in atom):
+        if not re.search(r"\d", atom):
             continue
         atom = evidence_term(atom)
         korean_magnitude = bool(re.search(r"\d[십백천만억조]", atom))
@@ -1332,241 +1345,69 @@ def evidence_blocks(text: str, *, kind: str = "") -> list[str]:
 
 
 def query_evidence(query: str, results: list[dict[str, Any]], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Select answer anchors separately from retrieval, leaving all candidates available to the reader."""
+    """Select attributable passages by lexical coverage, never by inferred claim truth."""
     by_id = {doc["document_id"]: doc for doc in documents}
     query = normalize_evidence_dates(query)
-    terms = {evidence_term(term) for term in keyword_terms(query)} - {"", "기록", "관련", "내용", "여부"}
-    # Literal identifiers are constraints, not words a semantic neighbour may silently substitute.
     numbers = numeric_evidence_literals(query)
-    literals = {
-        evidence_term(word.lower()) for word in TOKEN_RE.findall(query)
-        if not any(char.isdigit() for char in word)
-        and re.search(r"[a-z][A-Z]|[가-힣][A-Za-z]|[A-Za-z][가-힣]", word)
-    }
-    # Tokenization drops single-letter flags and their sign; keep explicit options as constraints.
-    literals.update(re.findall(r"(?<![\w+-])[+-][a-zA-Z](?![a-zA-Z0-9_-])", query.lower()))
-    subject_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:이|가|은|는|께서)(?=\s)"
-    actors = [
-        match[1] for match in re.finditer(subject_pattern, query)
-        if not match[0].endswith(("다는", "라는", "하는"))
-    ]
-    identity_pattern = r"(?<!\w)([가-힣]{2,}?)(?:님)?(?:인가(?:요)?|인지|입니까)(?=$|[\s?!.])"
-    actors += re.findall(identity_pattern, query)
-    english_subject = r"[A-Z][\w-]*(?:[ \t]+[A-Z][\w-]*)*"
-    actors += re.findall(rf"\b(?:[Bb]y|[Dd]id)\s+({english_subject})\b", query)
-    actors += re.findall(rf"\b({english_subject})\s+(?:(?:has|had)\s+)?(?:(?:personally|officially)\s+)?(?:approved|authorized|decided|adopted|confirmed|verified)\b", query)
-    actors = {actor.casefold() for actor in actors} - {"사람", "승인자", "담당자", "주체", "인물"}
-    # shortcut: lexical guards do not prove arbitrary claims; add an evaluated verifier before claiming entailment.
-    approval = bool(re.search(r"승인|\bapprov\w*|\bauthoriz\w*", query, re.I))
-    adoption = bool(re.search(r"\badopt(?:ed|s)?\b", query, re.I))
-    # A request to inspect a topic ("확인해줘") is not a claim that someone already verified it.
-    confirmation = bool(re.search(r"(?:확인|검증)(?:했|하|한|함|됐|되|된|됨)|\b(?:confirm(?:ed)?|verify|verified)\b", query, re.I))
-    decision = not (approval or confirmation or adoption) and bool(re.search(r"결정|\bdecid(?:e|ed)\b", query, re.I))
-    if decision:
-        actors.update(re.findall(r"(?<!\w)([가-힣]{2,})의\s+결정", query))
-        # In a scope question, "the decision" is a subject, not an attributed person.
-        actors.discard("결정")
-        decision = bool(actors)
-    action_pattern = r"승인(?:했|하였|함|한다|했다|됐|되었|됨)|\b(?:approved|authorized)\b"
-    if adoption:
-        action_pattern = r"\badopted\b"
-    if decision:
-        action_pattern = r"(?:결정|선택)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:decided|chose)\b"
-    confirmation_terms: set[str] = set()
-    if confirmation:
-        action_pattern = r"(?:확인|검증)(?:(?:했|하였|하셨)(?:다|음|고|으며)|함)(?![가-힣])|\b(?:confirmed|verified)\b"
-        scope = re.sub(identity_pattern, " ", re.sub(subject_pattern, " ", query))
-        confirmation_terms = {
-            re.sub(r"(?<=[가-힣])(?:에서는|으로|에서|에게|에는|은|는|이|가|을|를|의|에|와|과)$", "", word)
-            for word in TOKEN_RE.findall(scope.lower())
-            if not re.match(r"확인|검증|(?:confirm(?:ed)?|verify|verified)$", word)
-        } - QUERY_STOPWORDS - actors - {"did", "기록", "여부"}
-    # Property questions name an object, unlike a loose list of retrieval keywords.
-    property_query = bool(re.search(
-        r"\b(?:cover(?:s|ed)?|contain(?:s|ed)?|include(?:s|d)?|describe(?:s|d)?)\s+|"
-        r"\b(?:what|which)\s+(?:is|are|was|were)\s+.+?\s+(?:of|in|for)\b", query, re.I,
-    ))
-    lexical_terms = {term for term in terms if re.fullmatch(r"[a-z][a-z_]*", term)} - {"did", "had", "been"}
-    if approval or confirmation or decision or adoption:
-        lexical_terms = {term for term in lexical_terms if not re.fullmatch(
-            r"approv(?:e|ed|es)|authoriz(?:e|ed|es)|decid(?:e|ed|es)|adopt(?:ed|s)?|confirm(?:ed|s)?|verif(?:y|ied|ies)", term,
-        )}
-    if property_query:
-        lexical_terms = {term for term in lexical_terms if not re.fullmatch(
-            r"cover(?:s|ed)?|contain(?:s|ed)?|include(?:s|d)?|describe(?:s|d)?", term,
-        )}
-    lexical_patterns = {term: re.compile(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", re.I) for term in lexical_terms}
-    # A slash groups a technical topic or alternatives (mount/read); its whole subject cannot disappear.
-    topic_groups = [
-        [re.compile(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", re.I) for term in group.lower().split("/")]
-        for group in re.findall(r"(?<![\w/])[A-Za-z][A-Za-z_-]+(?:/[A-Za-z][A-Za-z_-]+)+(?![A-Za-z_/-])", query)
-    ]
-    finalization = bool(re.search(r"확정|미정", query))
-    negative_state = re.compile(r"미확정|미정|않|못|없|아니|보류")
-    state_lookup = bool(re.search(r"여부|상태", query))
-    finalization_terms = {
-        term for term in terms
-        if not re.match(r"(?:미)?확정|미정|없음$|않음$", term) and term not in {"상태", "아님"}
-    }
+    terms = {
+        evidence_term(term) for term in keyword_terms(query)
+        if not any(char.isdigit() for char in term)
+    } - {"", "기록", "관련", "내용", "여부"}
+    terms |= numbers
+    terms.update(re.findall(r"(?<![\w+-])[+-][a-zA-Z](?![a-zA-Z0-9_-])", query.lower()))
     scored = []
     for item in results:
-        item.pop("answer_conflict_state", None)
+        item["answer_relevance"] = "semantic_candidate" if item.get("match") == "semantic" else "candidate"
+        if item.get("match") not in {"keyword", "hybrid"}:
+            continue
         doc = by_id.get(item["document_id"], item)
         blocks = evidence_blocks(str(doc.get("text") or item.get("snippet") or ""), kind=str(doc.get("kind") or ""))
-        best_coverage = 0
-        best_text = ""
-        best_blocks: list[str] = []
-        block_passages: list[tuple[int, dict[str, Any]]] = []
-        semantic_eligible = False
+        table_context = {}
+        matched = []
         for block_index, block in enumerate(blocks):
-            text = normalize_evidence_dates(block)
-            search_text = (searchable_text(doc, text) + "\n" + str(doc.get("temporal_state") or "")).lower()
-            literal_text = search_text + "\n" + str(doc.get("path") or "").lower()
-            eligible = (numbers <= numeric_evidence_literals(literal_text)
-                        and all(term_in(term, literal_text) for term in literals)
-                        and all(any(pattern.search(search_text) for pattern in group) for group in topic_groups))
-            if approval or confirmation or decision or adoption:
-                # Unknown or ambiguous actors cannot satisfy an attribution constraint via all([]).
-                eligible = eligible and len(actors) == 1
-                action_found = False
-                # A decision ledger records the choice and its attribution in separate cells of one row.
-                row = text.splitlines()[-1]
-                ledger_decision = decision and doc.get("kind") == "decision_ledger" and bool(re.search(r"\|\s*(?:결정|decision)\s*\|", row, re.I))
-                pattern = action_pattern + (r"|재확인(?:했다|하였음|함)(?![가-힣])" if ledger_decision else "")
-                clauses = re.split(r"[\n!。;]+|\.(?!\d)|\b(?:but|while)\b|하지만", row if ledger_decision else text, flags=re.I) if eligible else []
-                for clause in clauses:
-                    verb = re.search(pattern, clause, re.I)
-                    if not verb:
-                        continue
-                    # shortcut: multi-action clauses need finer object binding; abstain for now.
-                    if len(re.findall(
-                        r"(?:승인|확인|검증|결정|선택)(?:했|하였|하셨|함|됐|되었|됨)|"
-                        r"\b(?:approved|authorized|adopted|confirmed|verified|decided|chose)\b", clause, re.I,
-                    )) > 1:
-                        continue
-                    # Bind the action to its subject, not another participant elsewhere in the sentence.
-                    subjects = re.findall(subject_pattern, clause[:verb.start()])
-                    if subjects:
-                        source_actor = subjects[-1]
-                    else:
-                        english_actor = re.match(rf"\s+(?i:by)\s+({english_subject}|[a-z][\w-]*)\b", clause[verb.end():]) or re.search(
-                            rf"\b({english_subject}|[a-z][\w-]*)\s+(?:(?:has|had)\s+)?(?:(?:personally|officially)\s+)?$", clause[:verb.start()]
-                        )
-                        source_actor = english_actor[1] if english_actor else ""
-                    if source_actor.casefold() not in actors:
-                        continue
-                    if confirmation:
-                        # Do not combine a confirmed object with completion words from another clause.
-                        scope = clause[:verb.start()] if verb[0].startswith(("확인", "검증")) else clause[verb.end():]
-                        if (numbers and not numbers <= numeric_evidence_literals(scope)) or not confirmation_terms or not all(
-                            term_in(term, (clause[:verb.start()] if term == "personally" else scope).lower())
-                            for term in confirmation_terms
-                        ):
-                            continue
-                    if (confirmation or adoption) and re.search(r"\?|여부|미확인|미완료|불확실|추정|가정|부인|실패|대기|계획|예상|\b안\s|\b(?:whether|unconfirmed|unverified|incomplete|unknown|uncertain|denied|assumed|estimated|failed|planned)\b", clause, re.I):
-                        continue
-                    # Declining an operation is not the same as failing to make a decision.
-                    negation_text = clause[verb.end():] if decision else clause
-                    if decision and re.search(r"\b(?:안|못|not|never)\s+(?:personally\s+)?$", clause[:verb.start()], re.I):
-                        continue
-                    if (
-                        (not numbers or numbers <= numeric_evidence_literals(text if ledger_decision else clause))
-                        and all(term_in(term, (text if ledger_decision else clause).lower()) for term in literals)
-                        and all(pattern.search(text if ledger_decision else clause) for pattern in lexical_patterns.values())
-                        and all(term not in terms or term_in(term, clause.lower()) for term in ("도입", "adoption"))
-                        and not re.search(r"않|못|없|아니|미승인|보류|예정|제안|\b(?:not|never|no|pending|proposed|would|might)\b", negation_text, re.I)
-                    ):
-                        action_found = True
-                        break
-                eligible = eligible and action_found
-            if property_query:
-                eligible = eligible and all(pattern.search(search_text) for pattern in lexical_patterns.values())
-            if finalization:
-                # Bind the named object and its state in one clause, not shared project/purchase words.
-                headings = "\n".join(line for line in text.splitlines() if re.match(r"^\s*#{1,6} ", line)).lower()
-                state_found = False
-                for clause in re.split(r"[\n!。;]+|\.(?!\d)|\bbut\b|하지만", text, flags=re.I):
-                    if not re.search(r"확정|미정", clause):
-                        continue
-                    if not all(term_in(term, headings + "\n" + clause.lower()) for term in finalization_terms):
-                        continue
-                    if not state_lookup:
-                        if bool(negative_state.search(query)) != bool(negative_state.search(clause)):
-                            continue
-                        if not negative_state.search(query) and re.search(r"\?|여부|미확인|추정|가정|예정|계획|예상", clause):
-                            continue
-                    state_found = True
-                    break
-                eligible = eligible and state_found
-            coverage = len({term for term in terms if term_in(term, search_text)}) if eligible else 0
-            semantic_eligible |= eligible
-            if coverage and coverage >= min(2, len(terms)) and item.get("match") in {"keyword", "hybrid"}:
-                passage = search_passage(block, sorted(terms), block_index=block_index)
-                passage["_coverage"] = coverage
-                block_passages.append((coverage, passage))
-            if coverage > best_coverage:
-                best_coverage, best_text = coverage, block
-                best_blocks = [block]
-            elif coverage and coverage == best_coverage:
-                best_blocks.append(block)
-        item["answer_relevance"] = "candidate"
-        if semantic_eligible and item.get("match") == "semantic":
-            item["answer_relevance"] = "semantic_candidate"
-        if best_coverage and item.get("match") in {"keyword", "hybrid"}:
-            scored.append((best_coverage, item))
-            item["snippet"] = rag_snippet(best_text, list(terms))
-            if block_passages:
-                item["passages"] = [passage for _, passage in sorted(block_passages, key=lambda entry: -entry[0])]
-            if doc.get("kind") == "decision_ledger" and doc.get("conflict_state") == "unresolved":
-                item["answer_conflict_state"] = ledger_answer_conflict(doc, best_blocks, terms)
+            text = normalize_evidence_dates(searchable_text(doc, block)).lower()
+            values = numeric_evidence_literals(text) if numbers else set()
+            coverage = {term for term in terms if (term in values if term in numbers else term_in(term, text))}
+            if coverage:
+                matched.append((coverage, block_index, block))
+                lines = block.splitlines()
+                row = _cells(lines[-1])
+                header = _cells(lines[-2]) if len(lines) >= 2 else None
+                if row and header and len(row) == len(header):
+                    table_context[block_index] = block.rsplit("\n", 1)[0]
+        if not matched:
+            continue
+        matched.sort(key=lambda entry: (-len(entry[0]), entry[1]))
+        best = len(matched[0][0])
+        scored.append((best, item))
+        # Cover missing query terms before repeating the same match; keep every block's attribution.
+        selected = []
+        covered: set[str] = set()
+        pending = list(matched)
+        first_table = table_context.get(matched[0][1])
+        while pending:
+            entry = max(pending, key=lambda entry: (
+                len(entry[0] - covered),
+                bool(first_table and table_context.get(entry[1]) == first_table),
+                len(entry[0]), -entry[1],
+            ))
+            if not entry[0] - covered:
+                break
+            selected.append(entry)
+            covered |= entry[0]
+            pending.remove(entry)
+        selected.extend(entry for entry in pending if len(entry[0]) >= min(2, len(terms)))
+        item["passages"] = []
+        for coverage, block_index, block in selected:
+            passage = search_passage(block, sorted(terms), block_index=block_index)
+            passage["answer_relevance"] = "lexical_match"
+            item["passages"].append(passage)
+        item["snippet"] = item["passages"][0]["snippet"]
     best = max((coverage for coverage, _ in scored), default=0)
-    evidence = [item for coverage, item in scored if coverage == best and coverage >= min(2, len(terms))]
-    for coverage, item in scored:
-        if coverage == best and coverage >= min(2, len(terms)):
-            item["answer_relevance"] = "grounded"
-        else:
-            item.pop("answer_conflict_state", None)
-        for passage in item.get("passages", []):
-            passage["answer_relevance"] = "grounded" if (
-                passage.pop("_coverage", 0) == best and best >= min(2, len(terms))
-            ) else "candidate"
-    return evidence
-
-
-def ledger_answer_conflict(document: dict[str, Any], blocks: list[str], terms: set[str]) -> str:
-    """Localize an aggregate ledger flag only when its disputed subjects are explicit."""
-    text = str(document.get("text") or "")
-    rows, problems = ledger_entries(text, path=str(document.get("path") or ""))
-    selected = {_cells(block.splitlines()[-1])[0] for block in blocks if _cells(block.splitlines()[-1])}
-    relations = document.get("relations") or {}
-    if (problems or not selected or not selected <= {row["id"] for row in rows}
-            or document.get("subject_id") or relations.get("contradicts")
-            or any(row["status"] != "유효" for row in rows if row["id"] in selected)):
-        return "unresolved"
-    dispute = re.compile(r"미해결|충돌|불일치|상충|\bunresolved\b|\bdisput\w*|\bconflict\w*", re.I)
-    clauses = [
-        (row["id"], clause) for row in rows if row["status"] != "이관됨"
-        for cell in row["cells"][4:6]
-        for clause in re.split(r"[;!。]+|\.(?!\d)", cell)
-        if dispute.search(clause)
-    ]
-    # No localized dispute (or a prose-level one) leaves the original safety gate intact.
-    if not clauses or any(dispute.search(line) for line in text.splitlines() if not _cells(line)):
-        return "unresolved"
-    if any(row_id in selected and re.search(
-        r"이\s+(?:결정|계약)|그\s|해당|상기|\b(?:this|that|it|same|above)\b", clause, re.I,
-    ) for row_id, clause in clauses):
-        return "unresolved"
-    context = "\n".join(line for line in text.splitlines() if re.match(r"^\s*#{1,6} ", line))
-    context += "\n" + " ".join(row["id"] for row in rows)
-    context_terms = {evidence_term(term) for term in keyword_terms(context)}
-    specific = terms - context_terms - {"충돌", "미해결", "상태", "내용", "계약", "unresolved", "conflict", "disputed"}
-    specific = {term for term in specific if len(term) > 1 and not re.fullmatch(r"\d+(?:분|초|시간)?", term)}
-    if not specific:
-        return "unresolved"
-    # Any shared subject is enough to keep a dispute; do not require its numeric value to agree.
-    # shortcut: literal subjects cannot resolve arbitrary paraphrased disputes; keep explicit relations authoritative.
-    return "unresolved" if any(term_in(term, clause.lower()) for _, clause in clauses for term in specific) else "none"
+    seeds = [item for coverage, item in scored if coverage == best and coverage >= min(2, len(terms))]
+    for item in seeds:
+        item["answer_relevance"] = "lexical_match"
+    return seeds
 
 
 def claim_linked(item: dict[str, Any], anchors: list[dict[str, Any]]) -> bool:
@@ -1586,49 +1427,13 @@ def claim_linked(item: dict[str, Any], anchors: list[dict[str, Any]]) -> bool:
 
 
 def rag_answer_state(results: list[dict[str, Any]], bundle: str, evidence: list[dict[str, Any]]) -> dict[str, str]:
+    """Legacy envelope: describe retrieved sources, not whether the question is true."""
     if not results:
         return {"state": "abstain", "reason": "no_relevant_evidence"}
-    if not evidence:
-        if any(item.get("answer_relevance") == "semantic_candidate" for item in results):
-            return {"state": "evidence", "reason": "semantic_candidates_require_verification"}
-        return {"state": "abstain", "reason": "insufficient_or_mismatched_evidence"}
-    # A semantic-only result that contradicts or shares a claim with the evidence must still gate it;
-    # unrelated semantic fillers must not.
     linked = [item for item in results if claim_linked(item, evidence)]
-    if bundle == "conflicts" or any(
-        item.get("answer_conflict_state", item.get("conflict_state")) == "unresolved" for item in linked
-    ):
+    if bundle == "conflicts" or any(item.get("conflict_state") == "unresolved" for item in linked):
         return {"state": "review_required", "reason": "unresolved_conflict"}
-    if bundle == "current" and any(
-        item.get("memory_type") == "canonical"
-        and item.get("review_state") == "human_accepted"
-        and item.get("temporal_state") == "current"
-        and item.get("metadata_valid", True)
-        and float((item.get("ranking") or {}).get("applicability") or 0) >= 0
-        for item in evidence
-    ):
-        return {"state": "supported", "reason": "current_human_accepted_knowledge"}
-    if bundle == "auto" and any(
-        item.get("memory_type") == "canonical"
-        and item.get("review_state") == "human_accepted"
-        and item.get("temporal_state") == "current"
-        and item.get("metadata_valid", True)
-        and item.get("retrieval_tier") not in {"archive", "history"}
-        and float((item.get("ranking") or {}).get("applicability") or 0) >= 0
-        for item in evidence
-    ):
-        # Defaulted provenance is normal for legacy human notes; it only disqualifies non-canonical evidence.
-        return {"state": "supported", "reason": "current_human_accepted_knowledge"}
-    usable = [
-        item
-        for item in evidence
-        if item.get("memory_type") != "transcript"
-        and not item.get("provenance_defaulted")
-        and float((item.get("ranking") or {}).get("applicability") or 0) >= 0
-    ]
-    if usable:
-        return {"state": "evidence", "reason": "situated_noncanonical_evidence"}
-    return {"state": "abstain", "reason": "insufficient_or_mismatched_evidence"}
+    return {"state": "evidence", "reason": "retrieved_sources_require_interpretation"}
 
 
 def qdrant_bundle_filters(bundle: str) -> list[dict[str, Any] | None]:
@@ -1877,7 +1682,6 @@ def render_rag_context(item: dict[str, Any]) -> str:
             "provenance_mode",
             "provenance_family_ids",
             "conflict_state",
-            "answer_conflict_state",
             "retrieval_state",
             "answer_relevance",
         )
@@ -1920,7 +1724,7 @@ def search_passage(text: str, terms: list[str], **location: int) -> dict[str, An
 
 
 def limit_search_passages(results: list[dict[str, Any]], index: dict[str, Any]) -> None:
-    """Share a UTF-8 excerpt budget across documents, without changing the pre-cap safety verdict."""
+    """Share a UTF-8 excerpt budget across documents, without changing the pre-cap source warnings."""
     pending = []
     for item in results:
         unique: list[dict[str, Any]] = []
@@ -2014,6 +1818,95 @@ def expand_bundle_results(
         results.append(item)
         selected.add(document["document_id"])
     return results
+
+
+def expand_search_context(
+    results: list[dict[str, Any]], documents: list[dict[str, Any]], bundle: str,
+    terms: list[str], limit: int,
+) -> dict[str, int]:
+    """One bounded structural hop, never new proof or an external fetch."""
+    by_path = {doc["path"]: doc for doc in documents}
+    by_id = {item["document_id"]: item for item in results}
+    blocks_by_path: dict[str, list[str]] = {}
+    stats = {"added": 0, "limited": 0}
+
+    def blocks_for(doc: dict[str, Any]) -> list[str]:
+        if doc["path"] not in blocks_by_path:
+            blocks_by_path[doc["path"]] = evidence_blocks(doc["text"], kind=doc.get("kind", ""))
+        return blocks_by_path[doc["path"]]
+
+    def headings(block: str) -> tuple[str, ...]:
+        values = []
+        for line in block.splitlines():
+            if not re.match(r"^\s*#{1,6} ", line):
+                break
+            values.append(line)
+        return tuple(values)
+
+    def slug(value: str) -> str:
+        return re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", value.lower()).strip())
+
+    def add_passage(item: dict[str, Any], block: str, index: int) -> None:
+        passage = search_passage(block, terms, block_index=index)
+        if any(p.get("_text") == passage["_text"] for p in item["passages"]):
+            return
+        passage["answer_relevance"] = "linked_context"
+        item["passages"].append(passage)
+        stats["added"] += 1
+
+    # Snapshot the seeds: context discovered in this pass must not recursively expand the graph.
+    seeds = [item for item in results[:limit] if item.get("answer_relevance") == "lexical_match"]
+    for seed in seeds:
+        doc = by_path[seed["path"]]
+        blocks = blocks_for(doc)
+        anchors = [p for p in seed["passages"] if p.get("answer_relevance") == "lexical_match" and "block_index" in p]
+        links: list[str] = []
+        for anchor in anchors[:2]:
+            index = anchor["block_index"]
+            block = blocks[index]
+            link_text = re.sub(r"(?s)```.*?```|~~~.*?~~~|`[^`]*`", "", block)
+            # shortcut: only inline Markdown links; add wiki/reference-style resolution if measured recall needs it.
+            links.extend(re.findall(r"(?<!!)\[[^\]\n]+\]\(([^\s)]+)\)", link_text))
+        links = list(dict.fromkeys(links))
+        if links:
+            stats["limited"] += max(0, len(anchors) - 2)
+        stats["limited"] += max(0, len(links) - 2)
+        for link in links[:2]:
+            try:
+                parsed = urlsplit(link)
+            except ValueError:
+                continue
+            # Whole-file previews added tokens without recovering the condition in layout benchmarks.
+            if parsed.scheme or parsed.netloc or parsed.query or not parsed.fragment:
+                continue
+            path = unquote(parsed.path)
+            if path:
+                path = posixpath.normpath(path.lstrip("/") if path.startswith("/") else posixpath.join(posixpath.dirname(doc["path"]), path))
+            else:
+                path = doc["path"]
+            target = by_path.get(path)
+            if not target or not bundle_accepts(target, bundle):
+                continue
+            target_blocks = blocks_for(target)
+            fragment = unquote(parsed.fragment)
+            matches = {heading for block in target_blocks for heading in headings(block) if slug(heading) == slug(fragment)}
+            if len(matches) != 1 or sum(line in matches for line in target["text"].splitlines()) != 1:
+                continue
+            selected = [(i, block) for i, block in enumerate(target_blocks) if matches.intersection(headings(block))]
+            if not selected:
+                continue
+            stats["limited"] += max(0, len(selected) - 2)
+            item = by_id.get(target["document_id"])
+            if item is None:
+                item = result_item({**target, "chunk_index": 0}, terms, 0.001, "related", 0.0, 0.0, 0.0, 0.0)
+                item["passages"] = []
+                results.append(item)
+                by_id[target["document_id"]] = item
+            if item.get("answer_relevance") not in {"lexical_match", "related_claim"}:
+                item["answer_relevance"] = "linked_context"
+            for index, block in selected[:2]:
+                add_passage(item, block, index)
+    return stats
 
 
 def vault_documents(settings: Settings, *, skip_unreadable: bool = False) -> list[dict[str, Any]]:

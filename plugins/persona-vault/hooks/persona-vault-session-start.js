@@ -21,7 +21,7 @@ const BASE_CONTEXT = [
   '- Completed main-agent and subagent turns are captured automatically as temporary raw conversation evidence.',
   '- Use `pvg-agent-memo` only when the user explicitly asks to save, log, record, or hand off information. A submitted note is raw evidence, not approved knowledge.',
   '- Before an explicit save, search for the same source and subject. Preserve attribution, negation, conflicts, chronology, applicability, and uncertainty.',
-  '- Obey RAG answer_state: abstain means insufficient evidence; review_required means present the unresolved claims without choosing a winner.',
+  '- Search returns sources, not truth verdicts: evidence/lexical_match is not proof; abstain means no relevant candidates; review_required flags source conflicts. Read attribution, negation and conditions; do not choose a conflict winner.',
   '- Do not save progress logs, help or smoke output, temporary errors, or copied repository documentation.',
   '- Never ask the user to paste PersonaVault tokens into chat.',
   '- Never write directly to the vault repo.',

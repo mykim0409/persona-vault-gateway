@@ -90,88 +90,66 @@ permission.
 
 An explicit `provenance_mode: reported` has `provenance_defaulted: false`. When a fallback is applied because provenance is missing, the normalized result and the user-facing display must distinguish it as `reported (default)`, and it is not promoted to direct observation or human review.
 
-## Search response safety
+## Search response contract
 
-Search candidates are not automatically answer evidence. Response-only `answer_relevance`
-distinguishes `candidate`, `semantic_candidate`, `grounded`, and `related_claim`.
-Grounding uses query-term coverage, explicit identifiers, and conservative actor/action guards.
-Coverage is evaluated per paragraph, list item, or Markdown table row, with enclosing ATX headings,
-list-item introductions, and table headers retained as local context. Sibling list items stay
-separate even without blank lines; wrapped lines stay with their item. Nested items inherit their
-parent's introductory paragraph, not sibling content. This is a conservative block splitter, not
-a complete CommonMark parser. Unrelated paragraphs, sibling sections, list items, and table
-rows cannot pool their words into one anchor. Results are grouped by document, but `passages`
-preserves multiple eligible keyword/hybrid blocks, including different decisions, failures and conditions.
-Each passage includes its section and zero-based `block_index` (in the current parsed document),
-or `chunk_index` for a semantic candidate. Its `answer_relevance` distinguishes answer anchors from
-weaker candidates; combining passages never supplies missing claim constraints. The legacy `snippet`
-contains the first displayed passage. Provenance markers remain hidden.
+The Gateway retrieves sources; it does not decide whether the question is true.
+The existing `answer_state` envelope is retained, with three source-level signals:
+
+- `evidence`: source candidates are available for interpretation, including corrective evidence for a wrong premise.
+- `abstain`: no relevant source candidates were found. This does not prove the claim false.
+- `review_required`: the selected source set has unresolved conflict metadata. Inspect its scope and present relevant competing claims without choosing a winner.
+
+Neither `evidence`, lexical overlap, nor human-approved canonical authority establishes the question's
+actor, action, date, quantity, or conditions. `supported` and `refuted` are not emitted.
+No LLM verifier, language-specific actor/action checker, or query-based conflict clearance runs in search.
+Document-wide `conflict_state` is preserved; a disputed ledger is not silently cleared for a question.
+Unrelated weaker candidates retain their own flags without poisoning the strongest matches.
+Explicit same-subject and contradictory sources are expanded before result limits.
+
+Response-only `answer_relevance` labels are `candidate`, `semantic_candidate`, `lexical_match`,
+`related_claim`, and `linked_context`. They describe retrieval, never entailment.
+Lexical coverage is calculated per paragraph, list item, or table row. Enclosing ATX headings,
+list introductions and table headers remain attached; sibling rows and items stay separate.
+This is a conservative block splitter, not a complete CommonMark parser.
+
+Within a document, select passages that cover missing query terms before repeating the same matches.
+A weaker row can supply a missing subject without borrowing the action from another row.
+Then retain other multi-term matches, including different outcomes, dates and conditions.
+Results are grouped by document, but `passages` contains multiple excerpts. Each has its section,
+zero-based `block_index` in the parsed current document (or semantic `chunk_index`), and retrieval label.
+The legacy `snippet` is the first displayed passage. Provenance markers remain hidden.
+
+Numeric matching preserves whole signed decimals, explicit units and digit-bearing identifiers.
+Equivalent decimal/thousands notation and calendar notation are normalized without rounding or
+inventing dates; source excerpts are never rewritten. A different value can reduce lexical coverage
+but does not hide corrective evidence. Korean particle normalization and explicit aliases aid lookup,
+not actor attribution, unit inference, arithmetic, or proof.
+
+After source warnings are computed, the strongest lexical matches can supply one hop of `linked_context`:
+the first two matching blocks per seed document, two inline Markdown links per seed, and two blocks
+per linked section. Links must identify a unique ATX heading in a currently loaded, view-eligible
+document, such as `[limits](#limits)` or `procedure.md#limits`. External URLs, whole-file links,
+ambiguous headings, images, code links, wiki/reference links and recursive traversal are not expanded.
+Added excerpts are supplemental context, not new matches or proof. Their original authority and
+conflict metadata remain visible. `index.context_expansion.added` counts added excerpts before limits;
+`limited` signals a partial preview.
+
+Prefer a self-contained claim with its actor, scope, time and essential conditions in the same paragraph
+or row. Link to a specific section for longer detail, not to replace essential conditions.
+This does not change raw capture, note fields, approval gates, stored Markdown, or the embedding index.
 
 Exact repetitions and adjacent visibly contained excerpts in the same section are collapsed, not
 similar claims with different dates, conditions or negation. A shared 12,000-byte UTF-8 passage budget
-is allocated round-robin across returned documents; `limit` still controls the document count, not
-passage count. Excerpts are at most 520 characters and mark `truncated` when shortened. A document's
-`passages_omitted` and `index.passages_truncated` report omitted distinct excerpts, also noted in `context`.
-The REST response (including both context and result JSON) is capped at 60,000 UTF-8 bytes; oversized
-responses drop trailing documents and report `index.results_truncated`. Narrow the query to inspect
-omitted evidence. MCP and CLI clients receive these passages through the existing rendered context.
-Neither passage nor wire-size limits change the safety verdict computed before presentation limits.
-An explicit slash-separated technical topic such as `mount/read` requires at least one member in the
-same block; shared project names and dates cannot replace the entire requested topic. This permits
-alternatives, not a claim that every operation succeeded. English property questions using `cover`,
-`contain`, `include`, `describe`, or `what/which is ... of/in/for ...` require their named Latin terms
-in that block. Loose keyword lookups still permit cross-language wording and explicit metadata aliases.
-Korean `확정`/`미정` state queries also bind the named object and its state within one clause.
-A generic purchase discussion cannot establish purchase of a different object. Negated, tentative,
-or future finalization is not affirmative evidence; explicit negative and open-status queries remain searchable.
-Approval/adoption queries and claims that someone confirmed or verified something require one identifiable
-actor linked to that action in the source.
-English `adopt/adopted` claims check the full named person or organization, the actual adoption action,
-and its requested objects in one clause; an assistant draft or another organization's action is not adoption evidence.
-Date notation and Korean particles on technical identifiers are normalized for matching (for example,
-`10월 20일` and `10-20`, or `+t를` and `+t`); source snippets are not rewritten. Explicit years,
-numeric values, and option names remain constraints. This does not add an as-of-date interpretation.
-A decision query naming an actor also checks that attribution. In a `decision_ledger`, an explicit
-decision row can carry the choice and its reaffirmation in separate cells; other rows and mere
-participants cannot supply its actor. Choosing not to perform an operation is distinct from not
-having made a decision. Actor-free decision lookups remain ordinary retrieval.
-The noun `결정` in a decision-scope question is not a person; any explicitly named actor is still checked.
-The guards do not infer units from field names or calculate totals from per-node counts. Query the recorded
-fields and values when those inferences are needed to interpret the evidence.
-Numeric constraints preserve the whole signed decimal and any explicit unit instead of comparing keyword
-fragments: `5.5배` cannot match `6.5배` or `5배`. Equivalent decimal notation and thousands grouping are
-normalized without rounding; limited Korean endings such as `보다`, `이며`, and `만` are stripped only from
-numeric-leading expressions, including unit suffixes in `0건이나` and `2028년까지`. Korean magnitudes such as
-`1만` and `2억4천만` remain intact without numeric conversion; their `만` is not a particle.
-Dates and digit-bearing identifiers remain intact. Decimal points do not split
-actor/action clauses. This changes response validation only, not retrieval, stored text, or the index.
-Attribution across multiple approval/adoption/confirmation/decision actions in one clause remains `abstain`;
-the lexical guard cannot safely bind each object or quantity there yet.
-For approval/adoption/confirmation queries, missing, ambiguous, or unsupported actor expressions retain candidates but return `abstain`;
-an empty actor extraction is never treated as a match, even for actor-free approval queries.
-Confirmation claims also require all requested objects and qualifiers in the same affirmative
-clause. Words from separate confirmations, another person's report, or an unconfirmed completion
-cannot be combined into proof. Negation, plans, uncertainty, and checking *whether* something is
-complete do not establish completion. A topic lookup such as `NFS 복구 상태 확인해줘` remains a normal search.
-These lexical guards can abstain on valid paraphrases or evidence spread across sentences or blocks.
-It is not a general entailment checker: `supported` still requires reading the cited claim,
-including its attribution, scope, and negation. A shared project name alone is not proof.
-Semantic-only candidates remain available with `answer_state=evidence` and
-`reason=semantic_candidates_require_verification`, not automatic `supported`.
-Candidates that violate explicit question constraints do not become answer evidence.
+is allocated round-robin across documents. `limit` controls documents, not passages. Excerpts are at
+most 520 characters and mark `truncated` when shortened. `passages_omitted` and
+`index.passages_truncated` report omissions in JSON and context. REST responses, including context,
+are capped at 60,000 UTF-8 bytes; dropped documents are reported in `index.results_truncated`.
+Limits cannot clear source warnings. Narrow the query only when omitted detail is needed.
 
-An unresolved conflict on a grounded document normally gates the answer. Other conflicts gate it
-when linked by the same `subject_id` or explicit relations, not merely by a shared keyword.
-For a well-formed `decision_ledger`, `이관됨` rows remain retrieval candidates and provenance/navigation,
-not independent answer anchors. A ledger with explicitly localized dispute clauses can return response-only
-`answer_conflict_state` for the query while preserving its original document-wide `conflict_state`.
-Unrelated disputed subjects do not block valid decisions. Same-subject disputes (including different numeric
-values), explicit claim relations, unknown scope, malformed ledgers, and broad row-only queries remain gated.
-This is conservative lexical scoping, not a general conflict resolver; ordinary prose documents keep their
-document-level gate. It does not modify source rows, origin markers, metadata, or the vector index.
-Keep `subject_id` claim-specific, not project-wide. Safety runs before the response `limit`;
-`index.results_truncated` warns when related evidence was omitted from the displayed results.
-Neither this response field nor its computation changes stored Markdown or requires reindexing.
+MCP, CLI and GPT Actions use the same retrieval contract. For curation, check source paths and
+`expect_excerpts` rather than expecting an affirmative verdict. Old `supported` probes fail with
+rebaseline guidance; they are not silently rewritten or accepted as proof. A wrong-person question
+should retain the actual person's statement, not forbid the corrective document.
 
 ## Fields
 

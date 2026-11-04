@@ -1,6 +1,6 @@
 {
   "name": "persona-vault",
-  "version": "0.7.4+codex.20261005041709",
+  "version": "0.7.5+codex.20261104134039",
   "description": "Load approved user rules, capture raw evidence, search PersonaVault, and submit requested notes.",
   "author": {
     "name": "mykim0409"

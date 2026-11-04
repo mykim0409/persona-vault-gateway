@@ -1,4 +1,8 @@
-"""Question relevance and claim safety must not depend on the presentation limit."""
+"""Retrieval preserves corrective evidence without adjudicating the question.
+
+Former verdict contrasts deliberately share the neutral evidence state; source checks
+ensure removing the verdict never means removing the corrective passages.
+"""
 from __future__ import annotations
 
 import json
@@ -33,7 +37,15 @@ class SearchEvidenceTests(unittest.TestCase):
 
     def search(self, query, limit=4, bundle="current"):
         with no_network():
-            return core.search_vault(self.settings, AGENT, query, limit=limit, bundle=bundle)
+            result = core.search_vault(self.settings, AGENT, query, limit=limit, bundle=bundle)
+        self.assertNotIn(result["answer_state"]["state"], {"supported", "refuted"})
+        documents = {doc["document_id"]: doc for doc in core.vault_documents(self.settings)}
+        for item in result["results"]:
+            text = documents[item["document_id"]]["text"]
+            originals = core.evidence_blocks(text) + core.chunk_text(text)
+            for passage in item["passages"]:
+                self.assertTrue(any(passage["snippet"] in " ".join(block.split()) for block in originals), passage)
+        return result
 
     def test_evidence_unit_cases(self):
         for case in CASES:
@@ -43,6 +55,121 @@ class SearchEvidenceTests(unittest.TestCase):
                 with self.subTest(case=case["id"], limit=limit), no_network():
                     result = core.search_vault(settings, AGENT, case["query"], limit, bundle="current")
                     self.assertTrue(check_case(case, result), result)
+
+    def test_group_warnings_ignore_legacy_query_level_clearance(self):
+        from gateway.wiki import bundle_groups
+
+        item = {"document_id": "ledger", "memory_type": "canonical",
+                "conflict_state": "unresolved", "answer_conflict_state": "none"}
+        group = bundle_groups("current", [item], {})[0]
+        self.assertEqual(group["conflict_state"], "unresolved")
+        self.assertEqual(group["warnings"][0]["type"], "unresolved_conflict")
+
+    def test_pipe_text_without_table_header_remains_searchable(self):
+        self.note("status", "## Recovery\n\n| Orion | NFS pending |")
+        result = self.search("Orion NFS")
+        self.assertIn("Orion | NFS pending", result["context"])
+
+    def test_stored_layout_controls_structural_context_recall(self):
+        from benchmark_search_context import CASES as LAYOUTS
+        for case in LAYOUTS:
+            settings = replace(self.settings, vault_dir=self.settings.vault_dir / case["id"])
+            seed_case(settings, case)
+            with self.subTest(case=case["id"]), no_network():
+                result = core.search_vault(settings, AGENT, case["query"], 4, bundle="current")
+                self.assertEqual(case["fact"] in result["context"], case["visible"])
+                self.assertEqual(result["answer_state"]["state"], "evidence")
+                self.assertNotIn("Do not return this unrelated noise", result["context"])
+                self.assertNotIn("_text", json.dumps(result))
+
+    def test_linked_context_is_one_hop_not_an_answer_anchor(self):
+        self.note("policy", "deploy rollback uses the saved build; see [limits](details.md#limits).")
+        self.note("details", "## Limits\n\nStop the writer. See [another step](next.md#more).", conflict_state="unresolved")
+        self.note("next", "## More\n\nNever follow this second hop.")
+        result = self.search("deploy rollback")
+        self.assertEqual(result["answer_state"]["state"], "evidence")
+        details = next(r for r in result["results"] if r["document_id"] == "details")
+        self.assertEqual(details["answer_relevance"], "linked_context")
+        self.assertEqual(details["passages"][0]["answer_relevance"], "linked_context")
+        self.assertEqual(details["conflict_state"], "unresolved")
+        self.assertNotIn("Never follow this second hop", result["context"])
+        # Explicit contradictory claims still gate the answer before display limits.
+        self.note("details", "## Limits\n\nStop the writer.", relations={"contradicts": ["policy"]})
+        for limit in (1, 4):
+            self.assertEqual(self.search("deploy rollback", limit)["answer_state"]["state"], "review_required")
+
+    def test_linked_context_respects_view_and_document_limit(self):
+        self.note("policy", "deploy rollback uses the saved build; see [limits](details.md#limits).")
+        self.note("details", "## Limits\n\nRetired procedure.", temporal_state="historical")
+        self.assertNotIn("Retired procedure", self.search("deploy rollback")["context"])
+        self.assertIn("Retired procedure", self.search("deploy rollback", bundle="auto")["context"])
+        self.note("details", "## Limits\n\nCurrent restriction.")
+        result = self.search("deploy rollback", limit=1)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["index"]["results_truncated"], 1)
+        self.assertIn("Search results omitted: 1", result["context"])
+
+    def test_links_never_fetch_files_or_network_outside_visible_documents(self):
+        self.note("details", "## Limits\n\nDo not disclose this unrelated target.")
+        for link in ("https://example.test/details.md#limits", "file:///20_Projects/details.md#limits",
+                     "//example.test/details.md#limits", "../../details.md#limits", "../.tmp/details.md#limits",
+                     "details.md?preview=1#limits", "details.md#missing", "https://[bad"):
+            self.note("policy", f"deploy rollback uses the saved build; [more]({link}).")
+            with self.subTest(link=link):
+                result = self.search("deploy rollback")
+                self.assertNotIn("Do not disclose", result["context"])
+        self.note("policy", "deploy rollback uses the saved build. `See [more](details.md#limits)` ![image](details.md#limits)")
+        self.assertNotIn("Do not disclose", self.search("deploy rollback")["context"])
+
+    def test_wrong_actor_keeps_corrective_source_and_bounded_context(self):
+        self.note("policy", "Alice approved ProjectX FP16 adoption. Bob ran the trial. [Details](details.md#limits)")
+        self.note("details", "## Limits\n\nApproval applies only to the pilot.")
+        result = self.search("Did Bob approve ProjectX FP16 adoption?")
+        self.assertEqual(result["answer_state"]["state"], "evidence")
+        self.assertIn("Alice approved", result["context"])
+        self.assertIn("Bob ran the trial", result["context"])
+        self.assertIn("only to the pilot", result["context"])
+        result = self.search("MissingProjectQZV981")
+        self.assertEqual(result["answer_state"]["state"], "abstain")
+        self.assertEqual(result["results"], [])
+
+    def test_linked_context_has_bounded_fanout_and_shared_passage_budget(self):
+        self.note("policy", "deploy rollback uses the saved build; " + " ".join(f"[step](step{i}.md#limits)" for i in range(3)))
+        for i in range(3):
+            self.note(f"step{i}", "## Limits\n\n" + "\n\n".join(f"Restricted step {i}.{j}." for j in range(3)))
+        result = self.search("deploy rollback")
+        self.assertEqual(result["index"]["context_expansion"]["added"], 4)
+        self.assertGreater(result["index"]["context_expansion"]["limited"], 0)
+        self.assertIn("Structural context is partial", result["context"])
+        self.assertNotIn("Restricted step 2", result["context"])
+        self.assertNotIn("Restricted step 0.2", result["context"])
+        with patch.object(core, "SEARCH_PASSAGE_BYTES", 500):
+            result = self.search("deploy rollback")
+        self.assertGreater(result["index"]["passages_truncated"], 0)
+        size = sum(len(json.dumps(p, ensure_ascii=False).encode()) for r in result["results"] for p in r["passages"])
+        self.assertLessEqual(size, 500)
+
+        from gateway.app import search_response
+        with patch("gateway.app.SEARCH_RESPONSE_BYTES", 1600):
+            public = search_response(result, "current")
+        self.assertIn("Structural context is partial", public["context"])
+        self.assertLessEqual(len(json.dumps(public, ensure_ascii=False, separators=(",", ":")).encode()), 1600)
+
+    def test_links_resolve_encoded_relative_paths_and_dedupe_same_section(self):
+        self.note("policy", "deploy rollback uses the saved build; [limits](sub/../detailed%20policy.md#limits) [again](detailed%20policy.md#limits).")
+        self.note("detailed policy", "## Limits\n\nStop the writer.")
+        result = self.search("deploy rollback")
+        self.assertEqual(result["index"]["context_expansion"]["added"], 1)
+        self.assertEqual(result["context"].count("Stop the writer."), 1)
+
+    def test_semantic_candidates_do_not_seed_structural_expansion(self):
+        self.note("policy", "Restore the saved build; see [limits](details.md#limits).")
+        self.note("details", "## Limits\n\nStop the writer.")
+        documents = core.vault_documents(self.settings)
+        item = {"document_id": "policy", "path": "20_Projects/policy.md", "answer_relevance": "semantic_candidate", "passages": []}
+        results = [item]
+        self.assertEqual(core.expand_search_context(results, documents, "current", ["undo"], 4), {"added": 0, "limited": 0})
+        self.assertEqual(results, [item])
 
     def test_multiple_passages_in_one_document_survive_document_limit(self):
         self.note("runbook", "## Decision\n\ndeploy rollback uses the saved build.\n\n"
@@ -76,11 +203,11 @@ class SearchEvidenceTests(unittest.TestCase):
         self.assertNotIn("_text", json.dumps(result))
         self.assertNotIn("_coverage", json.dumps(result))
 
-    def test_weaker_passages_are_not_promoted_to_answer_anchors(self):
+    def test_matching_passages_have_retrieval_labels_not_truth_labels(self):
         self.note("runbook", "deploy rollback during an outage uses the saved build.\n\n"
                   "deploy rollback was also tested on a quiet day.")
         result = self.search("deploy rollback outage")
-        self.assertEqual([p["answer_relevance"] for p in result["results"][0]["passages"]], ["grounded", "candidate"])
+        self.assertEqual([p["answer_relevance"] for p in result["results"][0]["passages"]], ["lexical_match", "lexical_match"])
 
     def test_passage_budget_does_not_hide_conflict_verdict(self):
         self.note("runbook", "\n\n".join(f"deploy rollback observation {n}." for n in range(200)))
@@ -165,16 +292,16 @@ class SearchEvidenceTests(unittest.TestCase):
         self.assertEqual(core.evidence_blocks(f"# Root {marker}\n\nFP16 claim line {marker}"), ["# Root \nFP16 claim line"])
         self.note("marked", f"FP16 claim line {marker}")
         self.assertNotIn("pvg-src", self.search("FP16")["results"][0]["snippet"])
-        self.assertEqual(self.search("Snapshot101 FP16")["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search("Snapshot101 FP16")["answer_state"]["state"], "evidence")
 
-    def test_list_siblings_cannot_pool_evidence(self):
+    def test_list_siblings_keep_separate_attribution(self):
         for first, second in (("-", "-"), ("*", "*"), ("+", "+"), ("1.", "2."), ("1)", "2)"), ("- [x]", "- [ ]"), ("  -", "  -"), ("\t-", "\t-")):
             for separator in ("\n", "\n\n"):
                 self.note("network", f"{first} ExampleMiner DNS is active.{separator}{second} OtherProject NFS is active.")
                 for limit in (1, 4, 20):
                     with self.subTest(first=first, separator=separator, limit=limit):
                         result = self.search("ExampleMiner NFS", limit)
-                        self.assertEqual(result["answer_state"]["state"], "abstain")
+                        self.assertEqual(result["answer_state"]["state"], "evidence")
                         self.assertTrue(all(item["answer_relevance"] == "candidate" for item in result["results"]))
 
     def test_list_item_continuations_and_parent_context(self):
@@ -192,11 +319,11 @@ class SearchEvidenceTests(unittest.TestCase):
             for limit in (1, 4, 20):
                 with self.subTest(body=body, limit=limit):
                     result = self.search("ExampleMiner NFS", limit)
-                    self.assertEqual(result["answer_state"]["state"], "supported")
+                    self.assertEqual(result["answer_state"]["state"], "evidence")
                     self.assertIn("NFS", result["results"][0]["snippet"])
                     self.assertNotIn("OtherProject", result["results"][0]["snippet"])
 
-    def test_list_parent_context_does_not_leak(self):
+    def test_list_parent_context_remains_attached_to_each_item(self):
         for body in (
             "- ExampleMiner:\n  - DNS is active.\n- OtherProject:\n  - NFS is active.",
             "- Platform:\n  - ExampleMiner:\n    - DNS is active.\n  - OtherProject:\n    - NFS is active.",
@@ -207,7 +334,7 @@ class SearchEvidenceTests(unittest.TestCase):
             self.note("network", body)
             for limit in (1, 4, 20):
                 with self.subTest(body=body, limit=limit):
-                    self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "abstain")
+                    self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "evidence")
 
     def test_list_blocks_preserve_fences_and_markers(self):
         code = "```text\n- ExampleMiner\n1. OtherProject\n```"
@@ -226,7 +353,7 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("network", "- ExampleMiner NFS is active.\n- OtherProject DNS is active.")
         self.note("objection", "- ExampleMiner DNS is active.\n- OtherProject NFS is active.", conflict_state="unresolved")
         for limit in (1, 4, 20):
-            self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "supported")
+            self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "evidence")
         self.note("objection", "- That claim is disputed.", memory_type="candidate", relations={"contradicts": ["network"]})
         for limit in (1, 4, 20):
             self.assertEqual(self.search("ExampleMiner NFS", limit)["answer_state"]["state"], "review_required")
@@ -235,7 +362,7 @@ class SearchEvidenceTests(unittest.TestCase):
         self.note("actual", "ExampleMiner FP16 comparison", conflict_state="unresolved")
         self.assertEqual(self.search("없는프로젝트QZV981")["answer_state"]["state"], "abstain")
 
-    def test_dated_nfs_question_cannot_use_an_unrelated_allowlist_decision(self):
+    def test_dated_nfs_lookup_preserves_unverified_scope(self):
         self.note("decisions", "## 2026-10-20\n\nNFS export allowlist keeps .51. This is not account isolation.")
         self.note("home", "H10: notebook-home has 15 Profile PVCs Bound. "
                   "Notebook 홈 파일 읽기는 미확인이다. NFS export, PV Bound, mount/read are separate checks.")
@@ -244,35 +371,35 @@ class SearchEvidenceTests(unittest.TestCase):
             with self.subTest(limit=limit):
                 result = self.search(query, limit)
                 self.assertTrue(result["results"])
-                self.assertEqual(result["answer_state"]["state"], "abstain")
-                self.assertFalse(any(item["answer_relevance"] == "grounded" for item in result["results"]))
+                self.assertEqual(result["answer_state"]["state"], "evidence")
+                self.assertNotIn('"answer_relevance": "grounded"', result["context"])
                 result = self.search("H10 Notebook 홈 mount/read", limit)
-                self.assertEqual(result["answer_state"]["state"], "supported")
+                self.assertEqual(result["answer_state"]["state"], "evidence")
                 self.assertEqual(result["results"][0]["document_id"], "home")
         self.note("home", "## 2026-10-20\n\nNFS export, PV Bound, Notebook 홈 mount/read: "
                   "홈 파일 읽기는 미확인이다.")
         for limit in (1, 4, 20):
             result = self.search(query, limit)
-            self.assertEqual(result["answer_state"]["state"], "supported")
+            self.assertEqual(result["answer_state"]["state"], "evidence")
             self.assertEqual(result["results"][0]["document_id"], "home")
             self.assertIn("미확인", result["results"][0]["snippet"])
         self.note("objection", "The home check is disputed.", memory_type="candidate", relations={"contradicts": ["home"]})
         for limit in (1, 4, 20):
             self.assertEqual(self.search(query, limit)["answer_state"]["state"], "review_required")
 
-    def test_missing_property_cannot_be_grounded_by_shared_project_words(self):
+    def test_missing_property_returns_recorded_context_without_asserting_it(self):
         query = "Team Policy TF meeting minutes cover background color"
         for conflict in ("none", "unresolved"):
             self.note("minutes", "Team Policy TF meeting minutes cover the roadmap and business KPI.", conflict_state=conflict)
             for limit in (1, 4, 20):
                 with self.subTest(conflict=conflict, limit=limit):
-                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "review_required" if conflict == "unresolved" else "evidence")
         self.note("minutes", "Team Policy TF meeting minutes cover background color: blue.")
-        self.assertEqual(self.search(query)["answer_state"]["state"], "supported")
+        self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
         self.note("minutes", "Team Policy TF meeting minutes cover roadmap.\n\nOther committee background color: blue.")
-        self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
 
-    def test_finalization_requires_the_actual_object_and_polarity(self):
+    def test_finalization_preserves_actual_object_and_polarity(self):
         for body in (
             "# ExampleLab\n\ncontrol-plane 서버 A/B 견적 미정. 구매 확정 없음.",
             "# ExampleLab\n\n서버 구매를 확정했다. 양자컴퓨터 구매는 미정이다.",
@@ -284,24 +411,24 @@ class SearchEvidenceTests(unittest.TestCase):
                 with self.subTest(body=body, limit=limit):
                     result = self.search("ExampleLab 양자컴퓨터 구매 확정", limit)
                     self.assertTrue(result["results"])
-                    self.assertEqual(result["answer_state"]["state"], "abstain")
+                    self.assertEqual(result["answer_state"]["state"], "evidence")
             documents = core.vault_documents(self.settings)
             for match in ("keyword", "hybrid", "semantic"):
                 item = {**documents[0], "match": match}
                 evidence = core.query_evidence("ExampleLab 양자컴퓨터 구매 확정", [item], documents)
-                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "evidence")
 
     def test_finalization_keeps_positive_negative_and_open_status_queries(self):
         for body, query, expected in (
-            ("서버 구매 확정.", "서버 구매 확정", "supported"),
-            ("서버 구매를 확정했다. 양자컴퓨터 구매는 미정이다.", "서버 구매 확정", "supported"),
-            ("서버 구매를 확정하지 않았다.", "서버 구매 확정", "abstain"),
-            ("서버 구매 확정 없음.", "서버 구매 확정 없음", "supported"),
-            ("서버 구매는 미정이다.", "서버 구매 미정", "supported"),
-            ("서버 구매는 미정이다.", "서버 구매 확정 여부", "supported"),
-            ("서버 구매는 미정이다.", "양자컴퓨터 구매 확정 여부", "abstain"),
-            ("서버 구매는 미정이다.", "양자컴퓨터 구매 미정", "abstain"),
-            ("서버 구매 확정.", "서버 구매 미정", "abstain"),
+            ("서버 구매 확정.", "서버 구매 확정", "evidence"),
+            ("서버 구매를 확정했다. 양자컴퓨터 구매는 미정이다.", "서버 구매 확정", "evidence"),
+            ("서버 구매를 확정하지 않았다.", "서버 구매 확정", "evidence"),
+            ("서버 구매 확정 없음.", "서버 구매 확정 없음", "evidence"),
+            ("서버 구매는 미정이다.", "서버 구매 미정", "evidence"),
+            ("서버 구매는 미정이다.", "서버 구매 확정 여부", "evidence"),
+            ("서버 구매는 미정이다.", "양자컴퓨터 구매 확정 여부", "evidence"),
+            ("서버 구매는 미정이다.", "양자컴퓨터 구매 미정", "evidence"),
+            ("서버 구매 확정.", "서버 구매 미정", "evidence"),
         ):
             self.note("purchase", "# ExampleLab\n\n" + body)
             for limit in (1, 4, 20):
@@ -315,15 +442,15 @@ class SearchEvidenceTests(unittest.TestCase):
                   "204 LAN guard 안전 검증이 아니다. | 20_Projects/ExampleLab/DECISIONS.md#D-057 |")
         self.note("origin", source, kind="decision_ledger", conflict_state="unresolved")
         query = "ExampleLab 204 LAN guard 안전 검증"
-        self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
         self.note("destination", "# ExampleLab\n\n" + header +
                   "| D-057 | 2026-10-20 | 결정 | 유효 | 204 LAN guard 위험을 수용한다. | "
                   "안전 검증이 아니다. <!-- pvg-src: doc:20_Projects/origin.md#D-089 --> | - |",
                   kind="decision_ledger")
         for limit in (1, 4, 20):
             result = self.search(query, limit)
-            self.assertEqual(result["answer_state"]["state"], "supported")
-            self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "grounded" for r in result["results"]))
+            self.assertEqual(result["answer_state"]["state"], "evidence")
+            self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "lexical_match" for r in result["results"]))
         self.note("objection", "The destination claim remains disputed.", memory_type="candidate",
                   relations={"contradicts": ["destination"]})
         for limit in (1, 4, 20):
@@ -338,7 +465,7 @@ class SearchEvidenceTests(unittest.TestCase):
         for limit in (1, 4, 20):
             self.assertEqual(self.search("ExampleLab 1분 strip", limit)["answer_state"]["state"], "review_required")
 
-    def test_ledger_conflict_scope_preserves_disputed_claim_without_poisoning_other_decisions(self):
+    def test_ledger_warning_preserves_document_scope_without_inferred_clearance(self):
         header = "| id | 날짜 | 유형 | 상태 | 내용 | 이유·근거 | 후속 |\n| --- | --- | --- | --- | --- | --- | --- |\n"
         body = ("# ExampleLab\n\n" + header +
                 "| D-056 | 2026-10-20 | 결정 | 유효 | Selector output은 고정 1분 strip. | 운영 계약; ±30초 merge는 충돌 미해결. | - |\n"
@@ -346,10 +473,10 @@ class SearchEvidenceTests(unittest.TestCase):
                 "| D-083 | 2026-10-20 | 결정 | 유효 | cycle 실행과 ops 현장 적용은 자동 배포에서 제외한다. | ops는 별도 저장소다. | - |")
         self.note("ledger", body, kind="decision_ledger", conflict_state="unresolved")
         for query, expected in (
-            ("ExampleLab selector output 고정 1분 strip 길이 계약", "supported"),
-            ("ExampleLab ops 별도 저장소", "supported"),
-            ("ExampleLab cycle 실행 ops 현장 적용 자동 배포 제외", "supported"),
-            ("ExampleLab 4pf queue 시험 1,000h fill cap 라벨 예산 아님", "supported"),
+            ("ExampleLab selector output 고정 1분 strip 길이 계약", "review_required"),
+            ("ExampleLab ops 별도 저장소", "review_required"),
+            ("ExampleLab cycle 실행 ops 현장 적용 자동 배포 제외", "review_required"),
+            ("ExampleLab 4pf queue 시험 1,000h fill cap 라벨 예산 아님", "review_required"),
             ("ExampleLab ±30초 merge 미해결 충돌", "review_required"),
             ("ExampleLab D-056 merge", "review_required"),
             ("ExampleLab D-056", "review_required"),
@@ -359,9 +486,8 @@ class SearchEvidenceTests(unittest.TestCase):
                     result = self.search(query, limit)
                     self.assertEqual(result["answer_state"]["state"], expected)
                     self.assertEqual(result["results"][0]["conflict_state"], "unresolved")
-                    self.assertEqual(result["results"][0]["answer_conflict_state"], "none" if expected == "supported" else "unresolved")
-                    if expected == "supported":
-                        self.assertFalse(result["groups"][0]["warnings"])
+                    self.assertNotIn("answer_conflict_state", result["results"][0])
+                    self.assertIn("unresolved", result["context"])
         self.note("objection", "The fixed strip contract is disputed.", memory_type="candidate",
                   relations={"contradicts": ["ledger"]})
         for limit in (1, 4, 20):
@@ -389,8 +515,8 @@ class SearchEvidenceTests(unittest.TestCase):
             result = self.search("ExampleLab selector output 고정 1분 strip", limit)
             self.assertEqual(result["answer_state"]["state"], "review_required")
             public = search_response(result, "current")
-            self.assertEqual(public["results"][0]["answer_conflict_state"], "unresolved")
-            self.assertIn('"answer_conflict_state": "unresolved"', public["context"])
+            self.assertEqual(public["results"][0]["conflict_state"], "unresolved")
+            self.assertIn('"conflict_state": "unresolved"', public["context"])
         self.note("ledger", body.replace("strip 길이 충돌 미해결", "다른 주제의 충돌 미해결"),
                   kind="decision_ledger", conflict_state="unresolved", subject_id="strip-contract")
         self.assertEqual(self.search("ExampleLab selector output 고정 1분 strip")["answer_state"]["state"], "review_required")
@@ -423,48 +549,48 @@ class SearchEvidenceTests(unittest.TestCase):
             core.index_vault(settings)
             for limit in (1, 4, 20):
                 result = core.search_vault(settings, AGENT, "ExampleLab 204 LAN guard", limit, bundle="current")
-                self.assertEqual(result["answer_state"]["state"], "supported")
-                self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "grounded" for r in result["results"]))
+                self.assertEqual(result["answer_state"]["state"], "evidence")
+                self.assertFalse(any(r["document_id"] == "origin" and r["answer_relevance"] == "lexical_match" for r in result["results"]))
 
-    def test_property_queries_preserve_known_unknowns_and_reject_semantic_guessing(self):
+    def test_property_queries_preserve_known_unknowns_and_semantic_candidates(self):
         for question in (
             "Team Policy TF meeting minutes include background color",
             "Team Policy TF meeting minutes describe background color",
             "What is the background color of Team Policy TF meeting minutes?",
         ):
             self.note("minutes", "Team Policy TF meeting minutes: background color is unspecified.")
-            self.assertEqual(self.search(question)["answer_state"]["state"], "supported")
+            self.assertEqual(self.search(question)["answer_state"]["state"], "evidence")
             self.note("minutes", "Team Policy TF meeting minutes discuss roadmap.")
             documents = core.vault_documents(self.settings)
             for match in ("keyword", "hybrid", "semantic"):
                 with self.subTest(question=question, match=match):
                     item = {**documents[0], "match": match}
                     evidence = core.query_evidence(question, [item], documents)
-                    self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+                    self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "evidence")
 
     def test_topic_lookup_still_allows_cross_language_keywords_and_current_conflicts(self):
         self.note("ledger", "# ExampleLab\n\n| id | 날짜 | 결정 |\n| --- | --- | --- |\n"
                   "| D-041 | 2026-10-20 | 브라우저 로그인과 검색 오류 수정을 별개로 다룬다. |", kind="decision_ledger")
-        self.assertEqual(self.search("ExampleLab D-041 browser login separate search bug")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("ExampleLab D-041 browser login separate search bug")["answer_state"]["state"], "evidence")
         self.note("status", "## 2026-10-20\n\nH10 Model 현황")
         self.note("disputed", "## 2026-10-20\n\nH10 현황 상태", conflict_state="unresolved")
         for limit in (1, 4, 20):
             self.assertEqual(self.search("2026-10-20 H10 Model 현황 상태", limit)["answer_state"]["state"], "review_required")
 
-    def test_adoption_requires_the_organization_action_and_complete_object(self):
+    def test_adoption_queries_preserve_recorded_organization_action_and_scope(self):
         query = "Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting"
         for body, expected in (
-            ("Team Policy TF meeting notes: the LMFM roadmap and business KPI are an assistant draft, not an adopted organizational decision.", "abstain"),
-            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting.", "supported"),
-            ("Team Policy TF has officially adopted the LMFM roadmap and business KPI from this meeting.", "supported"),
-            ("The LMFM roadmap and business KPI from this meeting were officially adopted by Team Policy TF.", "supported"),
-            ("Other Policy TF officially adopted the LMFM roadmap and business KPI from this meeting. Team Policy TF attended.", "abstain"),
-            ("Team Policy TF has not officially adopted the LMFM roadmap and business KPI from this meeting.", "abstain"),
-            ("Team Policy TF officially adopted the LMFM roadmap from this meeting. Business KPI remains a draft.", "abstain"),
-            ("Team Policy TF officially adopted the LMFM roadmap from this meeting and Other Policy TF adopted the business KPI.", "abstain"),
-            ("Team Policy TF proposed the LMFM roadmap and business KPI from this meeting for official adoption.", "abstain"),
-            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting?", "abstain"),
-            ("Whether Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting is unknown.", "abstain"),
+            ("Team Policy TF meeting notes: the LMFM roadmap and business KPI are an assistant draft, not an adopted organizational decision.", "evidence"),
+            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting.", "evidence"),
+            ("Team Policy TF has officially adopted the LMFM roadmap and business KPI from this meeting.", "evidence"),
+            ("The LMFM roadmap and business KPI from this meeting were officially adopted by Team Policy TF.", "evidence"),
+            ("Other Policy TF officially adopted the LMFM roadmap and business KPI from this meeting. Team Policy TF attended.", "evidence"),
+            ("Team Policy TF has not officially adopted the LMFM roadmap and business KPI from this meeting.", "evidence"),
+            ("Team Policy TF officially adopted the LMFM roadmap from this meeting. Business KPI remains a draft.", "evidence"),
+            ("Team Policy TF officially adopted the LMFM roadmap from this meeting and Other Policy TF adopted the business KPI.", "evidence"),
+            ("Team Policy TF proposed the LMFM roadmap and business KPI from this meeting for official adoption.", "evidence"),
+            ("Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting?", "evidence"),
+            ("Whether Team Policy TF officially adopted the LMFM roadmap and business KPI from this meeting is unknown.", "evidence"),
         ):
             self.note("minutes", body)
             for limit in (1, 4, 20):
@@ -472,11 +598,11 @@ class SearchEvidenceTests(unittest.TestCase):
                     result = self.search(query, limit)
                     self.assertTrue(result["results"])
                     self.assertEqual(result["answer_state"]["state"], expected)
-            if expected == "abstain":
+            if expected == "evidence":
                 documents = core.vault_documents(self.settings)
                 item = {**documents[0], "match": "semantic"}
                 evidence = core.query_evidence(query, [item], documents)
-                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "evidence")
 
     def decision_note(self, reason="사용자가 정확히 이 명령을 무시하라고 재확인했다.", date="2026-10-20"):
         self.note(
@@ -492,46 +618,46 @@ class SearchEvidenceTests(unittest.TestCase):
             kind="decision_ledger",
         )
 
-    def test_decision_dates_and_particles_preserve_actor_constraints(self):
+    def test_decision_dates_and_particles_preserve_recorded_attribution(self):
         self.decision_note()
         for query, expected in (
-            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 결정했나?", "supported"),
-            ("10월 20일 사용자가 204 /data의 sticky bit 변경을 제외하고 777 권한을 유지하기로 한 결정은?", "supported"),
-            ("2026년 10월 20일 사용자가 ExampleLab D-009 204 /data mode 777로 유지하기로 한 결정은?", "supported"),
-            ("2026-10-20 김민수가 ExampleLab 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 직접 결정했나?", "abstain"),
-            ("ExampleLab D-009 204 /data chmod +t mode 777 결정 내용", "supported"),
-            ("2026-10-20 ExampleLab D-009 204 /data mode 777로 진행하기로 결정했나?", "supported"),
-            ("ExampleLab D-009 사용자의 결정 내용은?", "supported"),
-            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +u를 제외하고 mode 777로 진행하기로 결정했나?", "abstain"),
-            ("2026-10-20 ExampleLab D-009 사용자는 chmod +u 제외 후 mode 777로 진행하기로 결정했나?", "abstain"),
-            ("2026-10-20 ExampleLab D-009 사용자는 chmod -t 제외 후 mode 777로 진행하기로 결정했나?", "abstain"),
-            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 755로 진행하기로 결정했나?", "abstain"),
-            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 7770으로 진행하기로 결정했나?", "abstain"),
-            ("2026-10-21 ExampleLab D-009 사용자는 mode 777로 진행하기로 결정했나?", "abstain"),
-            ("10월 21일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "abstain"),
-            ("2025년 10월 20일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "abstain"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 결정했나?", "evidence"),
+            ("10월 20일 사용자가 204 /data의 sticky bit 변경을 제외하고 777 권한을 유지하기로 한 결정은?", "evidence"),
+            ("2026년 10월 20일 사용자가 ExampleLab D-009 204 /data mode 777로 유지하기로 한 결정은?", "evidence"),
+            ("2026-10-20 김민수가 ExampleLab 204 /data의 chmod +t를 제외하고 기존 mode 777로 진행하기로 직접 결정했나?", "evidence"),
+            ("ExampleLab D-009 204 /data chmod +t mode 777 결정 내용", "evidence"),
+            ("2026-10-20 ExampleLab D-009 204 /data mode 777로 진행하기로 결정했나?", "evidence"),
+            ("ExampleLab D-009 사용자의 결정 내용은?", "evidence"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data의 chmod +u를 제외하고 mode 777로 진행하기로 결정했나?", "evidence"),
+            ("2026-10-20 ExampleLab D-009 사용자는 chmod +u 제외 후 mode 777로 진행하기로 결정했나?", "evidence"),
+            ("2026-10-20 ExampleLab D-009 사용자는 chmod -t 제외 후 mode 777로 진행하기로 결정했나?", "evidence"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 755로 진행하기로 결정했나?", "evidence"),
+            ("2026-10-20 ExampleLab D-009 사용자는 204 /data mode 7770으로 진행하기로 결정했나?", "evidence"),
+            ("2026-10-21 ExampleLab D-009 사용자는 mode 777로 진행하기로 결정했나?", "evidence"),
+            ("10월 21일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "evidence"),
+            ("2025년 10월 20일 사용자가 ExampleLab D-009 mode 777로 진행하기로 한 결정은?", "evidence"),
         ):
             for limit in (1, 4, 20):
                 with self.subTest(query=query, limit=limit):
                     result = self.search(query, limit)
                     self.assertTrue(result["results"])
                     self.assertEqual(result["answer_state"]["state"], expected)
-                    if expected == "supported":
+                    if expected == "evidence":
                         self.assertIn("D-009", result["results"][0]["snippet"])
                         self.assertNotIn("D-010", result["results"][0]["snippet"])
 
     def test_decision_attribution_is_not_participation_or_negated_choice(self):
         query = "2026-10-20 ExampleLab D-009 사용자는 204 /data mode 777로 진행하기로 결정했나?"
         for reason, expected in (
-            ("사용자가 정확히 이 명령을 무시하라고 재확인했다.", "supported"),
-            ("사용자가 이 설정을 선택했다. 김민수는 회의에 참여했다.", "supported"),
-            ("김민수가 이 설정을 선택했다. 사용자는 회의에 참여했다.", "abstain"),
-            ("김민수가 이 설정을 선택했고 사용자는 회의에 참여했다.", "abstain"),
-            ("사용자가 이 설정을 결정하지 않았다.", "abstain"),
-            ("사용자가 이 설정을 결정했다는 근거가 없다.", "abstain"),
-            ("사용자가 이 설정을 결정할 예정이다.", "abstain"),
-            ("사용자가 이 설정을 안 결정했다.", "abstain"),
-            ("사용자가 이 설정을 결정했다?", "abstain"),
+            ("사용자가 정확히 이 명령을 무시하라고 재확인했다.", "evidence"),
+            ("사용자가 이 설정을 선택했다. 김민수는 회의에 참여했다.", "evidence"),
+            ("김민수가 이 설정을 선택했다. 사용자는 회의에 참여했다.", "evidence"),
+            ("김민수가 이 설정을 선택했고 사용자는 회의에 참여했다.", "evidence"),
+            ("사용자가 이 설정을 결정하지 않았다.", "evidence"),
+            ("사용자가 이 설정을 결정했다는 근거가 없다.", "evidence"),
+            ("사용자가 이 설정을 결정할 예정이다.", "evidence"),
+            ("사용자가 이 설정을 안 결정했다.", "evidence"),
+            ("사용자가 이 설정을 결정했다?", "evidence"),
         ):
             self.decision_note(reason)
             for limit in (1, 4, 20):
@@ -543,9 +669,9 @@ class SearchEvidenceTests(unittest.TestCase):
             self.decision_note(date=date)
             for query in ("2026-10-20 ExampleLab D-009 mode 777", "10월20일 ExampleLab D-009 mode 777"):
                 with self.subTest(date=date, query=query):
-                    self.assertEqual(self.search(query)["answer_state"]["state"], "supported")
+                    self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
         self.note("decisions", "2025-10-20 ExampleLab mode 777")
-        self.assertEqual(self.search("2026-10-20 ExampleLab mode 777")["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search("2026-10-20 ExampleLab mode 777")["answer_state"]["state"], "evidence")
 
     def test_short_technical_terms_keep_particle_free_identity(self):
         for term, expected in (("t를", "t"), ("777로", "777"), ("NFS를", "NFS"), ("사용자는", "사용자"), ("이", "이")):
@@ -554,9 +680,9 @@ class SearchEvidenceTests(unittest.TestCase):
 
     def test_calendar_normalization_does_not_move_dates_between_actions(self):
         self.note("approval", "2026-10-21 김민수가 ExampleMiner FP16 도입을 승인했다. 2026-10-20 홍길동은 회의에 참여했다.")
-        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "evidence")
         self.note("approval", "2026년 10월 20일 김민수가 ExampleMiner FP16 도입을 승인했다.")
-        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("2026-10-20 김민수가 ExampleMiner FP16 도입을 승인했나?")["answer_state"]["state"], "evidence")
 
     def test_invalid_calendar_dates_are_not_normalized(self):
         for date in ("2026-02-29", "2026년 13월 20일", "0000-10-20", "10월 32일"):
@@ -564,7 +690,7 @@ class SearchEvidenceTests(unittest.TestCase):
                 self.assertEqual(core.normalize_evidence_dates(date), date)
         self.assertEqual(core.normalize_evidence_dates("02월 29일"), "02-29")
 
-    def test_decision_constraints_also_reject_semantic_only_candidates(self):
+    def test_semantic_decision_candidates_remain_visible_without_a_verdict(self):
         self.decision_note()
         documents = core.vault_documents(self.settings)
         for query in (
@@ -575,16 +701,16 @@ class SearchEvidenceTests(unittest.TestCase):
             with self.subTest(query=query):
                 item = {**documents[0], "match": "semantic"}
                 evidence = core.query_evidence(query, [item], documents)
-                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+                self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "evidence")
 
     def test_plain_decisions_keep_their_own_actor_and_object(self):
         for body, query, expected in (
-            ("사용자가 ExampleLab mode 777을 유지하기로 결정했다. 김민수는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "supported"),
-            ("김민수가 ExampleLab mode 777을 유지하기로 결정했다. 사용자는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "abstain"),
-            ("사용자가 ExampleLab mode 755를 선택했다. 사용자가 OtherProject mode 777을 선택했다.", "사용자는 ExampleLab mode 777을 선택하기로 결정했나?", "abstain"),
-            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Alice decide to keep ProjectX mode 777?", "supported"),
-            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Bob decide to keep ProjectX mode 777?", "abstain"),
-            ("Alice had not decided to keep ProjectX mode 777.", "Did Alice decide to keep ProjectX mode 777?", "abstain"),
+            ("사용자가 ExampleLab mode 777을 유지하기로 결정했다. 김민수는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "evidence"),
+            ("김민수가 ExampleLab mode 777을 유지하기로 결정했다. 사용자는 회의에 참여했다.", "사용자는 ExampleLab mode 777을 유지하기로 결정했나?", "evidence"),
+            ("사용자가 ExampleLab mode 755를 선택했다. 사용자가 OtherProject mode 777을 선택했다.", "사용자는 ExampleLab mode 777을 선택하기로 결정했나?", "evidence"),
+            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Alice decide to keep ProjectX mode 777?", "evidence"),
+            ("Alice decided to keep ProjectX mode 777. Bob attended.", "Did Bob decide to keep ProjectX mode 777?", "evidence"),
+            ("Alice had not decided to keep ProjectX mode 777.", "Did Alice decide to keep ProjectX mode 777?", "evidence"),
         ):
             self.note("decisions", body)
             with self.subTest(body=body, query=query):
@@ -600,17 +726,17 @@ class SearchEvidenceTests(unittest.TestCase):
             kind="decision_ledger",
         )
         for query, expected in (
-            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "supported"),
-            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정은 profile scope 제거까지 뜻했나?", "supported"),
-            ("2026-10-21 ExampleLab D-016 김민수의 결정이 profile scope 제거까지 뜻했나?", "abstain"),
-            ("2026-10-21 ExampleLab D-016 김민수가 Google 표시 이름을 key로 쓰지 않기로 결정했나?", "abstain"),
-            ("2026-10-21 ExampleLab D-999 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "abstain"),
+            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "evidence"),
+            ("2026-10-21 ExampleLab D-016 Google 표시 이름을 key로 쓰지 않는다는 결정은 profile scope 제거까지 뜻했나?", "evidence"),
+            ("2026-10-21 ExampleLab D-016 김민수의 결정이 profile scope 제거까지 뜻했나?", "evidence"),
+            ("2026-10-21 ExampleLab D-016 김민수가 Google 표시 이름을 key로 쓰지 않기로 결정했나?", "evidence"),
+            ("2026-10-21 ExampleLab D-999 Google 표시 이름을 key로 쓰지 않는다는 결정이 profile scope 제거까지 뜻했나?", "evidence"),
         ):
             for limit in (1, 4, 20):
                 with self.subTest(query=query, limit=limit):
                     result = self.search(query, limit)
                     self.assertEqual(result["answer_state"]["state"], expected)
-                    if expected == "supported":
+                    if expected == "evidence":
                         self.assertIn("profile scope 제거까지 뜻하지는 않는다", result["results"][0]["snippet"])
 
     def test_field_units_and_totals_are_not_inferred(self):
@@ -620,11 +746,11 @@ class SearchEvidenceTests(unittest.TestCase):
             "40/50/52의 GPU metric은 10/2/2이며 up==0은 빈 배열이었다.",
         )
         for query, expected in (
-            ("2026-10-21 ExampleLab gpusystem-40 DCGM liveness 180초 패치 뒤 14 GPU metric과 up==0 결과는?", "abstain"),
-            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 180 뒤 14 GPU metric 결과", "abstain"),
-            ("2026-10-21 ExampleLab DCGM liveness 180초 뒤 GPU metric 10/2/2 결과", "abstain"),
-            ("2026-10-21 ExampleLab gpusystem-40 DCGM initialDelaySeconds 180 GPU metric 40/50/52=10/2/2 up==0 결과", "supported"),
-            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 181 GPU metric 10/2/2 결과", "abstain"),
+            ("2026-10-21 ExampleLab gpusystem-40 DCGM liveness 180초 패치 뒤 14 GPU metric과 up==0 결과는?", "evidence"),
+            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 180 뒤 14 GPU metric 결과", "evidence"),
+            ("2026-10-21 ExampleLab DCGM liveness 180초 뒤 GPU metric 10/2/2 결과", "evidence"),
+            ("2026-10-21 ExampleLab gpusystem-40 DCGM initialDelaySeconds 180 GPU metric 40/50/52=10/2/2 up==0 결과", "evidence"),
+            ("2026-10-21 ExampleLab DCGM initialDelaySeconds 181 GPU metric 10/2/2 결과", "evidence"),
         ):
             for limit in (1, 4, 20):
                 with self.subTest(query=query, limit=limit):
@@ -640,15 +766,16 @@ class SearchEvidenceTests(unittest.TestCase):
             ("5.5배", "5.5%"), ("5.5", "5.5배"),
             ("0.123456789012345678901234567891", "0.123456789012345678901234567892"),
         ):
+            self.assertFalse(core.numeric_evidence_literals(query_value) <= core.numeric_evidence_literals(source))
             self.note("metrics", f"ExampleModel 측정 결과는 {source}였다.")
             query = f"ExampleModel 측정 결과 {query_value}"
             for limit in (1, 4, 20):
                 with self.subTest(source=source, query=query, limit=limit):
-                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "evidence")
             documents = core.vault_documents(self.settings)
             candidate = {**documents[0], "match": "semantic"}
             evidence = core.query_evidence(query, [candidate], documents)
-            self.assertEqual(core.rag_answer_state([candidate], "current", evidence)["state"], "abstain")
+            self.assertEqual(core.rag_answer_state([candidate], "current", evidence)["state"], "evidence")
 
     def test_numeric_surface_variants_preserve_exact_value_and_unit(self):
         for source, query_value in (
@@ -656,19 +783,20 @@ class SearchEvidenceTests(unittest.TestCase):
             ("0.620", ".620"), ("5.50배", "5.5배"), ("1,000개", "1000개"),
             ("180초", "180초만"), ("5.5배로", "5.5"), ("5.5%", "5.5%"),
         ):
+            self.assertTrue(core.numeric_evidence_literals(query_value) <= core.numeric_evidence_literals(source))
             self.note("metrics", f"ExampleModel 측정 결과는 {source} 기록이다.")
             for limit in (1, 4, 20):
                 with self.subTest(source=source, query_value=query_value, limit=limit):
-                    self.assertEqual(self.search(f"ExampleModel 측정 결과 {query_value}", limit)["answer_state"]["state"], "supported")
+                    self.assertEqual(self.search(f"ExampleModel 측정 결과 {query_value}", limit)["answer_state"]["state"], "evidence")
         self.note("metrics", "ExampleModel 측정 결과는 5.5% 기록이다.")
-        self.assertEqual(self.search("ExampleModel 측정 결과 5.5배")["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search("ExampleModel 측정 결과 5.5배")["answer_state"]["state"], "evidence")
 
     def test_numeric_suffixes_do_not_drop_units_or_korean_magnitudes(self):
         for source, query_value, expected in (
-            ("0건이나", "0건", "supported"), ("2028년까지", "2028년", "supported"),
-            ("1만", "1", "abstain"), ("1만명", "1명", "abstain"),
-            ("2억4천만", "2억4천", "abstain"), ("2억4천만", "2억4천만", "supported"),
-            ("40", "gpusystem-40", "abstain"), ("s3-timing", "S3", "abstain"),
+            ("0건이나", "0건", "evidence"), ("2028년까지", "2028년", "evidence"),
+            ("1만", "1", "evidence"), ("1만명", "1명", "evidence"),
+            ("2억4천만", "2억4천", "evidence"), ("2억4천만", "2억4천만", "evidence"),
+            ("40", "gpusystem-40", "evidence"), ("s3-timing", "S3", "evidence"),
         ):
             self.note("metrics", f"ExampleModel 측정 결과: `{source}`.")
             for limit in (1, 4, 20):
@@ -691,7 +819,7 @@ class SearchEvidenceTests(unittest.TestCase):
         )
         for query, expected, snippet in (
             ("2026-10-21 ExampleLab D-018 generalize branch leak-check 45/45 통과가 site 값 0건과 Bitbucket push 완료를 뜻했나?",
-             "supported", "뜻하지 않는다"),
+             "evidence", "뜻하지 않는다"),
             ("ExampleForms assistant 회의록 초안의 Level 1 2026년 Level 2~3 다음 해 Level 4~5 2028년 KPI 개발 배포 시간 인건비 GPU 서버 2대 약 2억4천만 원 재견적",
              "review_required", "조직 채택이 아닌 제안"),
         ):
@@ -711,8 +839,8 @@ class SearchEvidenceTests(unittest.TestCase):
         for query, expected in (
             ("2026-10-22 ExampleModel Random F1 .620보다 Model F1 .715이며 속도 5.5배만 기록됐나?", "review_required"),
             ("2026-10-22 ExampleModel Random F1 .620, Model F1 .715, 속도 5.5배", "review_required"),
-            ("2026-10-22 ExampleModel Random F1 .620보다 Model F1 .715이며 속도 6.5배만 기록됐나?", "abstain"),
-            ("2026-10-23 ExampleModel Random F1 .620 Model F1 .715 속도 5.5배", "abstain"),
+            ("2026-10-22 ExampleModel Random F1 .620보다 Model F1 .715이며 속도 6.5배만 기록됐나?", "review_required"),
+            ("2026-10-23 ExampleModel Random F1 .620 Model F1 .715 속도 5.5배", "review_required"),
         ):
             for limit in (1, 4, 20):
                 with self.subTest(query=query, limit=limit):
@@ -724,12 +852,12 @@ class SearchEvidenceTests(unittest.TestCase):
     def test_decimal_constraints_stay_with_the_actor_action_clause(self):
         query = "김민수가 ExampleModel 속도 5.5배를 확인했나?"
         for body, expected in (
-            ("김민수가 ExampleModel 속도 5.5배를 확인했다.", "supported"),
-            ("김민수가 ExampleModel 속도 6.5배를 확인했다.", "abstain"),
-            ("이영희가 ExampleModel 속도 5.5배를 확인했다. 김민수는 회의에 참여했다.", "abstain"),
-            ("김민수가 ExampleModel 속도 5.5배를 확인하지 않았다.", "abstain"),
-            ("김민수가 ExampleModel 속도 6.5배를 확인했다. 이영희가 ExampleModel 속도 5.5배를 확인했다.", "abstain"),
-            ("김민수가 ExampleModel 속도 6.5배를 확인했고 이영희가 ExampleModel 속도 5.5배를 확인했다.", "abstain"),
+            ("김민수가 ExampleModel 속도 5.5배를 확인했다.", "evidence"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했다.", "evidence"),
+            ("이영희가 ExampleModel 속도 5.5배를 확인했다. 김민수는 회의에 참여했다.", "evidence"),
+            ("김민수가 ExampleModel 속도 5.5배를 확인하지 않았다.", "evidence"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했다. 이영희가 ExampleModel 속도 5.5배를 확인했다.", "evidence"),
+            ("김민수가 ExampleModel 속도 6.5배를 확인했고 이영희가 ExampleModel 속도 5.5배를 확인했다.", "evidence"),
         ):
             self.note("metrics", body)
             for limit in (1, 4, 20):
@@ -750,15 +878,15 @@ class SearchEvidenceTests(unittest.TestCase):
             self.note("metrics", body)
             for limit in (1, 4, 20):
                 with self.subTest(body=body, limit=limit):
-                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "abstain")
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "evidence")
 
     def test_wrong_actor_does_not_inherit_approval(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
         for limit in (1, 4, 20):
             result = self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록", limit)
             self.assertTrue(result["results"], "Keep retrieval candidates, but do not endorse them")
-            self.assertEqual(result["answer_state"]["state"], "abstain")
-        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "supported")
+            self.assertEqual(result["answer_state"]["state"], "evidence")
+        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "evidence")
 
     def test_trial_proposal_and_negation_are_not_approval(self):
         for body in (
@@ -769,11 +897,11 @@ class SearchEvidenceTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.note("trial", body)
-                self.assertEqual(self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "abstain")
+                self.assertEqual(self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "evidence")
 
     def test_korean_approval_actor_question_variants(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다. 홍길동은 실험에 참여했다.")
-        for actor, expected in (("홍길동", "abstain"), ("김민수", "supported")):
+        for actor, expected in (("홍길동", "evidence"), ("김민수", "evidence")):
             questions = (
                 f"{actor}은 ExampleMiner FP16 도입을 최종 승인했나?",
                 f"{actor}는 ExampleMiner FP16 도입을 최종 승인했나?",
@@ -795,7 +923,7 @@ class SearchEvidenceTests(unittest.TestCase):
             "홍길동은 실험에 참여했고 김민수가 ExampleMiner FP16 도입을 최종 승인했다.",
         ):
             self.note("approval", body)
-            for actor, expected in (("홍길동", "abstain"), ("김민수", "supported")):
+            for actor, expected in (("홍길동", "evidence"), ("김민수", "evidence")):
                 with self.subTest(body=body, actor=actor):
                     result = self.search(f"ExampleMiner FP16 도입을 최종 승인한 사람은 {actor}인가?")
                     self.assertEqual(result["answer_state"]["state"], expected)
@@ -811,7 +939,7 @@ class SearchEvidenceTests(unittest.TestCase):
             with self.subTest(question=question):
                 result = self.search(question)
                 self.assertTrue(result["results"])
-                self.assertEqual(result["answer_state"]["state"], "abstain")
+                self.assertEqual(result["answer_state"]["state"], "evidence")
 
     def test_english_attribution(self):
         for body in (
@@ -822,16 +950,16 @@ class SearchEvidenceTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.note("approval", body)
-                self.assertEqual(self.search("Did Bob approve ProjectX FP16 adoption?")["answer_state"]["state"], "abstain")
-                self.assertEqual(self.search("Did Alice approve ProjectX FP16 adoption?")["answer_state"]["state"], "supported")
+                self.assertEqual(self.search("Did Bob approve ProjectX FP16 adoption?")["answer_state"]["state"], "evidence")
+                self.assertEqual(self.search("Did Alice approve ProjectX FP16 adoption?")["answer_state"]["state"], "evidence")
 
-    def test_unparsed_actor_does_not_become_provisional_semantic_evidence(self):
+    def test_unparsed_actor_keeps_semantic_candidates_without_adjudication(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 최종 승인했다.")
         documents = core.vault_documents(self.settings)
         result = {**documents[0], "match": "semantic"}
         evidence = core.query_evidence("ExampleMiner FP16 도입 최종 승인: 홍길동?", [result], documents)
-        self.assertEqual(result["answer_relevance"], "candidate")
-        self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "abstain")
+        self.assertEqual(result["answer_relevance"], "semantic_candidate")
+        self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "evidence")
 
     def test_approval_of_another_project_or_a_trial_is_not_adoption(self):
         for body in (
@@ -839,16 +967,16 @@ class SearchEvidenceTests(unittest.TestCase):
             "홍길동이 ExampleMiner FP16 시험을 승인했다. 도입은 미결정이다.",
         ):
             self.note("approval", body)
-            self.assertEqual(self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "abstain")
+            self.assertEqual(self.search("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록")["answer_state"]["state"], "evidence")
 
     def test_unrelated_keyword_conflict_does_not_gate_answer(self):
         self.note("comparison", "ExampleMiner FP16 comparison uses the same snapshot.", subject_id="precision-comparison")
         self.note("cleanup", "ExampleMiner cleanup snapshot " * 80, subject_id="cleanup", conflict_state="unresolved")
         for limit in (1, 4, 20):
             result = self.search("ExampleMiner FP16 comparison snapshot", limit)
-            self.assertEqual(result["answer_state"]["state"], "supported")
+            self.assertEqual(result["answer_state"]["state"], "evidence")
             self.assertEqual(result["results"][0]["document_id"], "comparison")
-            self.assertIn('"answer_relevance": "grounded"', result["context"])
+            self.assertIn('"answer_relevance": "lexical_match"', result["context"])
 
     def test_reported_dns_and_unconfirmed_nfs_do_not_prove_combined_confirmation(self):
         self.note("network", "사용자는 CoverageMiner LAN DNS A 레코드 일곱 개 등록을 보고했다.\n"
@@ -858,7 +986,7 @@ class SearchEvidenceTests(unittest.TestCase):
             with self.subTest(limit=limit):
                 result = self.search(query, limit)
                 self.assertTrue(result["results"])
-                self.assertEqual(result["answer_state"]["state"], "abstain")
+                self.assertEqual(result["answer_state"]["state"], "evidence")
 
     def test_confirmation_binds_actor_and_full_object_instead_of_document_words(self):
         query = "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했나?"
@@ -874,7 +1002,7 @@ class SearchEvidenceTests(unittest.TestCase):
         ):
             self.note("network", body)
             with self.subTest(body=body):
-                self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+                self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
 
     def test_confirmation_negation_uncertainty_and_plans_are_not_completion(self):
         for ending in (
@@ -885,9 +1013,9 @@ class SearchEvidenceTests(unittest.TestCase):
         ):
             self.note("network", f"김민수가 ExampleMiner NFS 복구 완료를 직접 {ending}.")
             with self.subTest(ending=ending):
-                self.assertEqual(self.search("김민수가 ExampleMiner NFS 복구 완료를 직접 확인했나?")["answer_state"]["state"], "abstain")
+                self.assertEqual(self.search("김민수가 ExampleMiner NFS 복구 완료를 직접 확인했나?")["answer_state"]["state"], "evidence")
 
-    def test_confirmed_actor_and_compound_object_are_supported(self):
+    def test_confirmation_questions_preserve_sources_without_verdicts(self):
         self.note("network", "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했다. 이영희는 회의에 참여했다.")
         for query in (
             "김민수가 ExampleMiner DNS 등록과 NFS 복구 완료를 직접 확인했나?",
@@ -898,12 +1026,12 @@ class SearchEvidenceTests(unittest.TestCase):
         ):
             for limit in (1, 4, 20):
                 with self.subTest(query=query, limit=limit):
-                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "supported")
+                    self.assertEqual(self.search(query, limit)["answer_state"]["state"], "evidence")
         self.note("network", "김민수가 ExampleMiner DNS 등록을 직접 확인했다. NFS 복구 완료는 미확인이다.")
-        self.assertEqual(self.search("김민수가 ExampleMiner DNS 등록을 직접 확인했나?")["answer_state"]["state"], "supported")
-        self.assertEqual(self.search("ExampleMiner NFS 복구 상태 확인해줘")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("김민수가 ExampleMiner DNS 등록을 직접 확인했나?")["answer_state"]["state"], "evidence")
+        self.assertEqual(self.search("ExampleMiner NFS 복구 상태 확인해줘")["answer_state"]["state"], "evidence")
 
-    def test_unparsed_confirmation_actor_and_semantic_candidates_cannot_pass(self):
+    def test_unparsed_confirmation_actor_and_semantic_candidates_remain_evidence(self):
         self.note("network", "김민수가 ExampleMiner NFS 복구 완료를 직접 확인했다. 이영희는 회의에 참여했다.")
         documents = core.vault_documents(self.settings)
         for query in (
@@ -915,19 +1043,19 @@ class SearchEvidenceTests(unittest.TestCase):
             "이영희(검토자) ExampleMiner NFS 복구 완료를 직접 확인했나?",
         ):
             with self.subTest(query=query):
-                self.assertEqual(self.search(query)["answer_state"]["state"], "abstain")
+                self.assertEqual(self.search(query)["answer_state"]["state"], "evidence")
                 result = {**documents[0], "match": "semantic"}
                 evidence = core.query_evidence(query, [result], documents)
-                self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "abstain")
+                self.assertEqual(core.rag_answer_state([result], "current", evidence)["state"], "evidence")
 
     def test_english_confirmation_attribution_and_scope(self):
         for body, expected in (
-            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion.", "supported"),
-            ("Bob personally confirmed ProjectX DNS registration and NFS recovery completion. Alice attended.", "abstain"),
-            ("Alice personally confirmed ProjectX DNS registration. NFS recovery completion remains unconfirmed.", "abstain"),
-            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion is pending.", "abstain"),
-            ("Alice did not confirm ProjectX DNS registration and NFS recovery completion.", "abstain"),
-            ("Alice will confirm ProjectX DNS registration and NFS recovery completion.", "abstain"),
+            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion.", "evidence"),
+            ("Bob personally confirmed ProjectX DNS registration and NFS recovery completion. Alice attended.", "evidence"),
+            ("Alice personally confirmed ProjectX DNS registration. NFS recovery completion remains unconfirmed.", "evidence"),
+            ("Alice personally confirmed ProjectX DNS registration and NFS recovery completion is pending.", "evidence"),
+            ("Alice did not confirm ProjectX DNS registration and NFS recovery completion.", "evidence"),
+            ("Alice will confirm ProjectX DNS registration and NFS recovery completion.", "evidence"),
         ):
             self.note("network", body)
             with self.subTest(body=body):
@@ -939,15 +1067,15 @@ class SearchEvidenceTests(unittest.TestCase):
         for limit in (1, 4, 20):
             self.assertEqual(self.search("김민수가 ExampleMiner NFS 복구 완료를 직접 확인했나?", limit)["answer_state"]["state"], "review_required")
 
-    def test_original_confirmation_question_requires_each_object_qualifier(self):
+    def test_confirmation_variants_keep_original_object_qualifiers(self):
         query = "김민수가 CoverageMiner LAN DNS A 레코드 일곱 개와 NFS 복구 완료를 직접 확인했나?"
         body = "김민수가 CoverageMiner LAN DNS A 레코드 일곱 개와 NFS 복구 완료를 직접 확인했다."
         for text, expected in (
-            (body, "supported"),
-            (body.replace("일곱", "다섯"), "abstain"),
-            (body.replace("DNS A", "DNS CNAME"), "abstain"),
-            (body.replace("직접 ", ""), "abstain"),
-            (body.replace("완료", "미완료"), "abstain"),
+            (body, "evidence"),
+            (body.replace("일곱", "다섯"), "evidence"),
+            (body.replace("DNS A", "DNS CNAME"), "evidence"),
+            (body.replace("직접 ", ""), "evidence"),
+            (body.replace("완료", "미완료"), "evidence"),
         ):
             self.note("network", text)
             for limit in (1, 4, 20):
@@ -956,9 +1084,9 @@ class SearchEvidenceTests(unittest.TestCase):
 
     def test_approval_does_not_bypass_a_confirmation_claim(self):
         self.note("approval", "김민수가 ExampleMiner FP16 도입을 승인했다.")
-        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "abstain")
+        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "evidence")
         self.note("approval", "김민수가 ExampleMiner FP16 도입 승인을 직접 확인했다.")
-        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("김민수가 ExampleMiner FP16 도입 승인을 직접 확인했나?")["answer_state"]["state"], "evidence")
 
     def test_related_conflict_survives_all_limits_and_reverse_only_relation(self):
         self.note("comparison", "ExampleMiner FP16 comparison uses the same snapshot.")
@@ -979,17 +1107,17 @@ class SearchEvidenceTests(unittest.TestCase):
         evidence = core.query_evidence("how is deployment undone", [item], documents)
         self.assertEqual(evidence, [])
         self.assertEqual(core.rag_answer_state([item], "current", evidence), {
-            "state": "evidence", "reason": "semantic_candidates_require_verification",
+            "state": "evidence", "reason": "retrieved_sources_require_interpretation",
         })
         for query in ("없는프로젝트QZV981", "홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록"):
             evidence = core.query_evidence(query, [item], documents)
-            self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "abstain")
+            self.assertEqual(core.rag_answer_state([item], "current", evidence)["state"], "evidence")
 
-    def test_aliases_preserve_paraphrase_support(self):
+    def test_aliases_preserve_paraphrase_retrieval(self):
         self.note("rollback", "Rollback the release to the prior build.", subject_aliases=["undo deployment"])
-        self.assertEqual(self.search("undo deployment")["answer_state"]["state"], "supported")
+        self.assertEqual(self.search("undo deployment")["answer_state"]["state"], "evidence")
 
-    def test_semantic_retrieval_keeps_candidates_without_overriding_question_guards(self):
+    def test_semantic_retrieval_keeps_candidates_without_claim_guards(self):
         self.note("rollback", "Rollback the release to the prior build.")
         settings = replace(self.settings, embedding_provider="hash")
         vector = [1.0] + [0.0] * (core.HASH_EMBEDDING_DIMENSIONS - 1)
@@ -999,8 +1127,8 @@ class SearchEvidenceTests(unittest.TestCase):
             core.index_vault(settings)
             for query, expected in (
                 ("how is deployment undone", "evidence"),
-                ("없는프로젝트QZV981", "abstain"),
-                ("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록", "abstain"),
+                ("없는프로젝트QZV981", "evidence"),
+                ("홍길동이 ExampleMiner FP16 도입을 최종 승인했다는 기록", "evidence"),
             ):
                 for limit in (1, 4, 20):
                     result = core.search_vault(settings, AGENT, query, limit=limit, bundle="current")
