@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import core
-from .wiki import MARKED_DISPOSITIONS, _SRC_RE, _cells, _review_items, review_targets
+from .wiki import CLAIM_DISPOSITIONS, MARKED_DISPOSITIONS, _SRC_RE, _cells, _raw_items, _review_items, _review_records, review_item_errors, review_targets, unreviewed_ranges
 
 
 def digest(value: Any) -> str:
@@ -32,6 +32,112 @@ def knowledge_path(path: str) -> bool:
         and not any(part in core.RAG_EXCLUDED_DIRS for part in PurePosixPath(path).parts)
         and path.startswith(("10_User/", "20_Projects/", "50_Knowledge/", "30_Conversations/summaries/"))
     )
+
+
+def compaction_sources(plan: dict, documents: list[dict]) -> list[dict]:
+    by_path = {doc["path"]: doc for doc in documents}
+    nodes = plan["selected"]["graph"]["nodes"]
+    frozen = {node["path"]: node.get("sha256") for node in nodes if node.get("type") == "source_file"}
+    items = []
+    for path in plan["selected"]["source_paths"]:
+        doc = by_path.get(path)
+        if (not path.startswith(("30_Conversations/raw/", "40_Agents/")) or not doc
+                or doc["document_hash"] != frozen.get(path)):
+            raise ValueError(f"source does not match Git base: {path}")
+        for item in _raw_items(doc, body=True):
+            item_id = "item:" + sha256(f"{path}\0{item['locator']}".encode()).hexdigest()[:16]
+            items.append({**item, "id": item_id, "path": path, "source_sha256": doc["document_hash"]})
+    if len({item["id"] for item in items}) != len(items):
+        raise ValueError("ambiguous item identity")
+    if {item["id"] for item in items} != {node["id"] for node in nodes if node.get("type") == "raw_item"}:
+        raise ValueError("source items differ from the saved graph")
+    return items
+
+
+def read_compaction(plan: dict, sources: list[dict], cursor: str | None, max_characters: int) -> dict:
+    if not 256 <= max_characters <= 16000:
+        raise ValueError("max-characters must be in 256..16000")
+    scope = digest([plan["revision"], [(item["id"], item["source_sha256"]) for item in sources]])
+    index, offset = 0, 0
+    if cursor:
+        bound, raw_index, raw_offset = cursor.split(":")
+        index, offset = int(raw_index), int(raw_offset)
+        if bound != scope or not 0 <= index < len(sources) or not 0 <= offset < max(1, len(sources[index]["body"])):
+            raise ValueError("invalid or stale read cursor")
+
+    def excerpt(item: dict, start: int, end: int) -> dict:
+        return {**{key: value for key, value in item.items() if key != "body"},
+                "span": [start, end], "text": item["body"][start:end]}
+
+    first, budget, primary = index, max_characters, []
+    while index < len(sources) and budget > 0 and len(primary) < 32:
+        item = sources[index]
+        end = min(len(item["body"]), offset + budget)
+        primary.append(excerpt(item, offset, end))
+        budget -= end - offset
+        offset = end
+        if end < len(item["body"]):
+            break
+        index, offset = index + 1, 0
+    context = []
+    if primary:
+        # Adjacent speakers are context only, never counted as processed by this page.
+        if first > 0 and sources[first - 1]["path"] == primary[0]["path"]:
+            item = sources[first - 1]
+            context.append(excerpt(item, max(0, len(item["body"]) - 400), len(item["body"])))
+        next_item = index + 1 if offset else index
+        if next_item < len(sources) and sources[next_item]["path"] == primary[-1]["path"]:
+            context.append(excerpt(sources[next_item], 0, min(400, len(sources[next_item]["body"]))))
+    return {"status": "ok", "primary": primary, "context_only": context,
+            "next_cursor": f"{scope}:{index}:{offset}" if index < len(sources) else None,
+            "source_items": len(sources), "offset_unit": "Unicode code points; start inclusive, end exclusive",
+            "review_recorded": False}
+
+
+def record_compaction(plan: dict, sources: list[dict], entries: list[dict]) -> dict:
+    records = _review_records(entries)
+    if any("ids" in entry and entry.get("disposition") in CLAIM_DISPOSITIONS for entry in entries):
+        raise ValueError("claim items cannot be grouped under ids")
+    if not 1 <= len(records) <= 100:
+        raise ValueError("record 1..100 source items per call")
+    by_id = {item["id"]: item for item in sources}
+    errors, gaps = [], {}
+    for record in records:
+        item = by_id.get(record["id"])
+        if item is None:
+            raise ValueError(f"unknown source item: {record['id']}")
+        gaps[record["id"]] = unreviewed_ranges(record, len(item["body"]))
+        for entry in _review_items([record]):
+            errors += review_item_errors(entry, item["body"], item.get("event_role", ""))
+            if any(not knowledge_path(target) for target in entry["targets"]):
+                raise ValueError("review targets must be canonical Markdown paths")
+            anchors = entry.get("anchors", {})
+            if (not isinstance(anchors, dict) or not set(anchors) <= set(entry["targets"])
+                    or any(not (isinstance(value, str) and value.strip()) and not (
+                        isinstance(value, list) and value and all(isinstance(q, str) and q.strip() for q in value)
+                    ) for value in anchors.values())):
+                raise ValueError("anchors must map targets to quotes")
+    if errors:
+        raise ValueError("; ".join(sorted(set(errors))))
+    updates = {entry["id"]: entry for entry in records}
+    existing = _review_records(plan["review"]["items"])
+    if set(updates) - {entry["id"] for entry in existing}:
+        raise ValueError("recorded items must already belong to the plan")
+    updated = []
+    for entry in plan["review"]["items"]:
+        if "ids" not in entry:
+            updated.append(updates.get(entry["id"], entry))
+            continue
+        remaining = [item_id for item_id in entry["ids"] if item_id not in updates]
+        if remaining:
+            updated.append({**entry, "ids": remaining})
+        updated.extend(updates[item_id] for item_id in entry["ids"] if item_id in updates)
+    if updated != plan["review"]["items"]:
+        plan["review"]["items"] = updated
+        plan.pop("finish_checkpoint", None)
+    # Per-item review bindings are recomputed later; unchanged items can still reuse their review.
+    return {"status": "ok", "recorded_items": len(records), "unreviewed_ranges": gaps,
+            "semantic_review": "not_recorded", "approval": "not_checked"}
 
 
 def concurrent_raw_captures(vault: Path, plan: dict, before: list[dict], current: list[dict]) -> tuple[list[dict], dict[str, int]]:
@@ -264,8 +370,8 @@ def review_binding(plan: dict, before: list[dict], after: list[dict]) -> dict:
     context_paths.update(("CURATOR.md", "CURATOR.local.md"))
     context = {path: original.get(path) for path in sorted(context_paths)}
     fingerprints = {}
-    for entry in _review_items(review["items"]):
-        targets = entry["targets"]
+    for entry in _review_records(review["items"]):
+        targets = sorted({target for part in _review_items([entry]) for target in part["targets"]})
         patch = {path: {"before": original.get(path), "after": current.get(path)} for path in targets}
         fingerprints[entry["id"]] = digest({
             "context": context, "target_patch": patch,

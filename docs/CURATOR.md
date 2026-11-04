@@ -13,7 +13,7 @@ provenance_mode: human_asserted
 relations: {"supports":[],"contradicts":[],"supersedes":[]}
 retrieval_tier: primary
 privacy: normal
-protocol_version: 25
+protocol_version: 26
 ---
 
 # PersonaVault Curator Protocol
@@ -131,6 +131,31 @@ the list and re-judges them. The Curator confirms a user clarification that caus
 Do not re-analyze a deferral whose conditions are unchanged every time. If the list is not given, the files become candidates again.
 If everything is deferred, report only the conditions and finish. Do not work around dirty/base/approval problems with individual deferrals.
 
+### Bounded source reading
+
+Use `compact-read` instead of printing the full graph or whole oversized raw file:
+
+```bash
+uv run pvg-wiki --vault /path/to/vault compact-read /path/to/vault/.tmp/curating/plan.json
+# Continue with the exact next_cursor until it is null; adjust --max-characters only when needed.
+uv run pvg-wiki --vault /path/to/vault compact-read /path/to/vault/.tmp/curating/plan.json --cursor "<next_cursor>"
+```
+
+It reads only selected sources from the plan's Git base, without live-Vault scanning, Qdrant or indexing.
+`primary` contains IDs, source hashes, attribution (`role`/`event_role`), text and `[start,end]` spans within each item's body.
+Offsets are Unicode code points, start inclusive and end exclusive, not bytes or JavaScript UTF-16 positions.
+The default primary budget is 6,000 characters (256..16,000), at most 32 items, plus at most 800 characters of
+`context_only` from adjacent speakers. Context excerpts may be partial; consult their spans and character counts.
+They do not count as reviewed primary text. A cursor is bound to the source snapshot; a changed base/source requires a new plan.
+Reading never records a judgment, and reaching the last page does not grant approval or establish semantic coverage.
+
+The plugin exposes the same implementation as `pvg_compact_read` and `pvg_compact_record` on both agent platforms.
+These are **local** curation tools, not Gateway endpoints: the MCP host needs a local Git Vault and `pvg-wiki` on PATH.
+From the matching trusted Gateway checkout, `uv tool install --force .` installs or updates the CLI; ensure the executable directory is on the
+agent host PATH, then restart its MCP server. Ordinary remote search/memo use does not need this installation.
+Pass absolute `vault` and `plan` paths to MCP. Missing CLI means stop and set it up, not download or execute a guessed helper.
+Keep the record tool approval-controlled. It only edits the staged plan, never raw, canonical Markdown, DBs or Git history.
+
 ## 3. Interpret once and group the judgments
 
 Read by linking the user request -> agent action -> user reaction or correction -> result. Distinguish the attribution of the original user, agent delegation,
@@ -148,7 +173,7 @@ subagent results, and supplied material. Do not turn a whole session into a sing
 `merge` and `replace` remain deprecated and accepted with a warning for existing raw plans; they cannot target `BRIEF.md`, `DECISIONS.md`, `PROFILE.md` or `OBSERVATIONS.md`. Protocol 24 adds ownership transfer without removing these unrelated compatibility paths.
 
 Items with the same judgment, target, and evidence can be recorded as one entry in `review.items`.
-Use either a single `id` or a list of `ids`. Each ID must be included exactly once across the whole review.
+Use either a single `id` or a list of `ids`. Each ID must be included exactly once at the top level of the whole review.
 The typed dispositions (everything except `already-covered`, `discard`, `hold`, and the deprecated `merge`/`replace`) take one `id` each; do not group them.
 Do not fill coverage with a default judgment, a wildcard, or "discard the rest". Do not copy the gist repeatedly into the inventory, summary, or report.
 Use the IDs, hashes, and character counts produced by the tool; the agent must not regenerate them or list them by hand.
@@ -157,6 +182,36 @@ Select the ID list for an identical judgment programmatically from the plan as w
 ```json
 {"ids":["item:...","item:..."],"disposition":"already-covered","targets":["20_Projects/Project/current.md"],"reason":"The same conclusion under the same conditions is preserved in that document"}
 ```
+
+### Multiple judgments in one event
+
+Do not force a long event into one disposition. Keep its original ID and use `parts`, each with its own source span,
+disposition, targets, reason, and claim quote/anchors. This changes the staged review only, not raw format or identity:
+
+```json
+{"id":"item:...","parts":[
+  {"span":[0,120],"disposition":"knowledge","targets":["50_Knowledge/Topic.md"],"reason":"Preserve the observed restriction.","quote":"<exact source quote within this span>","anchors":{"50_Knowledge/Topic.md":"<draft line quote>"}},
+  {"span":[120,180],"disposition":"hold","targets":[],"reason":"Attribution of the final statement is unresolved."}
+]}
+```
+
+The example offsets are placeholders; take real offsets from the read output and exact source text.
+Overlapping spans are allowed when one passage contains several distinct claims. Their union must cover the entire
+item before final checks pass; a gap blocks final review, and any `hold` prevents deleting its source file.
+Explicitly judge low-value ranges instead of silently treating unquoted text as discarded. Range coverage is only bookkeeping,
+not proof of semantic preservation. Each quote must occur inside its own span, and every part inherits the original speaker;
+subagent parts cannot become user instructions/preferences. Existing whole-item and grouped reviews remain valid.
+All parts keep the parent's `pvg-src` and session identity, so splitting an event does not create independent evidence.
+
+Use `compact-record` with stdin JSON containing `plan_sha256` from the latest read/record response and `items` in this format
+(one to 100 source IDs per call). MCP takes those same two arguments alongside `vault` and `plan`.
+It replaces the complete review record for each supplied ID; include previous parts when extending an unfinished item.
+It validates IDs, roles, quotes, spans and target paths, then returns `unreviewed_ranges` and the new `plan_sha256`.
+It may save partial coverage for continuation, but cannot authorize deletion, mark independent review complete, or apply drafts.
+Stale hashes are rejected rather than overwritten. Changed parts invalidate that parent's review binding; unchanged items can reuse theirs.
+Writers use a short-lived `plan.json.lock`. If an interrupted process leaves it behind, first confirm no writer is active,
+then remove only the stale lock and retry with the current plan hash; never delete the plan to bypass a conflict.
+The final annotation/review/approval/check/finish sequence below is unchanged; do not add another audit round.
 
 A typed item (every disposition above except `already-covered`, `discard` and `hold`) adds these fields:
 

@@ -116,7 +116,9 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 This saves a raw note (not approved knowledge) and finds it again; `--view current` may legitimately be empty on a new Vault.
 Windows PowerShell version: [docs/setup.md](docs/setup.md#3-set-up-the-agent-plugin-on-each-pc).
 
-The plugin also ships a small MCP server with two tools, `pvg_search` and `pvg_memo`. Agents call them instead of the helper commands. They read the same token config, so the installer is still required and the helpers remain the fallback. In Claude Code they are named `mcp__plugin_persona-vault_pvg__pvg_search` and `mcp__plugin_persona-vault_pvg__pvg_memo`: allowlist only `pvg_search` if you want searches without an approval prompt, and keep `pvg_memo` prompting, because a note is saved only when you explicitly ask.
+The plugin also ships a small MCP server with Gateway tools `pvg_search` and `pvg_memo`. Agents call them instead of the helper commands. They read the same token config, so the installer is still required and the helpers remain the fallback. In Claude Code they are named `mcp__plugin_persona-vault_pvg__pvg_search` and `mcp__plugin_persona-vault_pvg__pvg_memo`: allowlist only `pvg_search` if you want searches without an approval prompt, and keep `pvg_memo` prompting, because a note is saved only when you explicitly ask.
+
+Optional local curation tools, `pvg_compact_read` and `pvg_compact_record`, call the same CLI implementation. They require a local Git Vault and `pvg-wiki` on the MCP host PATH. They page through source text and record judgments in the staged plan, without deleting raw, granting approval or indexing. See the [Curator protocol](docs/CURATOR.md) for setup and usage.
 
 ## How it works
 
