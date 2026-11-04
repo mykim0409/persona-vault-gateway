@@ -1,0 +1,865 @@
+{
+  "schema": 1,
+  "description": "Synthetic retrieval-only migration corpus. Reading labels are evaluator annotations, never Gateway inputs or required Gateway verdicts.",
+  "groups": [
+    {
+      "id": "actor-ko",
+      "category": "attribution",
+      "documents": [
+        {
+          "id": "approval",
+          "body": "김민수가 Orion FP16 도입을 승인했다. 홍길동은 실험에 참여했다."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "approval",
+          "quotes": [
+            "김민수가 Orion FP16 도입을 승인했다.",
+            "홍길동은 실험에 참여했다."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "correct",
+          "query": "김민수는 Orion FP16 도입을 승인했나?",
+          "reading": "supports"
+        },
+        {
+          "id": "wrong-subject",
+          "query": "홍길동이 Orion FP16 도입을 승인했다는 기록",
+          "reading": "not_established"
+        },
+        {
+          "id": "wrong-topic",
+          "query": "홍길동은 Orion FP16 도입을 승인했나?",
+          "reading": "not_established"
+        },
+        {
+          "id": "wrong-identity",
+          "query": "Orion FP16 도입을 승인한 사람은 홍길동인가?",
+          "reading": "not_established"
+        }
+      ]
+    },
+    {
+      "id": "actor-en",
+      "category": "attribution",
+      "documents": [
+        {
+          "id": "approval",
+          "body": "Orion FP16 adoption was approved by Alice. Bob ran the trial."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "approval",
+          "quotes": [
+            "Orion FP16 adoption was approved by Alice.",
+            "Bob ran the trial."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "correct",
+          "query": "Did Alice approve Orion FP16 adoption?",
+          "reading": "supports"
+        },
+        {
+          "id": "wrong",
+          "query": "Did Bob approve Orion FP16 adoption?",
+          "reading": "not_established"
+        },
+        {
+          "id": "lookup",
+          "query": "Who approved Orion FP16 adoption?",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "negation",
+      "category": "negation",
+      "documents": [
+        {
+          "id": "decision",
+          "body": "김민수가 Orion FP16 도입을 승인하지 않았다."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "decision",
+          "quotes": [
+            "김민수가 Orion FP16 도입을 승인하지 않았다."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "affirmative",
+          "query": "김민수가 Orion FP16 도입을 승인했나?",
+          "reading": "contradicts"
+        },
+        {
+          "id": "negative",
+          "query": "Orion FP16 도입 미승인 기록",
+          "reading": "supports"
+        }
+      ]
+    },
+    {
+      "id": "pending",
+      "category": "uncertainty",
+      "documents": [
+        {
+          "id": "status",
+          "body": "Orion DNS registration succeeded. Orion NFS recovery remains unverified; a test is planned."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "status",
+          "quotes": [
+            "Orion DNS registration succeeded.",
+            "Orion NFS recovery remains unverified; a test is planned."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "complete",
+          "query": "Orion DNS registration and NFS recovery are complete",
+          "reading": "not_established"
+        },
+        {
+          "id": "lookup",
+          "query": "Orion DNS NFS recovery status",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "tested-not-adopted",
+      "category": "action-scope",
+      "documents": [
+        {
+          "id": "trial",
+          "body": "Alice tested Orion FP16 on a sandbox. Production adoption was not approved."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "trial",
+          "quotes": [
+            "Alice tested Orion FP16 on a sandbox.",
+            "Production adoption was not approved."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "trial",
+          "query": "Orion FP16 sandbox trial",
+          "reading": "lookup"
+        },
+        {
+          "id": "adoption",
+          "query": "Alice approved Orion FP16 production adoption",
+          "reading": "contradicts"
+        }
+      ]
+    },
+    {
+      "id": "decimal",
+      "category": "quantity",
+      "documents": [
+        {
+          "id": "speed",
+          "body": "Orion benchmark speedup was 5.5x, measured on the same workload."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "speed",
+          "quotes": [
+            "Orion benchmark speedup was 5.5x, measured on the same workload."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "correct",
+          "query": "Orion benchmark speedup 5.5x",
+          "reading": "supports"
+        },
+        {
+          "id": "wrong",
+          "query": "Orion benchmark speedup 6.5x",
+          "reading": "contradicts"
+        },
+        {
+          "id": "equivalent",
+          "query": "Orion benchmark speedup 5.50x",
+          "reading": "supports"
+        }
+      ]
+    },
+    {
+      "id": "units",
+      "category": "quantity",
+      "documents": [
+        {
+          "id": "quota",
+          "body": "Orion quota is 30 requests per minute, not per second."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "quota",
+          "quotes": [
+            "Orion quota is 30 requests per minute, not per second."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "minute",
+          "query": "Orion quota 30 requests per minute",
+          "reading": "supports"
+        },
+        {
+          "id": "second",
+          "query": "Orion quota 30 requests per second",
+          "reading": "contradicts"
+        }
+      ]
+    },
+    {
+      "id": "time",
+      "category": "temporal-scope",
+      "documents": [
+        {
+          "id": "trial",
+          "body": "Orion rollback succeeded on 2026-09-12. No trial was run on 2026-09-13."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "trial",
+          "quotes": [
+            "Orion rollback succeeded on 2026-09-12.",
+            "No trial was run on 2026-09-13."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "correct",
+          "query": "Orion rollback succeeded 2026-09-12",
+          "reading": "supports"
+        },
+        {
+          "id": "wrong",
+          "query": "Orion rollback succeeded 2026-09-13",
+          "reading": "contradicts"
+        }
+      ]
+    },
+    {
+      "id": "environment",
+      "category": "applicability",
+      "documents": [
+        {
+          "id": "recovery",
+          "body": "Orion recovery succeeded on Linux after stopping the writer. Windows has not been tested."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "recovery",
+          "quotes": [
+            "Orion recovery succeeded on Linux after stopping the writer.",
+            "Windows has not been tested."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "linux",
+          "query": "Orion recovery Linux",
+          "reading": "supports"
+        },
+        {
+          "id": "windows",
+          "query": "Orion recovery succeeded on Windows",
+          "reading": "not_established"
+        }
+      ]
+    },
+    {
+      "id": "condition",
+      "category": "applicability",
+      "documents": [
+        {
+          "id": "procedure",
+          "body": "Orion rollback requires stopping the writer first; it is unsafe while the writer is running."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "procedure",
+          "quotes": [
+            "Orion rollback requires stopping the writer first; it is unsafe while the writer is running."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "stopped",
+          "query": "Orion rollback requires stopping the writer",
+          "reading": "supports"
+        },
+        {
+          "id": "running",
+          "query": "Orion rollback is safe while the writer is running",
+          "reading": "contradicts"
+        }
+      ]
+    },
+    {
+      "id": "unknown-property",
+      "category": "missing-evidence",
+      "documents": [
+        {
+          "id": "minutes",
+          "body": "Orion meeting minutes: the background color is unspecified."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "minutes",
+          "quotes": [
+            "Orion meeting minutes: the background color is unspecified."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "What is the background color of Orion meeting minutes?",
+          "reading": "lookup"
+        },
+        {
+          "id": "invented",
+          "query": "Orion meeting minutes describe a blue background color",
+          "reading": "not_established"
+        }
+      ]
+    },
+    {
+      "id": "separate-rows",
+      "category": "claim-boundary",
+      "documents": [
+        {
+          "id": "matrix",
+          "body": "| Project | State |\n| --- | --- |\n| Orion | DNS registered |\n| Vega | NFS restored |"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "matrix",
+          "quotes": [
+            "| Orion | DNS registered |",
+            "| Vega | NFS restored |"
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "Orion DNS Vega NFS status",
+          "reading": "lookup"
+        },
+        {
+          "id": "mixed",
+          "query": "Orion NFS restored",
+          "reading": "not_established"
+        }
+      ]
+    },
+    {
+      "id": "same-claim-conflict",
+      "category": "conflict",
+      "documents": [
+        {
+          "id": "enabled",
+          "body": "Orion lock mode should be enabled; validation remains disputed.",
+          "metadata": {
+            "subject_id": "orion-lock",
+            "conflict_state": "unresolved",
+            "relations": {
+              "contradicts": [
+                "disabled"
+              ]
+            }
+          }
+        },
+        {
+          "id": "disabled",
+          "body": "Orion lock mode should be disabled; validation remains disputed.",
+          "metadata": {
+            "subject_id": "orion-lock",
+            "conflict_state": "unresolved"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "id": "enabled",
+          "quotes": [
+            "Orion lock mode should be enabled; validation remains disputed."
+          ],
+          "metadata": {
+            "conflict_state": "unresolved"
+          }
+        },
+        {
+          "id": "disabled",
+          "quotes": [
+            "Orion lock mode should be disabled; validation remains disputed."
+          ],
+          "metadata": {
+            "conflict_state": "unresolved"
+          }
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "Orion lock mode",
+          "reading": "conflicting"
+        },
+        {
+          "id": "one-side",
+          "query": "Orion lock mode enabled",
+          "reading": "conflicting"
+        }
+      ]
+    },
+    {
+      "id": "unrelated-conflict",
+      "category": "conflict",
+      "documents": [
+        {
+          "id": "precision",
+          "body": "Orion FP16 comparison used the same snapshot.",
+          "metadata": {
+            "subject_id": "orion-precision"
+          }
+        },
+        {
+          "id": "cleanup",
+          "body": "Orion snapshot cleanup remains disputed. FP16 scheduling is unrelated.",
+          "metadata": {
+            "subject_id": "orion-cleanup",
+            "conflict_state": "unresolved"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "id": "precision",
+          "quotes": [
+            "Orion FP16 comparison used the same snapshot."
+          ],
+          "metadata": {
+            "conflict_state": "none"
+          }
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "Orion FP16 comparison snapshot",
+          "reading": "supports"
+        }
+      ]
+    },
+    {
+      "id": "history",
+      "category": "view-boundary",
+      "documents": [
+        {
+          "id": "current",
+          "body": "Orion timeout is 45 seconds from 2026-09-01.",
+          "metadata": {
+            "temporal_state": "current"
+          }
+        },
+        {
+          "id": "previous",
+          "body": "Orion timeout was 15 seconds until 2026-08-31.",
+          "metadata": {
+            "temporal_state": "superseded"
+          }
+        }
+      ],
+      "queries": [
+        {
+          "id": "current",
+          "query": "Orion timeout",
+          "view": "current",
+          "reading": "lookup",
+          "exclude_ids": [
+            "previous"
+          ],
+          "evidence": [
+            {
+              "id": "current",
+              "quotes": [
+                "Orion timeout is 45 seconds from 2026-09-01."
+              ],
+              "metadata": {
+                "role": "current",
+                "temporal_state": "current"
+              }
+            }
+          ]
+        },
+        {
+          "id": "history",
+          "query": "Orion timeout",
+          "view": "history",
+          "reading": "lookup",
+          "exclude_ids": [
+            "current"
+          ],
+          "evidence": [
+            {
+              "id": "previous",
+              "quotes": [
+                "Orion timeout was 15 seconds until 2026-08-31."
+              ],
+              "metadata": {
+                "role": "history",
+                "temporal_state": "superseded"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "raw-authority",
+      "category": "authority",
+      "documents": [
+        {
+          "id": "suggestion",
+          "path": "30_Conversations/raw/suggestion.md",
+          "body": "Orion cache suggestion: this might work but has not been tested.",
+          "metadata": {
+            "memory_type": "canonical",
+            "review_state": "human_accepted",
+            "temporal_state": "current"
+          }
+        }
+      ],
+      "queries": [
+        {
+          "id": "evidence",
+          "query": "Orion cache suggestion",
+          "view": "evidence",
+          "reading": "not_established",
+          "evidence": [
+            {
+              "id": "suggestion",
+              "quotes": [
+                "Orion cache suggestion: this might work but has not been tested."
+              ],
+              "metadata": {
+                "role": "evidence",
+                "review_state": "unreviewed"
+              }
+            }
+          ]
+        },
+        {
+          "id": "current",
+          "query": "Orion cache suggestion",
+          "view": "current",
+          "reading": "no_source",
+          "evidence": [],
+          "exclude_ids": [
+            "suggestion"
+          ],
+          "max_extra_results": 0
+        }
+      ]
+    },
+    {
+      "id": "semantic-paraphrase",
+      "category": "semantic-candidate",
+      "backend": "semantic-fixture",
+      "documents": [
+        {
+          "id": "restore",
+          "body": "이전 빌드로 돌아가 다시 배포한다. 먼저 쓰기 프로세스를 중지한다."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "restore",
+          "quotes": [
+            "이전 빌드로 돌아가 다시 배포한다.",
+            "먼저 쓰기 프로세스를 중지한다."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "undo",
+          "query": "undo a release",
+          "reading": "lookup"
+        },
+        {
+          "id": "recover",
+          "query": "recover the earlier deployment",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "cross-language-alias",
+      "category": "alias",
+      "documents": [
+        {
+          "id": "policy",
+          "body": "The downstream seed is fixed per independent run, not per retry.",
+          "metadata": {
+            "subject_aliases": [
+              "다운스트림 시드 정책"
+            ]
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "id": "policy",
+          "quotes": [
+            "The downstream seed is fixed per independent run, not per retry."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "ko",
+          "query": "다운스트림 시드 정책",
+          "reading": "lookup"
+        },
+        {
+          "id": "en",
+          "query": "downstream seed policy",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "linked-condition",
+      "category": "linked-context",
+      "documents": [
+        {
+          "id": "procedure",
+          "body": "Orion rollback uses the saved build; see [limits](conditions.md#limits)."
+        },
+        {
+          "id": "conditions",
+          "body": "## Limits\n\nOnly after stopping the writer. Windows is unverified."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "procedure",
+          "quotes": [
+            "Orion rollback uses the saved build;"
+          ]
+        },
+        {
+          "id": "conditions",
+          "quotes": [
+            "Only after stopping the writer. Windows is unverified."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "Orion rollback",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "multiple-passages",
+      "category": "passage-coverage",
+      "documents": [
+        {
+          "id": "runbook",
+          "body": "## Attempt\n\nOrion rollback failed with a locked database.\n\n## Retry\n\nOrion rollback succeeded after stopping the writer.\n\n## Scope\n\nOrion rollback was tested only on Linux; Windows remains unverified."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "runbook",
+          "quotes": [
+            "Orion rollback failed with a locked database.",
+            "Orion rollback succeeded after stopping the writer.",
+            "Orion rollback was tested only on Linux; Windows remains unverified."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "lookup",
+          "query": "Orion rollback",
+          "reading": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "unknown-project",
+      "category": "missing-evidence",
+      "documents": [
+        {
+          "id": "known",
+          "body": "Orion FP16 trial used the same snapshot."
+        }
+      ],
+      "queries": [
+        {
+          "id": "absent",
+          "query": "없는프로젝트QZV981",
+          "reading": "no_source",
+          "evidence": [],
+          "exclude_ids": [
+            "known"
+          ],
+          "max_extra_results": 0
+        },
+        {
+          "id": "known",
+          "query": "Orion FP16 trial",
+          "reading": "lookup",
+          "evidence": [
+            {
+              "id": "known",
+              "quotes": [
+                "Orion FP16 trial used the same snapshot."
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "table-distractors",
+      "category": "structure-and-noise",
+      "documents": [
+        {
+          "id": "inventory",
+          "body": "Orion unrelated housekeeping 0.\n\nOrion unrelated housekeeping 1.\n\nOrion unrelated housekeeping 2.\n\nOrion unrelated housekeeping 3.\n\nOrion unrelated housekeeping 4.\n\nOrion unrelated housekeeping 5.\n\nOrion unrelated housekeeping 6.\n\nOrion unrelated housekeeping 7.\n\nOrion unrelated housekeeping 8.\n\nOrion unrelated housekeeping 9.\n\nOrion unrelated housekeeping 10.\n\nOrion unrelated housekeeping 11.\n\nOrion unrelated housekeeping 12.\n\nOrion unrelated housekeeping 13.\n\nOrion unrelated housekeeping 14.\n\nOrion unrelated housekeeping 15.\n\nOrion unrelated housekeeping 16.\n\nOrion unrelated housekeeping 17.\n\nOrion unrelated housekeeping 18.\n\nOrion unrelated housekeeping 19.\n\n## Service matrix\n\n| Project | State |\n| --- | --- |\n| Orion | DNS registered |\n| Vega | NFS restored |"
+        },
+        {
+          "id": "noise0",
+          "body": "OtherProject unrelated housekeeping 0."
+        },
+        {
+          "id": "noise1",
+          "body": "OtherProject unrelated housekeeping 1."
+        },
+        {
+          "id": "noise2",
+          "body": "OtherProject unrelated housekeeping 2."
+        },
+        {
+          "id": "noise3",
+          "body": "OtherProject unrelated housekeeping 3."
+        },
+        {
+          "id": "noise4",
+          "body": "OtherProject unrelated housekeeping 4."
+        },
+        {
+          "id": "noise5",
+          "body": "OtherProject unrelated housekeeping 5."
+        },
+        {
+          "id": "noise6",
+          "body": "OtherProject unrelated housekeeping 6."
+        },
+        {
+          "id": "noise7",
+          "body": "OtherProject unrelated housekeeping 7."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "inventory",
+          "quotes": [
+            "| Orion | DNS registered |",
+            "| Vega | NFS restored |"
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "mixed",
+          "query": "Orion NFS restored",
+          "reading": "not_established",
+          "max_extra_results": 0,
+          "forbid_quotes": [
+            "unrelated housekeeping"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "attribution-paraphrases",
+      "category": "attribution-and-scope",
+      "documents": [
+        {
+          "id": "pilot",
+          "body": "최유진은 AtlasX의 macOS 시험만 허용했다. 박서준은 검토에 참여했다. Windows 운영 전환은 승인되지 않았다."
+        }
+      ],
+      "evidence": [
+        {
+          "id": "pilot",
+          "quotes": [
+            "최유진은 AtlasX의 macOS 시험만 허용했다.",
+            "박서준은 검토에 참여했다.",
+            "Windows 운영 전환은 승인되지 않았다."
+          ]
+        }
+      ],
+      "queries": [
+        {
+          "id": "question-tail",
+          "query": "AtlasX Windows 운영 승인자는 박서준이 맞죠?",
+          "reading": "contradicts"
+        },
+        {
+          "id": "passive",
+          "query": "박서준에 의해 AtlasX Windows 운영 전환이 승인된 건가요?",
+          "reading": "contradicts"
+        },
+        {
+          "id": "scope",
+          "query": "AtlasX macOS 시험 허용 범위",
+          "reading": "lookup"
+        }
+      ]
+    }
+  ]
+}

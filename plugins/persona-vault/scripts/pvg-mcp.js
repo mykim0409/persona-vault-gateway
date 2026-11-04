@@ -20,8 +20,10 @@ const list = (description) => ({ type: 'array', items: { type: 'string' }, descr
 const TOOLS = [{
   name: 'pvg_search',
   description: 'Search PersonaVault Gateway for prior notes, decisions, project history and raw evidence. Exact names, IDs and '
-    + 'error strings work well. Returns "Answer state: ..." then the context; abstain means insufficient evidence, '
-    + 'review_required means unresolved conflicting claims: present them without choosing a winner.',
+    + 'error strings work well. Returns "Answer state: ..." then source excerpts, not a truth verdict. '
+    + 'evidence/lexical_match is not proof; abstain means no relevant candidates; review_required flags unresolved source conflicts. '
+    + 'Read attribution, negation, dates, quantities and conditions; show relevant competing claims without choosing a winner. '
+    + 'linked_context is supplemental; read omission warnings. No automatic follow-up calls.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -41,7 +43,7 @@ const TOOLS = [{
     type: 'object',
     properties: {
       title: { ...text('Short subject line.'), minLength: 1 },
-      body: { ...text('Markdown body: situation, action, outcome, applicability, evidence, uncertainty.'), minLength: 1 },
+      body: { ...text('Markdown: keep each claim with its known actor, outcome, time, essential conditions and negation in one paragraph or table row. Add evidence and uncertainty; do not invent missing facts. Link to specific sections only for longer detail.'), minLength: 1 },
       note_type: { type: 'string', enum: NOTE_KINDS, default: 'observation' },
       kind: text('Narrower classification, e.g. debugging.'),
       outcome: { type: 'string', enum: OUTCOMES, default: 'unknown' },

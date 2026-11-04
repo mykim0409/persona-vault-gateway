@@ -197,7 +197,10 @@ def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Setting
         windows = next(item for item in result["results"] if item["document_id"] == "ep_cache_windows")
         assert windows["ranking"]["applicability"] < 0
     elif scenario_id == "negative-transfer-abstention":
-        assert result["answer_state"]["state"] == "abstain", result
+        assert result["answer_state"]["state"] == "evidence", result["answer_state"]
+        windows = next(item for item in result["results"] if item["document_id"] == "ep_windows_only")
+        assert windows["applicability"]["operating_system"] == "windows"
+        assert windows["ranking"]["applicability"] < 0
     elif scenario_id == "current-canonical-plus-pending":
         group = group_for(result, "token-policy")
         assert group["canonical"]["document_id"] == "kn_token_policy"
@@ -219,7 +222,9 @@ def validate(scenario: dict[str, Any], result: dict[str, Any], settings: Setting
         second = next(item for item in result["results"] if item["document_id"] == "ep_repro_second")
         assert second["method_refs"] == ["ep_repro_original"]
     elif scenario_id == "abstention-raw-evidence":
-        assert result["answer_state"]["state"] == "abstain"
+        assert result["answer_state"]["state"] == "evidence"
+        raw = next(item for item in result["results"] if item["document_id"] == "tr_raw_suggestion")
+        assert raw["memory_type"] == "transcript" and raw["review_state"] == "unreviewed"
     elif scenario_id == "auto-tier-order":
         assert found[:3] == expected["ordered_ids"], (scenario_id, found)
     elif scenario_id == "multi-chunk-document-dedupe":

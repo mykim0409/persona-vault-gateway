@@ -126,7 +126,7 @@ The plugin also ships a small MCP server with two tools, `pvg_search` and `pvg_m
    (`pvg-wiki`) is an experimental local CLI that proposes a plan; it never applies, commits, or
    pushes on its own, and it is not a background service.
 3. **Retrieve.** Keyword search, plus semantic search where it is available, returns results with
-   an `answer_state`, which is a signal and not a guarantee that a statement is true.
+   an `answer_state` describing available sources and conflict warnings, never a truth verdict.
 
 The product core is capture, plain Markdown, and keyword retrieval. Semantic search is an optional
 enhancement on top of it, and the Curator is a separate optional tool. The table shows what

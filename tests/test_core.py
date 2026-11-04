@@ -297,7 +297,7 @@ def run_semantic_disabled_checks() -> None:
             current = search_vault(settings, reader, "ZETA4471", 10, refresh, "current")
             found = {item["document_id"] for item in current["results"]}
             assert "kn_new" in found and "kn_old" not in found and "hidden" not in found, found
-            assert current["answer_state"]["state"] == "supported", current["answer_state"]
+            assert current["answer_state"]["state"] == "evidence", current["answer_state"]
             history = search_vault(settings, reader, "ZETA4471", 10, refresh, "history")
             assert {"kn_new", "kn_old"} <= {item["document_id"] for item in history["results"]}
             evidence = search_vault(settings, reader, "ZETA4471", 10, refresh, "evidence")
@@ -319,7 +319,7 @@ def run_semantic_disabled_checks() -> None:
         assert "pvg-src" not in core.searchable_text({"subject_id": "s"}, core.chunk_text(f"x {marker}")[0])
         public = app_module.search_response(current, "current")
         assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results"}
-        assert public["results"][0]["answer_relevance"] == "grounded"
+        assert public["results"][0]["answer_relevance"] == "lexical_match"
         assert search_vault(settings, reader, "no-such-token-anywhere", 5, True)["answer_state"]["state"] == "abstain"
 
         # Index stats/commands and wiki health are explicit no-ops.
@@ -1124,7 +1124,7 @@ def run_search_regression_checks() -> None:
             assert "20_Projects/groceries.md" not in paths(natural), paths(natural)
             assert item_for(natural, "20_Projects/rollback.md")["match"] == "semantic"
             assert item_for(natural, "20_Projects/deployment-log.md")["match"] in {"keyword", "hybrid"}
-            assert natural["answer_state"] == {"state": "evidence", "reason": "semantic_candidates_require_verification"}, natural["answer_state"]
+            assert natural["answer_state"] == {"state": "evidence", "reason": "retrieved_sources_require_interpretation"}, natural["answer_state"]
             assert natural["index"].get("fallback_reason") is None and not natural["index"]["stale"]
             # A valid but weak semantic candidate (cosine 1/sqrt(6) < 0.5) is kept, after all lexical matches.
             partial = item_for(natural, "20_Projects/partial.md")
@@ -1212,7 +1212,7 @@ def run_search_regression_checks() -> None:
             filler_query = search_vault(settings, reader, "billing invoices")
             filler = next(item for item in filler_query["results"] if item["document_id"] == "cand_dispute")
             assert filler["match"] == "semantic" and filler["conflict_state"] == "unresolved"
-            assert filler_query["answer_state"]["state"] == "supported", filler_query["answer_state"]
+            assert filler_query["answer_state"]["state"] == "evidence", filler_query["answer_state"]
 
             # An interrupted payload migration keeps vectors but never claims a current index.
             core.index_vault(settings)

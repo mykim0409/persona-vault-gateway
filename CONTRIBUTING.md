@@ -27,6 +27,7 @@ uv run --frozen python tests/test_admin.py
 uv run --frozen python tests/test_sync.py
 uv run --frozen python tests/test_rag_benchmark.py
 uv run --frozen python tests/test_search_evidence.py
+uv run --frozen python tests/test_retrieval_contract.py
 uv run --frozen python tests/test_wiki.py
 uv run --frozen python tests/test_compaction.py
 uv run --frozen python tests/test_bootstrap.py
@@ -42,7 +43,8 @@ uv run --frozen python tests/test_capture_integration.py
 | Core, auth, and path policy | `test_core.py` |
 | Admin screens and login limiter | `test_admin.py` |
 | Compose smoke helper logic (skip rules, backup and restore, test-only transport) and the native `gateway.server` first-use flow | `test_sync.py` |
-| RAG search and question/claim safety | `test_rag_benchmark.py`, `test_search_evidence.py` |
+| RAG retrieval, corrective evidence and source warnings | `test_rag_benchmark.py`, `test_search_evidence.py` |
+| Retrieval-only corpus, evaluator mutations and contract gate | `test_retrieval_contract.py` |
 | Wiki and compaction | `test_wiki.py`, `test_compaction.py` |
 | SSH deploy key and known_hosts helpers (`gateway.bootstrap`) | `test_bootstrap.py` |
 | Release install bundle (including localized doc pairs) | `test_release_bundle.py` |
@@ -67,6 +69,28 @@ uv run --frozen python tests/benchmark_search_evidence.py --baseline /path/to/ba
 It compares baseline, paragraph/table-row evidence, and a test-only BM25 reranker on synthetic data.
 It reports safety cases, latency, CPU time, Python peak allocations (not process RSS), and response size
 (not token usage). BM25 is not enabled in production. This is not a real-embedding quality benchmark.
+
+### Retrieval-only contract
+
+`tests/fixtures/retrieval-contract.json` separates required source excerpts from human-written reading labels.
+The labels never enter the Gateway request. Contrast questions change actors, actions, polarity, quantities,
+dates or conditions while retaining the same sources; a wrong premise should not hide corrective evidence.
+The target is to return attributable evidence, not adjudicate a question as `supported` or `refuted`.
+
+```bash
+uv run --frozen python tests/benchmark_retrieval_contract.py
+uv run --frozen python tests/benchmark_retrieval_contract.py --check
+```
+
+The first command reports gaps; the second exits 1 unless **all** checks pass, and runs in CI.
+Existing actor/action contrast cases now require neutral evidence and source-preserving excerpts rather than
+a server truth verdict. Keep parser, identity, numeric normalization, authority, and conflict-warning checks.
+The report separates source/quote/metadata recall, presentation limits and omission notices, and server adjudication.
+Returning empty results or only `abstain` cannot pass required-evidence checks. Even a correct affirmative verdict
+fails the no-adjudication target; `legacy_supported_against_annotation` separately counts unsupported assertions.
+Noise cases also reject unrelated excerpts and excessive extra sources. Runs use limits 1/4/20, temporary synthetic Markdown, and no network. Controlled semantic candidates test preservation,
+not embedding quality. This is a regression seed, not a held-out accuracy estimate or an LLM answer-quality test.
+Add anonymized failures and contrasting wording before changing runtime rules; do not weaken quotes to match current output.
 
 ## Compose smoke (needs Docker)
 
@@ -141,7 +165,7 @@ Language: skills and references, agent-facing templates, source comments and doc
 
 ## Versions
 
-The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.4`
+The Gateway package, plugin, and API versions are independent. Currently the Gateway package is `0.1.0`, the plugin is `0.7.5`
 (the Codex one includes a build suffix), and the API is `v3`. Do not bump versions in ordinary changes; bump the plugin when its contract changes, as it did here.
 
 ## Docs and known limitations
