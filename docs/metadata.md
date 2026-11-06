@@ -113,6 +113,7 @@ list introductions and table headers remain attached; sibling rows and items sta
 This is a conservative block splitter, not a complete CommonMark parser.
 
 Within a document, select passages that cover missing query terms before repeating the same matches.
+Equal-coverage ties prefer query terms occurring in fewer blocks, not earlier file positions or repeated words.
 A weaker row can supply a missing subject without borrowing the action from another row.
 Then retain other multi-term matches, including different outcomes, dates and conditions.
 Results are grouped by document, but `passages` contains multiple excerpts. Each has its section,
@@ -124,6 +125,16 @@ Equivalent decimal/thousands notation and calendar notation are normalized witho
 inventing dates; source excerpts are never rewritten. A different value can reduce lexical coverage
 but does not hide corrective evidence. Korean particle normalization and explicit aliases aid lookup,
 not actor attribution, unit inference, arithmetic, or proof.
+
+A standalone machine identifier uses exact lookup in both keyword and semantic-enabled deployments.
+Its grammar is `[A-Za-z_][A-Za-z0-9_]*(?:[.-][A-Za-z0-9_]+)*`, with at least one digit or underscore;
+the entire trimmed query must match. For example, `INC-2048` and `task_alpha` qualify, but dates,
+numbers, numeric quantities, ordinary words and sentences do not. Matching is case-insensitive and
+requires the whole ASCII atom, not a prefix of a longer identifier. The current view must contain it
+in Markdown body text or the existing searchable `subject_id`, `subject_aliases`, `error_signatures`
+or `topics` metadata. Otherwise return empty results and `abstain`. Query embedding and vector
+candidate lookup are skipped for these identifiers; index status and source warnings are unchanged.
+Natural-language paraphrases and sources correcting a wrong premise retain normal semantic retrieval.
 
 After source warnings are computed, the strongest lexical matches can supply one hop of `linked_context`:
 the first two matching blocks per seed document, two inline Markdown links per seed, and two blocks
