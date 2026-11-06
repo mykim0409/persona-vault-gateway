@@ -233,6 +233,45 @@ class SearchEvidenceTests(unittest.TestCase):
         self.assertEqual(len(items[0]["passages"]), 1)
         self.assertEqual(index["passages_truncated"], 1)
 
+    def test_tied_passages_prefer_distinctive_terms_before_shared_budget(self):
+        from gateway.app import SEARCH_RESPONSE_BYTES, search_response
+
+        fact = "workspace 404이면 KFP run은 계속되지만 MLflow 기록은 없다."
+        correction = "## Tracking\n\n" + fact + " workspace 없으면 기록을 생략한다."
+        self.note("a-platform", correction)
+        query = "MLflow workspace 없으면 KFP 실행 실패인가"
+        self.assertIn(fact, self.search(query)["context"])
+
+        # A growing canonical gains an earlier, equally matched but unrelated use of workspace.
+        distractor = "## SSO\n\nGoogle Workspace 로그인은 MLflow KFP UI 실행과 구분한다."
+        background = "\n\n".join(f"## Other {n}\n\nMLflow KFP 실행 상태를 확인했다." for n in range(8))
+        self.note("a-platform", distractor + "\n\n" + background + "\n\n" + correction)
+        for n in range(12):
+            self.note(f"other-{n}", "MLflow KFP 실행 " + "별도 운영 검토 설명 " * 100)
+        for limit in (1, 4, 20):
+            with self.subTest(limit=limit):
+                result = self.search(query, limit)
+                public = search_response(result, "current")
+                platform = next(r for r in public["results"] if r["document_id"] == "a-platform")
+                self.assertIn(fact, platform["passages"][0]["snippet"])
+                self.assertIn(fact, public["context"])
+                self.assertEqual(public["answer_state"]["state"], "evidence")
+                self.assertLessEqual(len(json.dumps(public, ensure_ascii=False, separators=(",", ":")).encode()), SEARCH_RESPONSE_BYTES)
+                if limit == 20:
+                    self.assertGreater(public["index"]["passages_truncated"], 0)
+
+    def test_passage_specificity_is_language_neutral_and_not_term_frequency(self):
+        query = "runner tracker workspace missing execution"
+        fact = "runner tracker workspace missing: the run continues without tracking."
+        unrelated = "runner tracker workspace execution " * 20
+        background = "\n\n".join(f"## Background {n}\n\nrunner tracker execution status." for n in range(8))
+        for body in (unrelated + "\n\n" + background + "\n\n" + fact,
+                     fact + "\n\n" + background + "\n\n" + unrelated):
+            self.note("platform", body)
+            result = self.search(query, 1)
+            self.assertIn(fact, result["results"][0]["passages"][0]["snippet"])
+            self.assertIn("workspace execution", result["context"])
+
     def test_semantic_only_results_keep_multiple_chunks_without_claiming_support(self):
         self.note("runbook", "Restore the previous build. " * 80 + "\n\n" + "Redeploy the saved artifact. " * 80)
         settings = replace(self.settings, embedding_provider="hash")
@@ -1134,6 +1173,91 @@ class SearchEvidenceTests(unittest.TestCase):
                     result = core.search_vault(settings, AGENT, query, limit=limit, bundle="current")
                     self.assertEqual(result["results"][0]["match"], "semantic")
                     self.assertEqual(result["answer_state"]["state"], expected)
+
+    def test_standalone_identifier_grammar_is_not_natural_language_or_a_quantity(self):
+        for query in ("pvg_absent_z74a22fbe6_unissued", "INC-2048", "task_alpha", "build.v3", "FP16", "_runtime"):
+            self.assertEqual(core.standalone_identifier(query), query.lower())
+        for query in ("", "rollback", "workspace", "state-of-the-art", "2026-10-25", "3.14", "-1.25",
+                      "5GB", "50%", "123_456", "없는프로젝트QZV981", "undo a release", "task_alpha status",
+                      "Did Bob approve INC-2048?", '"INC-2048"', "INC-2048?"):
+            self.assertIsNone(core.standalone_identifier(query), query)
+
+    def test_exact_identifier_lookup_is_backend_and_view_consistent(self):
+        from gateway.app import search_response
+
+        absent = "pvg_absent_z74a22fbe6_unissued"
+        self.note("known", "INC-2048. Keep the original execution boundary.")
+        self.note("alias", "The tracker is optional.", subject_aliases=["tracker_optional"])
+        self.note("subject", "Subject metadata remains searchable.", subject_id="service_42")
+        self.note("signature", "The extension is not installed.", error_signatures=["ERR_IMPORT_42"])
+        self.note("topic", "A tagged source.", topics=["topic_42"])
+        self.note("prefixes", " ".join((absent + "_extra", absent + "-extra", absent + ".v2", "prefix_" + absent)))
+        self.note("history", "old_run_42 remains in history.", temporal_state="historical", retrieval_tier="history")
+        write_note(self.settings.vault_dir, "30_Conversations/raw/record.md", "raw_run_42 was observed.", id="raw", memory_type="transcript")
+        settings = replace(self.settings, embedding_provider="hash")
+        vector = [1.0] + [0.0] * (core.HASH_EMBEDDING_DIMENSIONS - 1)
+        with no_network(), patch.object(core, "qdrant_json", FakeQdrant()), \
+             patch.object(core, "embed_documents", side_effect=lambda _s, texts: [vector for _ in texts]), \
+             patch.object(core, "embed_query", return_value=(vector, core.HASH_EMBEDDING_MODEL)) as embed:
+            core.index_vault(settings)
+            for provider in ("none", "hash"):
+                for query, bundle, expected in (
+                    (absent, "current", set()), ("INC-2048", "current", {"known"}),
+                    ("inc-2048", "current", {"known"}), ("INC-204", "current", set()),
+                    ("tracker_optional", "current", {"alias"}), ("service_42", "current", {"subject"}),
+                    ("ERR_IMPORT_42", "current", {"signature"}), ("topic_42", "current", {"topic"}),
+                    ("old_run_42", "current", set()), ("old_run_42", "history", {"history"}),
+                    ("raw_run_42", "current", set()), ("raw_run_42", "evidence", {"raw"}),
+                ):
+                    for limit in (1, 4, 20):
+                        with self.subTest(provider=provider, query=query, bundle=bundle, limit=limit):
+                            result = core.search_vault(replace(settings, embedding_provider=provider), AGENT, query, limit, bundle=bundle)
+                            public = search_response(result, bundle)
+                            self.assertEqual({r["document_id"] for r in public["results"]}, expected)
+                            self.assertEqual(public["answer_state"]["state"], "evidence" if expected else "abstain")
+                            self.assertFalse(public["index"]["stale"])
+                            if not expected:
+                                self.assertEqual(public["context"], "")
+                            else:
+                                self.assertTrue(all(r["passages"] for r in public["results"]))
+            embed.assert_not_called()
+
+    def test_identifier_excerpt_ignores_longer_tokens_and_chunk_boundaries(self):
+        for identifier in ("INC-2048", "task_alpha", "build.v3", "build.2026-1-2", "job_" + "a" * 216):
+            for separator in ("", "\n\n"):
+                body = (identifier + "_extra " + "padding " * 220 + separator + "Exact match: "
+                        + identifier + ". Keep this condition.")
+                self.note("identifier", body)
+                result = self.search(identifier, 1)
+                self.assertIn("Exact match: " + identifier + ". Keep this condition.", result["context"])
+                self.assertNotIn(identifier + "_extra", result["context"])
+        # The exact token straddles overlapping embedding chunks, but Markdown is authoritative.
+        identifier = "job_" + "a" * 216
+        body = "x " * 795 + identifier + ". Condition remains valid."
+        self.assertFalse(any(identifier in chunk for chunk in core.chunk_text(body)))
+        self.note("identifier", body)
+        self.assertIn(identifier, self.search(identifier, 1)["context"])
+        identifier = "job_" + "a" * 496  # Maximum API query length still fits the bounded excerpt.
+        self.note("identifier", "padding " * 80 + identifier + ".")
+        snippet = self.search(identifier, 1)["results"][0]["snippet"]
+        self.assertIn(identifier, snippet)
+        self.assertLessEqual(len(snippet), 520)
+
+    def test_identifier_guard_preserves_semantic_paraphrases_quantities_and_corrections(self):
+        self.note("policy", "Alice approved the deployment. Bob ran the trial. Rollback restores the prior build.")
+        settings = replace(self.settings, embedding_provider="hash")
+        vector = [1.0] + [0.0] * (core.HASH_EMBEDDING_DIMENSIONS - 1)
+        with no_network(), patch.object(core, "qdrant_json", FakeQdrant()), \
+             patch.object(core, "embed_documents", side_effect=lambda _s, texts: [vector for _ in texts]), \
+             patch.object(core, "embed_query", return_value=(vector, core.HASH_EMBEDDING_MODEL)) as embed:
+            core.index_vault(settings)
+            for query in ("how is a release undone", "2026-10-25", "42", "3.14", "5GB", "Did Bob approve the deployment?"):
+                for limit in (1, 4, 20):
+                    result = core.search_vault(settings, AGENT, query, limit, bundle="current")
+                    self.assertEqual(result["answer_state"]["state"], "evidence")
+                    self.assertIn("Alice approved", result["context"])
+                    self.assertIn("Bob ran the trial", result["context"])
+            self.assertEqual(embed.call_count, 18)
 
 
 if __name__ == "__main__":

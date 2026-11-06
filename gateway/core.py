@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 import uuid
 import http.client
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -64,6 +65,7 @@ AGENT_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 REPOSITORY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 COMMIT_RE = re.compile(r"[0-9a-fA-F]{7,64}")
 TOKEN_RE = re.compile(r"[0-9a-zA-Z가-힣_]+")
+IDENTIFIER_ATOM_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*")
 MAX_FRONTMATTER_DEPTH = 16
 QUERY_STOPWORDS = frozenset(
     "about and are can does for from has have how into not that the this was what when where which who why will with you your".split()
@@ -900,6 +902,7 @@ def search_vault(
 ) -> dict[str, Any]:
     require_scope(agent, "vault-rag")
     query = query.strip()
+    identifier = standalone_identifier(query)
     if bundle not in RAG_BUNDLES:
         raise ValueError(f"bundle must be one of: {', '.join(sorted(RAG_BUNDLES))}")
     if not query:
@@ -974,7 +977,7 @@ def search_vault(
             reason = "qdrant_unavailable"
             index["chunks"] = None
     query_vector = None
-    if not reason:
+    if not reason and not identifier:
         try:
             query_vector, model = embed_query(settings, query)
         except EmbeddingLimitError:
@@ -983,7 +986,7 @@ def search_vault(
             reason = "embedding_unavailable"
     if reason:
         index.update(search_mode="keyword", fallback_reason=reason)
-    terms = keyword_terms(query)
+    terms = [identifier] if identifier else keyword_terms(query)
     documents = vault_documents(settings, skip_unreadable=True)
     analysis: dict[str, Any] | None = None
     try:
@@ -1089,7 +1092,7 @@ def search_vault(
     if filtered:
         index["semantic_filtered"] = filtered
 
-    for item in keyword_matches(settings, terms, None, bundle, context or {}, documents):
+    for item in keyword_matches(settings, terms, None, bundle, context or {}, documents, identifier=identifier):
         add_result(item)
 
     candidates = list(scored.values())
@@ -1347,14 +1350,17 @@ def evidence_blocks(text: str, *, kind: str = "") -> list[str]:
 def query_evidence(query: str, results: list[dict[str, Any]], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Select attributable passages by lexical coverage, never by inferred claim truth."""
     by_id = {doc["document_id"]: doc for doc in documents}
-    query = normalize_evidence_dates(query)
-    numbers = numeric_evidence_literals(query)
+    identifier = standalone_identifier(query.strip())
+    query = query if identifier else normalize_evidence_dates(query)
+    numbers = set() if identifier else numeric_evidence_literals(query)
     terms = {
         evidence_term(term) for term in keyword_terms(query)
         if not any(char.isdigit() for char in term)
     } - {"", "기록", "관련", "내용", "여부"}
     terms |= numbers
     terms.update(re.findall(r"(?<![\w+-])[+-][a-zA-Z](?![a-zA-Z0-9_-])", query.lower()))
+    if identifier:
+        terms = {identifier}
     scored = []
     for item in results:
         item["answer_relevance"] = "semantic_candidate" if item.get("match") == "semantic" else "candidate"
@@ -1365,9 +1371,14 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
         table_context = {}
         matched = []
         for block_index, block in enumerate(blocks):
-            text = normalize_evidence_dates(searchable_text(doc, block)).lower()
+            text = searchable_text(doc, block).lower()
+            if not identifier:
+                text = normalize_evidence_dates(text)
             values = numeric_evidence_literals(text) if numbers else set()
-            coverage = {term for term in terms if (term in values if term in numbers else term_in(term, text))}
+            if identifier:
+                coverage = {identifier} if identifier_positions(identifier, text) else set()
+            else:
+                coverage = {term for term in terms if (term in values if term in numbers else term_in(term, text))}
             if coverage:
                 matched.append((coverage, block_index, block))
                 lines = block.splitlines()
@@ -1377,7 +1388,11 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
                     table_context[block_index] = block.rsplit("\n", 1)[0]
         if not matched:
             continue
-        matched.sort(key=lambda entry: (-len(entry[0]), entry[1]))
+        # Break equal-coverage ties by block rarity, not file order or repeated boilerplate.
+        frequencies = Counter(term for coverage, _, _ in matched for term in coverage)
+        weights = {term: math.log1p(len(blocks) / count) for term, count in frequencies.items()}
+        specificity = {index: math.fsum(weights[term] for term in coverage) for coverage, index, _ in matched}
+        matched.sort(key=lambda entry: (-len(entry[0]), -specificity[entry[1]], entry[1]))
         best = len(matched[0][0])
         scored.append((best, item))
         # Cover missing query terms before repeating the same match; keep every block's attribution.
@@ -1389,7 +1404,7 @@ def query_evidence(query: str, results: list[dict[str, Any]], documents: list[di
             entry = max(pending, key=lambda entry: (
                 len(entry[0] - covered),
                 bool(first_table and table_context.get(entry[1]) == first_table),
-                len(entry[0]), -entry[1],
+                len(entry[0]), specificity[entry[1]], -entry[1],
             ))
             if not entry[0] - covered:
                 break
@@ -1978,6 +1993,8 @@ def keyword_matches(
     bundle: str = "auto",
     context: dict[str, Any] | None = None,
     documents: list[dict[str, Any]] | None = None,
+    *,
+    identifier: str | None = None,
 ) -> list[dict[str, Any]]:
     if not terms:
         return []
@@ -1993,8 +2010,11 @@ def keyword_matches(
             continue
         role_score = bundle_role_score(document, bundle)
         context_score = applicability_score(document, context or {})
-        for chunk_index, chunk in enumerate(chunk_text(document["text"])):
-            score = rag_score(rel_path, searchable_text(document, chunk), terms)
+        # Literal identifiers can cross embedding chunk boundaries; current Markdown is authoritative.
+        chunks = [document["text"]] if identifier else chunk_text(document["text"])
+        for chunk_index, chunk in enumerate(chunks):
+            text = searchable_text(document, chunk)
+            score = len(identifier_positions(identifier, text)) if identifier else rag_score(rel_path, text, terms)
             if not score:
                 continue
             total = 1.0 + 0.03 * min(score, 10) + role_score + context_score
@@ -2849,6 +2869,19 @@ def normalize_vector(vector: list[float]) -> list[float]:
     return [value / norm for value in vector]
 
 
+def standalone_identifier(query: str) -> str | None:
+    """ASCII atom, letter/underscore first, containing a digit or underscore; not prose or quantities."""
+    if (IDENTIFIER_ATOM_RE.fullmatch(query) and not query[0].isdigit()
+            and ("_" in query or any(char.isdigit() for char in query))):
+        return query.lower()
+    return None
+
+
+def identifier_positions(identifier: str, text: str) -> list[int]:
+    """Use the same whole-token boundaries for source selection and displayed excerpts."""
+    return [match.start() for match in IDENTIFIER_ATOM_RE.finditer(text) if match[0].lower() == identifier]
+
+
 def text_terms(text: str) -> list[str]:
     return [term.lower() for term in TOKEN_RE.findall(text) if len(term) > 1]
 
@@ -2879,8 +2912,10 @@ def rag_score(path: str, text: str, terms: list[str]) -> int:
 
 def rag_snippet(text: str, terms: list[str], radius: int = 260) -> str:
     lowered = text.lower()
-    positions = [lowered.find(term) for term in terms if lowered.find(term) >= 0]
-    start = max(0, min(positions) - radius) if positions else 0
+    identifier = standalone_identifier(terms[0]) if len(terms) == 1 else None
+    positions = identifier_positions(identifier, text) if identifier else [lowered.find(term) for term in terms if lowered.find(term) >= 0]
+    leading = min(radius, max(0, radius * 2 - len(identifier))) if identifier else radius
+    start = max(0, min(positions) - leading) if positions else 0
     snippet = text[start : start + radius * 2].replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", snippet).strip()
 
