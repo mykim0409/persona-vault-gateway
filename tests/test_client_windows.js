@@ -80,6 +80,19 @@ async function exerciseShell(shell, requests, setFailure, url) {
       ['/gateway/v3/search', 'current', `Bearer ${REPLACED}`]);
     assert.strictEqual(requests.length, before + 1);
 
+    const client = path.join(root, '.local', 'share', 'persona-vault-gateway', 'pvg-client.js');
+    const digest = 'a'.repeat(64);
+    result = await run(shell, [...base, '-Command',
+      `& node ${quote(client)} sources --prefix ${quote('raw/한글 notes')} --limit 2`], env);
+    ok('source inventory', result);
+    assert.deepStrictEqual([requests.at(-1).path, requests.at(-1).body],
+      ['/gateway/v3/sources', { prefix: 'raw/한글 notes', limit: 2 }]);
+    result = await run(shell, [...base, '-Command',
+      `& node ${quote(client)} source-read -Path ${quote('raw/한글 notes/a.md')} -DocumentHash ${quote(digest)} -MaxCharacters 256`], env);
+    ok('source read', result);
+    assert.deepStrictEqual([requests.at(-1).path, requests.at(-1).body],
+      ['/gateway/v3/source-read', { path: 'raw/한글 notes/a.md', document_hash: digest, max_characters: 256 }]);
+
     // Pipeline body through the wrapper: Korean + emoji survive, default note_type is observation.
     const body = '한글 본문 🚀 line2';
     const meta = '100% & | ^ < > ( ) ! $x `t` ; 한글';
@@ -133,7 +146,7 @@ async function exerciseMcp(requests, url) {
     assert.strictEqual(result.stderr, '');
     const reply = (id) => JSON.parse(result.stdout.split(/\r?\n/).filter(Boolean).find((line) => JSON.parse(line).id === id));
     assert.strictEqual(reply(1).result.protocolVersion, '2025-06-18');
-    assert.deepStrictEqual(reply(2).result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record']);
+    assert.deepStrictEqual(reply(2).result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record', 'pvg_sources', 'pvg_read_source']);
     assert.deepStrictEqual(reply(3).result, {
       content: [{ type: 'text', text: 'Answer state: answered (test)\nwindows search result' }], isError: false,
     });
