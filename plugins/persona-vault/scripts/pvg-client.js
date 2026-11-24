@@ -526,6 +526,28 @@ async function searchPayload(argv) {
   };
 }
 
+function sourcePayload(command, argv) {
+  const reading = command === 'source-read';
+  const flags = reading ? ['path', 'document-hash', 'cursor', 'max-characters'] : ['prefix', 'cursor', 'limit'];
+  const { values, positional } = parseArgs(argv, flags);
+  if (values.help) return { help: `usage: pvg-client.js ${command} ${flags.map((f) => `--${f} VALUE`).join(' ')}\n`
+    + 'Read-only. Use the returned next_cursor unchanged; omit cursor for the first page. source-read requires path and document-hash from search or sources.' };
+  if (positional.length) throw new UsageError('source commands accept named flags only');
+  const key = reading ? 'max-characters' : 'limit';
+  const size = Number(values[key] ?? (reading ? 6000 : 20));
+  if (!Number.isInteger(size) || size < (reading ? 256 : 1) || size > (reading ? 8000 : 50)) {
+    throw new UsageError(`--${key} must be an integer in ${reading ? '256..8000' : '1..50'}`);
+  }
+  if (reading && (!values.path || !/^[0-9a-f]{64}$/.test(values['document-hash'] ?? ''))) {
+    throw new UsageError('source-read requires --path and --document-hash from search or sources');
+  }
+  const payload = reading
+    ? { path: values.path, document_hash: values['document-hash'], max_characters: size }
+    : { prefix: values.prefix ?? '', limit: size };
+  if (values.cursor != null) payload.cursor = values.cursor;
+  return { route: command, payload, timeoutMs: 60_000, retry: 'retry the source request', source: true };
+}
+
 function failureMessage(result, config, retry) {
   const where = `HTTP ${result.status || 'network'}${result.error ? `: ${result.error}` : ''}`;
   if (result.kind === 'upgrade') {
@@ -541,8 +563,9 @@ function failureMessage(result, config, retry) {
 }
 
 async function runCommand(command, argv) {
-  const prepare = { 'rag-search': searchPayload, 'agent-memo': memoPayload }[command];
-  if (!prepare) throw new UsageError('usage: pvg-client.js rag-search|agent-memo [OPTIONS]');
+  const prepare = { 'rag-search': searchPayload, 'agent-memo': memoPayload,
+    sources: (args) => sourcePayload('sources', args), 'source-read': (args) => sourcePayload('source-read', args) }[command];
+  if (!prepare) throw new UsageError('usage: pvg-client.js rag-search|agent-memo|sources|source-read [OPTIONS]');
   const request = await prepare(argv);
   if (request.help) {
     process.stdout.write(`${request.help}\n`);
@@ -556,6 +579,14 @@ async function runCommand(command, argv) {
   const result = await gatewayRequest(config, request.route, request.payload, request.timeoutMs,
     { json: true, maxBytes: 8 * 1024 * 1024 });
   if (!result.ok) {
+    if (request.source && result.status === 409) {
+      process.stderr.write('PersonaVault source changed. List or search again and restart the affected read; do not mix old and new pages.\n');
+      return 1;
+    }
+    if (request.source && result.status === 404) {
+      process.stderr.write('PersonaVault source or source-reading endpoint not found. Check Gateway source-reading-v1 support, then list or search again; coverage is incomplete.\n');
+      return 1;
+    }
     process.stderr.write(`${failureMessage(result, config, request.retry)}\n`);
     return result.kind === 'upgrade' ? 75 : 1;
   }
@@ -566,6 +597,7 @@ async function runCommand(command, argv) {
   } else {
     const state = result.data.answer_state || {};
     process.stdout.write(`Answer state: ${state.state || 'unknown'} (${state.reason || 'unspecified'})\n`
+      + (result.data.coverage ? 'Coverage: ranked excerpts, not an exhaustive inventory or full-source read. Use source-reading tools when completeness matters.\n' : '')
       + `${result.data.context || '(no PersonaVault RAG results)'}\n`);
   }
   return 0;

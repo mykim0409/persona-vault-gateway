@@ -149,9 +149,28 @@ raw 수집·노트 필드·승인 게이트·원본 Markdown·임베딩 색인�
 구간은 최대 520자이고 잘리면 `truncated`가 표시됩니다. `passages_omitted`와
 `index.passages_truncated`로 생략을 알립니다. context를 포함한 REST 응답은 60,000바이트 이내이며,
 빠진 문서는 `index.results_truncated`에 표시합니다. 표시 제한으로 출처 경고를 해제하지 않습니다.
-빠진 세부 정보가 필요할 때만 검색어를 좁힙니다.
+빠진 세부 정보가 필요할 때 검색어를 좁히거나 원문을 읽습니다.
 
-MCP·CLI·GPT Actions도 같은 규칙을 사용합니다. 큐레이팅에서는 긍정 판정 대신 출처 경로와
+### 원문 조회 범위
+
+검색은 `coverage.kind=ranked_excerpts`, `exhaustive=false`로 목록 조회와 구분합니다.
+`candidate_documents`는 표시 제한 전 후보 수이며 Vault 전체의 관련 문서 수가 아닙니다.
+각 결과의 `document_hash`는 디코딩된 Markdown 버전이며 텍스트에도 표시됩니다.
+기존 `vault-rag` 권한으로 `POST /gateway/v3/sources`에 `prefix`, `limit`(1..50), 선택적 `cursor`를 보내면
+순위 없는 파일 목록을 얻습니다. `POST /gateway/v3/source-read`에는 `path`, `document_hash`, 선택적
+`cursor`, `max_characters`(256..8000)를 보냅니다. 메타데이터·역할·시각을 포함한 Markdown과
+`span`, `total_characters`, `next_cursor`를 반환합니다. span은 Unicode code point 기준으로 시작 포함,
+끝 제외입니다. 임베딩 호출이나 색인 갱신은 하지 않습니다.
+
+`next_cursor`는 그대로 전달하며 null이면 선택한 목록 또는 문서의 끝입니다. 목록은 현재 파일 해시를
+계산하므로 prefix 안의 변경이 있으면 HTTP 409로 이어 읽기를 거부합니다. 원문도 경로·해시에 묶이며
+변경 시 새 해시를 받아 다시 읽어야 합니다. 여러 파일의 불변 스냅샷을 제공하는 것은 아닙니다.
+읽지 못한 파일은 목록에서 몰래 제외하지 않고 오류로 알립니다. 검색과 동일한 제외 규칙
+(`.git`, `.obsidian`, `.tmp`, 외부 심볼릭 링크)을 사용하며 쓰기 경로 제한은 기존 읽기 권한을 제한하지 않습니다.
+목록 조회는 내용 검토가 아니며, 전문을 읽어도 의미 보존·사실 여부까지 보장하지 않습니다. 디렉토리 날짜나
+`observed_at`은 수집 시각일 수 있으므로 내부 사건 시각과 구분하고 요청에 필요한 범위만 읽습니다.
+
+플러그인의 MCP 도구와 CLI도 같은 규칙을 사용합니다. 큐레이팅에서는 긍정 판정 대신 출처 경로와
 `expect_excerpts`를 검사합니다. 기존 `supported` probe는 재검토 안내와 함께 중단하며 자동 변환하지 않습니다.
 잘못된 인물을 질문하더라도 실제 인물의 기록은 정정 근거로 남겨야 합니다.
 

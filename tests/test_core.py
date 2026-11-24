@@ -318,7 +318,8 @@ def run_semantic_disabled_checks() -> None:
         assert core.chunk_text(f"A {marker} B\n\n{marker}") == ["A  B"] and core.chunk_text(marker) == []
         assert "pvg-src" not in core.searchable_text({"subject_id": "s"}, core.chunk_text(f"x {marker}")[0])
         public = app_module.search_response(current, "current")
-        assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results"}
+        assert set(public) == {"query", "embedding_model", "index", "context", "answer_state", "view", "results", "coverage"}
+        assert public["coverage"]["exhaustive"] is False
         assert public["results"][0]["answer_relevance"] == "lexical_match"
         assert search_vault(settings, reader, "no-such-token-anywhere", 5, True)["answer_state"]["state"] == "abstain"
 

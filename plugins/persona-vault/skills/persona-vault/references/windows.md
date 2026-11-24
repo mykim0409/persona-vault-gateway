@@ -32,6 +32,19 @@ on stdin (a search with no query argument reads the query from stdin).
 `cmd.exe` expands `%VAR%` and mangles `"`, `^`, and `&` in their arguments, so pass bodies and any such
 text on stdin and keep arguments simple and quoted. Prefer the `.ps1` launchers.
 
+## Remote Source Pages
+
+When the matching MCP tools are unavailable, invoke the shared client directly with PowerShell (JSON output):
+
+```powershell
+$Client = Join-Path $HOME '.local\share\persona-vault-gateway\pvg-client.js'
+& node $Client sources --prefix '30_Conversations/raw' --limit 20
+& node $Client source-read --path '<returned-path>' --document-hash '<returned-hash>'
+```
+
+Pass `--cursor '<next_cursor>'` for continuation, keeping the same prefix or path/hash. Omit it for the first page.
+Use the main skill's coverage rules; do not fall back to Bash or read the entire Vault automatically.
+
 ## Explicitly Requested Notes Only
 
 Help does not write a note:

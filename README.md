@@ -81,10 +81,8 @@ Reach it from other PCs only over an encrypted path; plain public HTTP exposes a
 
 ### 2. Install the plugin (each PC)
 
-Codex and Claude Code are the agent platforms supported today, through the shared plugin below.
-[Custom GPT Actions](docs/gpt-actions.md) are an alternative path. Any other client needs its own
-integration with the Gateway API; automatic capture is currently provided only by the supplied
-plugin.
+Codex and Claude Code connect through the shared plugin below. Other clients need their own
+Gateway integration; automatic capture is provided by the supplied plugin.
 
 Node.js is required for the hooks and the token helper.
 
@@ -116,7 +114,7 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 This saves a raw note (not approved knowledge) and finds it again; `--view current` may legitimately be empty on a new Vault.
 Windows PowerShell version: [docs/setup.md](docs/setup.md#3-set-up-the-agent-plugin-on-each-pc).
 
-The plugin also ships a small MCP server with Gateway tools `pvg_search` and `pvg_memo`. Agents call them instead of the helper commands. They read the same token config, so the installer is still required and the helpers remain the fallback. In Claude Code they are named `mcp__plugin_persona-vault_pvg__pvg_search` and `mcp__plugin_persona-vault_pvg__pvg_memo`: allowlist only `pvg_search` if you want searches without an approval prompt, and keep `pvg_memo` prompting, because a note is saved only when you explicitly ask.
+The plugin ships a shared MCP server: `pvg_search` finds excerpts, `pvg_sources` lists source files, `pvg_read_source` reads full Markdown in pages, and `pvg_memo` saves requested notes. They use the same token config; the installer is still required and helpers remain the fallback. In Claude Code the names start with `mcp__plugin_persona-vault_pvg__`. Allowlist only the read tools if desired; keep `pvg_memo` prompting because saving requires an explicit request. Search excerpts alone do not establish complete coverage.
 
 Optional local curation tools, `pvg_compact_read` and `pvg_compact_record`, call the same CLI implementation. They require a local Git Vault and `pvg-wiki` on the MCP host PATH. They page through source text and record judgments in the staged plan, without deleting raw, granting approval or indexing. See the [Curator protocol](docs/CURATOR.md) for setup and usage.
 
@@ -195,7 +193,6 @@ This beta has not completed a security audit. See [SECURITY.md](SECURITY.md).
 | [docs/hosting.md](docs/hosting.md) | Hosting options: Compose, Railway, Render, others |
 | [docs/operations.md](docs/operations.md) | Vault layout, semantic search, remote access, upgrade, backup |
 | [Windows guide](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows command syntax |
-| [docs/gpt-actions.md](docs/gpt-actions.md) | Custom GPT Actions as an alternative to the plugin |
 | [docs/metadata.md](docs/metadata.md) | Markdown metadata contract |
 | [docs/CURATOR.md](docs/CURATOR.md) | Curator protocol |
 | [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) | Development and security policy |

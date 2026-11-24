@@ -826,6 +826,15 @@ async function helperIntegrationTest() {
     const client = path.join(temp, 'data/persona-vault-gateway/pvg-client.js');
     assert.strictEqual(fs.statSync(configFile).mode & 0o777, 0o600);
     assert.strictEqual(fs.readFileSync(client, 'utf8'), fs.readFileSync(path.join(scripts, 'pvg-client.js'), 'utf8'));
+    for (const [command, args, body] of [
+      ['sources', ['--prefix', 'raw/notes', '--limit', '2'], { prefix: 'raw/notes', limit: 2 }],
+      ['source-read', ['--path', 'raw/notes/a.md', '--document-hash', 'a'.repeat(64), '--max-characters', '256'],
+        { path: 'raw/notes/a.md', document_hash: 'a'.repeat(64), max_characters: 256 }],
+    ]) {
+      const result = await runProcess(process.execPath, [client, command, ...args], { env, input: '' });
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.deepStrictEqual([requests.at(-1).path, requests.at(-1).body], [`/gateway/v3/${command}`, body]);
+    }
     for (const [launcher, command] of [[memo, 'agent-memo'], [search, 'rag-search']]) {
       const text = fs.readFileSync(launcher, 'utf8');
       assert(text.includes(`'${client}' ${command} "$@"`), 'launchers only exec the shared client');

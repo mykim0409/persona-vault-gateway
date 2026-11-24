@@ -77,6 +77,11 @@ async function serverTest() {
   let failWith = null;
   const defaultSearch = { answer_state: { state: 'evidence', reason: 'r' }, context: 'ctx 한글' };
   let searchResult = defaultSearch;
+  const hash = 'a'.repeat(64);
+  const sourcePage = { path: 'raw/conversation.md', document_hash: hash, text: 'user: Not deployed.\nassistant: Implemented only. 한글 🙂',
+    span: [0, 64], total_characters: 800, next_cursor: `${'b'.repeat(64)}:64` };
+  const sourceList = { sources: [{ path: sourcePage.path, document_hash: hash }], total_sources: 2,
+    next_cursor: `${'c'.repeat(64)}:1`, coverage: 'File inventory only, not content review.' };
   const gateway = http.createServer((request, response) => {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
@@ -84,7 +89,8 @@ async function serverTest() {
       requests.push({ path: request.url, authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
       response.writeHead(failWith ? failWith.status : 200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(failWith ? failWith.body : request.url.endsWith('/search')
-        ? searchResult : { status: 'ok', note_id: 'n1' }));
+        ? searchResult : request.url.endsWith('/source-read') ? sourcePage
+          : request.url.endsWith('/sources') ? sourceList : { status: 'ok', note_id: 'n1' }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -124,7 +130,8 @@ async function serverTest() {
 
     reply = await server.rpc('tools/list');
     const [search, memo] = reply.result.tools;
-    assert.deepStrictEqual(reply.result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record']);
+    assert.deepStrictEqual(reply.result.tools.map((tool) => tool.name), ['pvg_search', 'pvg_memo', 'pvg_compact_read', 'pvg_compact_record', 'pvg_sources', 'pvg_read_source']);
+    for (const tool of reply.result.tools.slice(4)) assert.strictEqual(tool.annotations.readOnlyHint, true);
     const [, , read, record] = reply.result.tools;
     assert.deepStrictEqual([read.annotations.readOnlyHint, record.annotations.readOnlyHint], [true, false]);
     assert.deepStrictEqual(read.inputSchema.required, ['vault', 'plan']);
@@ -199,6 +206,37 @@ async function serverTest() {
     }
     searchResult = defaultSearch;
 
+    // Remote source reads preserve the full page and cursor without hidden traversal or curation writes.
+    reply = await server.call('pvg_sources', { prefix: 'raw', limit: 1 });
+    assert.strictEqual(reply.result.isError, false, text(reply));
+    assert.deepStrictEqual(JSON.parse(text(reply)), sourceList);
+    assert.deepStrictEqual(last().body, { prefix: 'raw', limit: 1 });
+    assert.strictEqual(last().path, '/gateway/v3/sources');
+    await server.call('pvg_sources', { prefix: 'raw', cursor: sourceList.next_cursor });
+    assert.strictEqual(last().body.cursor, sourceList.next_cursor);
+    const readArgs = { path: sourcePage.path, document_hash: hash, max_characters: 300 };
+    const readCount = requests.length;
+    reply = await server.call('pvg_read_source', readArgs);
+    assert.strictEqual(reply.result.isError, false, text(reply));
+    assert.deepStrictEqual(JSON.parse(text(reply)), sourcePage);
+    assert.deepStrictEqual(last().body, readArgs);
+    assert.strictEqual(last().authorization, `Bearer ${TOKEN}`);
+    assert.strictEqual(last().path, '/gateway/v3/source-read');
+    assert.strictEqual(requests.length, readCount + 1, 'a page never fetches its continuation automatically');
+    await server.call('pvg_read_source', { ...readArgs, cursor: sourcePage.next_cursor });
+    assert.strictEqual(last().body.cursor, sourcePage.next_cursor);
+    for (const status of [404, 409]) {
+      failWith = { status, body: { detail: TOKEN } };
+      reply = await server.call('pvg_read_source', readArgs);
+      assert(reply.result.isError && text(reply).includes(status === 409 ? 'restart' : 'not found'));
+      assert(!text(reply).includes(TOKEN));
+    }
+    failWith = null;
+    searchResult = { ...defaultSearch, coverage: { exhaustive: false } };
+    reply = await server.call('pvg_search', { query: 'q' });
+    assert(text(reply).includes('not an exhaustive inventory'));
+    searchResult = defaultSearch;
+
     // pvg_memo: arguments map onto the helper's payload; the body arrives byte for byte.
     const body = 'Observation: 한글 🚀 restored the saved build on Linux after stopping the writer; Windows was not tested.\n'
       + 'Time is unknown. Preserve this separator.\n\nEvidence: run_1\nUncertainty: behavior on Windows';
@@ -259,6 +297,11 @@ async function serverTest() {
       ['pvg_compact_read', { vault: 'relative', plan: 'relative' }, 'vault and plan must be absolute local paths'],
       ['pvg_compact_read', { vault: '/v', plan: '/v/p', max_characters: 16001 }, 'max_characters must be an integer in 256..16000'],
       ['pvg_compact_record', { vault: '/v', plan: '/v/p', plan_sha256: 'a'.repeat(64), items: [1] }, 'items must be an array of objects'],
+      ['pvg_sources', { limit: 51 }, 'limit must be an integer in 1..50'],
+      ['pvg_sources', { refresh: true }, 'Unknown source argument'],
+      ['pvg_read_source', { path: 'a.md' }, 'document_hash is required'],
+      ['pvg_read_source', { path: 'a.md', document_hash: hash, max_characters: 8001 }, 'max_characters must be an integer in 256..8000'],
+      ['pvg_read_source', { path: 'a.md', document_hash: hash, cursor: 3 }, 'cursor must be a string'],
     ]) {
       reply = await server.call(name, args);
       assert(reply.result.isError === true && text(reply) === expected, `${expected}: ${JSON.stringify(reply)}`);

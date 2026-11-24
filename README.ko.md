@@ -80,9 +80,8 @@ semantic 검색은 [docs/operations.ko.md](docs/operations.ko.md)입니다.
 
 ### 2. Plugin 설치 (각 PC)
 
-현재 지원하는 에이전트 플랫폼은 Codex와 Claude Code이며, 아래 공용 plugin으로 연결합니다.
-[Custom GPT Actions](docs/gpt-actions.ko.md)는 대체 경로입니다. 그 밖의 client는 Gateway API와의 연동을
-직접 구현해야 하며, 자동 수집은 현재 제공되는 plugin에서만 됩니다.
+Codex와 Claude Code는 아래 공용 plugin으로 연결합니다. 그 밖의 client는 Gateway 연동이 필요하며,
+자동 수집은 제공되는 plugin에서 수행합니다.
 
 hook과 token helper에는 Node.js가 필요합니다.
 
@@ -114,7 +113,7 @@ printf '%s\n' "For this project, record the reason for deployment decisions." \
 raw note(승인된 지식 아님)를 저장하고 다시 찾습니다. 새 Vault에서는 `--view current`가 비어 있을 수 있습니다.
 Windows PowerShell 버전: [docs/setup.ko.md](docs/setup.ko.md).
 
-plugin에는 검색·메모용 `pvg_search`, `pvg_memo`를 제공하는 작은 MCP 서버도 들어 있습니다. 에이전트는 helper 명령 대신 이 도구를 호출합니다. 같은 token 설정을 읽으므로 installer는 여전히 필요하고, helper는 대체 수단으로 남습니다. Claude Code에서 도구 이름은 `mcp__plugin_persona-vault_pvg__pvg_search`, `mcp__plugin_persona-vault_pvg__pvg_memo`입니다. 승인 프롬프트 없이 검색하려면 `pvg_search`만 허용 목록에 넣고, `pvg_memo`는 사용자가 명시적으로 요청할 때만 저장하므로 계속 승인을 받도록 두세요.
+plugin의 공통 MCP 서버는 발췌 검색 `pvg_search`, 원문 목록 `pvg_sources`, 원문 페이지 읽기 `pvg_read_source`, 요청된 메모 저장 `pvg_memo`를 제공합니다. 같은 token 설정을 사용하므로 installer는 여전히 필요하고 helper는 대체 수단입니다. Claude Code의 도구 이름은 `mcp__plugin_persona-vault_pvg__`로 시작합니다. 필요하면 읽기 도구만 허용 목록에 넣고, 명시적인 요청이 필요한 `pvg_memo`는 계속 승인을 받도록 두세요. 검색 발췌만으로 전체 내용을 확인했다고 볼 수는 없습니다.
 
 선택적 로컬 큐레이션에는 `pvg_compact_read`, `pvg_compact_record`도 제공합니다. 같은 CLI 구현을 호출하며, 로컬 Git Vault와 MCP 호스트 PATH의 `pvg-wiki`가 필요합니다. 원문을 나눠 읽고 임시 계획에 판정을 기록할 뿐, 원문 삭제·승인·색인은 하지 않습니다. 설치와 사용법은 [Curator 프로토콜](docs/CURATOR.md)을 참고하세요.
 
@@ -186,7 +185,6 @@ embedding은 테스트 전용입니다. [docs/operations.ko.md](docs/operations.
 | [docs/hosting.ko.md](docs/hosting.ko.md) | 호스팅 선택지: Compose, Railway, Render, 기타 |
 | [docs/operations.ko.md](docs/operations.ko.md) | Vault 구조, semantic 검색, 원격 접근, 업그레이드, 백업 |
 | [Windows 안내](plugins/persona-vault/skills/persona-vault/references/windows.md) | Windows 명령 문법 |
-| [docs/gpt-actions.ko.md](docs/gpt-actions.ko.md) | plugin 대신 쓰는 Custom GPT Actions |
 | [docs/metadata.ko.md](docs/metadata.ko.md) | Markdown metadata 계약 |
 | [docs/CURATOR.md](docs/CURATOR.md) | Curator protocol (영문) |
 | [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md), [SECURITY.ko.md](SECURITY.ko.md) | 개발과 보안 정책 |
