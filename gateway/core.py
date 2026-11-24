@@ -1171,6 +1171,8 @@ def search_vault(
         "groups": groups,
         "context": rendered_context,
         "answer_state": answer_state,
+        "coverage": {"kind": "ranked_excerpts", "exhaustive": False,
+                     "candidate_documents": len(expanded), "returned_documents": len(results)},
         **({"analysis": analysis["summary"]} if analysis else {}),
     }
 
@@ -1567,6 +1569,7 @@ def result_item(
         key: payload.get(key)
         for key in (
             "document_id",
+            "document_hash",
             "path",
             "chunk_index",
             "title",
@@ -1713,8 +1716,9 @@ def render_rag_context(item: dict[str, Any]) -> str:
     excerpts = "\n\n".join(excerpts) if "passages" in item else item["snippet"]
     if item.get("passages_omitted"):
         excerpts += f"\n[Omitted {item['passages_omitted']} other excerpts from this document.]"
+    source = f"Source version: {item['document_hash']} (use source-read for full Markdown)\n" if item.get("document_hash") else ""
     return (
-        f"### {item['label']} | {item['path']}\n"
+        f"### {item['label']} | {item['path']}\n{source}"
         f"Metadata: {json.dumps(safety, ensure_ascii=False, sort_keys=True)}\n"
         f"{excerpts}"
     )

@@ -295,6 +295,46 @@ class AdminHttpTests(unittest.TestCase):
         upsert_agent(self.db, agent_id, token, scopes or ["vault-rag"], [])
         return token
 
+    def test_source_read_api_auth_version_paging_and_validation(self) -> None:
+        root = Settings.from_env().vault_dir / "source-api"
+        root.mkdir(parents=True, exist_ok=True)
+        file = root / "transcript.md"
+        text = "user: Keep conditions and corrections.\n" * 100
+        file.write_text(text, encoding="utf-8")
+        reader = self.seed_agent("source-reader")
+        writer = self.seed_agent("source-writer", ["conversation-log"])
+
+        def post(route, body, token=reader):
+            return self.client.send("POST", f"/gateway/v3/{route}", raw=json.dumps(body).encode(),
+                                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
+
+        try:
+            listing = post("sources", {"prefix": "source-api"})
+            self.assertEqual(listing.status, 200, listing.text)
+            row = listing.json()["sources"][0]
+            payload = {"path": row["path"], "document_hash": row["document_hash"], "max_characters": 256}
+            page = post("source-read", payload)
+            self.assertEqual(page.status, 200, page.text)
+            self.assertEqual(page.json()["text"], text[:256])
+            self.assertEqual(post("source-read", {**payload, "cursor": page.json()["next_cursor"]}).json()["span"][0], 256)
+            for route, body in (("sources", {}), ("source-read", payload)):
+                self.assertEqual(post(route, body, token="invalid").status, 401)
+                self.assertEqual(post(route, body, token=writer).status, 403)
+            self.assertEqual(post("sources", {"prefix": "../"}).status, 400)
+            self.assertEqual(post("sources", {"limit": 51}).status, 422)
+            self.assertEqual(post("source-read", {**payload, "path": "../private.md"}).status, 400)
+            self.assertEqual(post("source-read", {**payload, "path": "missing.md"}).status, 404)
+            self.assertEqual(post("source-read", {**payload, "document_hash": "bad"}).status, 422)
+            self.assertEqual(post("source-read", {**payload, "max_characters": 8001}).status, 422)
+            file.write_text("new content", encoding="utf-8")
+            changed = post("source-read", payload)
+            self.assertEqual(changed.status, 409)
+            self.assertIn("source_changed", changed.text)
+            self.assertIn("source-reading-v1", self.bearer(reader).json()["features"])
+        finally:
+            file.unlink(missing_ok=True)
+            root.rmdir()
+
     # -- login and cookies -------------------------------------------------------------------
 
     def test_non_ascii_password_logs_in_and_sets_plain_http_cookie(self) -> None:

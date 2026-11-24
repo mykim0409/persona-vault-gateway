@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, Field
 
 from . import onboarding
+from .sources import SourceChanged, list_sources, read_source
 from .core import (
     AGENT_ID_RE,
     ConversationConflictError,
@@ -144,8 +145,22 @@ class VaultSearch(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class SourceList(BaseModel):
+    prefix: str = Field(default="", max_length=1024)
+    cursor: str | None = Field(default=None, max_length=100)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class SourceRead(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    document_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cursor: str | None = Field(default=None, max_length=100)
+    max_characters: int = Field(default=6000, ge=256, le=8000)
+
+
 SEARCH_RESULT_FIELDS = (
     "document_id",
+    "document_hash",
     "path",
     "title",
     "snippet",
@@ -171,6 +186,7 @@ def search_response(result: dict[str, Any], view: str) -> dict[str, Any]:
             "index",
             "context",
             "answer_state",
+            "coverage",
         )
         if key in result
     }
@@ -196,6 +212,8 @@ def search_response(result: dict[str, Any], view: str) -> dict[str, Any]:
         )
         if response["index"].get("context_expansion", {}).get("limited"):
             response["context"] += "\n\n[Structural context is partial: one-hop preview limits reached.]"
+    if "coverage" in response:
+        response["coverage"] = {**response["coverage"], "returned_documents": len(response["results"])}
     return response
 
 
@@ -1405,6 +1423,7 @@ def capabilities() -> dict[str, Any]:
             "conversation-upsert-v3",
             "conversation-merge-v1",
             "working-agreement-v1",
+            "source-reading-v1",
         ],
         "plugin": {
             "name": PLUGIN_NAME,
@@ -1638,6 +1657,37 @@ def vault_search(
             **request_meta(request),
         )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def source_request(request: Request, agent: dict[str, Any], action: str, payload: dict) -> dict:
+    settings = Settings.from_env()
+    try:
+        result = (list_sources if action == "sources" else read_source)(settings, agent, **payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SourceChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="source_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="source_unavailable: retry without assuming complete coverage") from exc
+    audit(settings.db_path, action=action, route=request.url.path, status="ok",
+          agent_id=agent["agent_id"], **request_meta(request))
+    return result
+
+
+@app.post("/gateway/v3/sources")
+def vault_sources(payload: SourceList, request: Request, agent: dict[str, Any] = Depends(current_agent),
+                  _ready: None = Depends(require_vault_ready)) -> dict:
+    return source_request(request, agent, "sources", payload.model_dump())
+
+
+@app.post("/gateway/v3/source-read")
+def vault_source_read(payload: SourceRead, request: Request, agent: dict[str, Any] = Depends(current_agent),
+                      _ready: None = Depends(require_vault_ready)) -> dict:
+    return source_request(request, agent, "source-read", payload.model_dump())
 
 
 @app.get("/gateway/v3/health")

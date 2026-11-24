@@ -155,9 +155,28 @@ is allocated round-robin across documents. `limit` controls documents, not passa
 most 520 characters and mark `truncated` when shortened. `passages_omitted` and
 `index.passages_truncated` report omissions in JSON and context. REST responses, including context,
 are capped at 60,000 UTF-8 bytes; dropped documents are reported in `index.results_truncated`.
-Limits cannot clear source warnings. Narrow the query only when omitted detail is needed.
+Limits cannot clear source warnings. Narrow the query or read the source when omitted detail is needed.
 
-MCP, CLI and GPT Actions use the same retrieval contract. For curation, check source paths and
+### Source coverage
+
+`coverage.kind=ranked_excerpts` and `exhaustive=false` distinguish search from an inventory.
+`candidate_documents` counts retrieved candidates before display limits, not all relevant Vault documents.
+Each result's `document_hash` identifies the decoded Markdown version, also shown in text context.
+With the existing `vault-rag` scope, `POST /gateway/v3/sources` accepts `prefix`, `limit` (1..50), and optional
+`cursor`; it lists visible files without ranking. `POST /gateway/v3/source-read` accepts `path`, `document_hash`,
+optional `cursor`, and `max_characters` (256..8000). It returns original decoded Markdown, including metadata,
+roles and timestamps, with `span`, `total_characters`, and `next_cursor`. Spans use Unicode code points,
+start inclusive and end exclusive. No embeddings or index refreshes run on these paths.
+
+Reuse `next_cursor` unchanged; null ends the selected inventory or document. Listing hashes the current files;
+any change within its prefix invalidates continuation with HTTP 409. Read cursors bind the path and hash;
+a changed document also returns 409 and requires a fresh hash and restart. These are not immutable multi-file
+snapshots. An unreadable file fails the inventory rather than silently disappearing. The search exclusions
+(`.git`, `.obsidian`, `.tmp`, external symlinks) also apply here; write roots do not constrain existing read access.
+File lists are not content review, and full text coverage is not semantic completeness or truth. Directory dates
+and `observed_at` can describe an import, not every event inside it. Read only the scope needed for the task.
+
+The plugin's MCP tools and CLI use the same retrieval contract. For curation, check source paths and
 `expect_excerpts` rather than expecting an affirmative verdict. Old `supported` probes fail with
 rebaseline guidance; they are not silently rewritten or accepted as proof. A wrong-person question
 should retain the actual person's statement, not forbid the corrective document.

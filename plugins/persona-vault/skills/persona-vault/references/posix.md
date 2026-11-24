@@ -11,6 +11,16 @@ The helpers are the fallback when the `pvg_search` and `pvg_memo` MCP tools are 
 "$HOME/.local/bin/pvg-agent-memo" --help
 ```
 
+For source coverage when the matching MCP tools are unavailable, use the same installed client (JSON output):
+
+```bash
+node "${XDG_DATA_HOME:-$HOME/.local/share}/persona-vault-gateway/pvg-client.js" sources --prefix '30_Conversations/raw' --limit 20
+node "${XDG_DATA_HOME:-$HOME/.local/share}/persona-vault-gateway/pvg-client.js" source-read --path '<returned-path>' --document-hash '<returned-hash>'
+```
+
+Pass `--cursor '<next_cursor>'` for continuation, keeping the same prefix or path/hash. Omit it for the first page.
+Use the main skill's coverage rules; this is not permission to read every source for every request.
+
 Only after an explicit save request and the required source/subject search:
 
 ```bash
